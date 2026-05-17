@@ -9,5 +9,4 @@ import java.util.Map;
 public class BrandAuthConfig {
     private String brandId;
     private Map<AuthLevel, LevelRule> levelRules;
-    private TokenSharingPolicy sharingPolicy;
 }

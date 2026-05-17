@@ -5,6 +5,7 @@ import com.yourco.ivr.exception.UnknownBrandException;
 import org.springframework.stereotype.Component;
 
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
@@ -26,5 +27,13 @@ public class BrandRulesRegistry {
 
     public boolean contains(String brandId) {
         return configs.containsKey(brandId);
+    }
+
+    public void clear() {
+        configs.clear();
+    }
+
+    public Set<String> getAllBrandIds() {
+        return configs.keySet();
     }
 }

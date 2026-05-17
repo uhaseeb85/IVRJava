@@ -62,7 +62,7 @@ public class AuthEngine {
         session.getCollectedTokens().put(tokenType, tokenValue);
 
         // 2. Check cross-brand token shortcut before calling external API
-        boolean valid = crossBrandEvaluator.isAccepted(session, config, tokenType, tokenValue)
+        boolean valid = crossBrandEvaluator.isAccepted(session, tokenType)
             || validateExternally(session, tokenType, tokenValue);
 
         if (!valid) {
@@ -75,10 +75,6 @@ public class AuthEngine {
         crossBrandEvaluator.recordValidated(session, tokenType);
 
         // 4. Evaluate progress toward targetLevel
-        return evaluateProgress(session, config);
-    }
-
-        // 5. Evaluate progress toward targetLevel
         return evaluateProgress(session, config);
     }
 
