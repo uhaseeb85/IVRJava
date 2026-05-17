@@ -27,4 +27,7 @@ public class StartSessionRequest {
 
     @Schema(description = "Optional pre-validated tokens from another brand context")
     private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
+
+    @Schema(description = "Optional pre-collected token values submitted at session start (e.g. caller already entered account number before session began)")
+    private Map<TokenType, String> initialTokens;
 }

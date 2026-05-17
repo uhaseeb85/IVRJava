@@ -13,6 +13,7 @@ import com.yourco.ivr.repository.SessionRepository;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.UUID;
 
 @Service
@@ -46,6 +47,20 @@ public class SessionService {
         }
 
         sessionRepo.save(session);
+
+        // Process any initial tokens provided at session start
+        if (req.getInitialTokens() != null && !req.getInitialTokens().isEmpty()) {
+            for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
+                SessionResponse tokenResponse = engine.submitToken(
+                    session.getSessionId(), entry.getKey(), entry.getValue());
+                if (tokenResponse.getStatus() == SessionStatus.LOCKED) {
+                    return tokenResponse;
+                }
+            }
+            // Re-fetch session after token processing and re-evaluate
+            IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
+            return engine.evaluateProgress(updatedSession, config);
+        }
 
         // Evaluate immediately — cross-brand tokens may already satisfy some levels
         return engine.evaluateProgress(session, config);

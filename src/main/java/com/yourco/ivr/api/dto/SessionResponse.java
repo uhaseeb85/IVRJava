@@ -11,6 +11,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.Instant;
+import java.util.List;
 
 @Data
 @Builder
@@ -41,6 +42,9 @@ public class SessionResponse {
 
     @Schema(description = "If locked, when the lock expires")
     private Instant lockedUntil;
+
+    @Schema(description = "List of token types the client is allowed to submit at this step (includes the nextRequiredToken plus any backup alternatives)")
+    private List<TokenType> acceptedTokens;
 
     public static SessionResponse fromSession(IvrSession session) {
         return SessionResponse.builder()

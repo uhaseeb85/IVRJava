@@ -17,7 +17,10 @@
         {
           "pathIndex": 0,
           "description": "Account + PIN",
-          "requiredTokens": ["ACCOUNT_NUMBER", "PIN"]
+          "requiredTokens": ["ACCOUNT_NUMBER", "PIN"],
+          "backupTokens": {
+            "PIN": ["SSN_LAST4", "DATE_OF_BIRTH"]
+          }
         },
         {
           "pathIndex": 1,
@@ -33,7 +36,10 @@
         {
           "pathIndex": 0,
           "description": "Full factor",
-          "requiredTokens": ["ACCOUNT_NUMBER", "PIN", "OTP"]
+          "requiredTokens": ["ACCOUNT_NUMBER", "PIN", "OTP"],
+          "backupTokens": {
+            "PIN": ["SSN_LAST4", "DATE_OF_BIRTH"]
+          }
         },
         {
           "pathIndex": 1,

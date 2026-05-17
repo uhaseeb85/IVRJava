@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 1.1 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 1.2 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -95,6 +95,11 @@ public class TokenPath {
     private int pathIndex;
     private List<TokenType> requiredTokens;  // ordered: prompt in this order
     private String description;              // e.g. "PIN path"
+
+    // Optional: maps a required token to alternative tokens that can satisfy it.
+    // Example: PIN -> [SSN_LAST4, DATE_OF_BIRTH] means providing SSN_LAST4
+    // or DATE_OF_BIRTH counts as meeting the PIN requirement.
+    private Map<TokenType, List<TokenType>> backupTokens;
 }
 ```
 
@@ -645,6 +650,9 @@ public class StartSessionRequest {
     @NotNull   private AuthLevel targetLevel;
     // Optional: pre-validated tokens carried in from a prior brand context
     private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
+    // Optional: pre-collected token values submitted at session start
+    // (e.g. caller already entered account number before session began)
+    private Map<TokenType, String> initialTokens;
 }
 
 // TokenSubmitRequest.java
@@ -671,6 +679,7 @@ public class SessionResponse {
     private Integer         remainingAttempts;
     private String          prompt;             // human-readable IVR prompt text
     private Instant         lockedUntil;        // set when status=LOCKED
+    private List<TokenType> acceptedTokens;     // tokens the client may submit at this step
 }
 ```
 

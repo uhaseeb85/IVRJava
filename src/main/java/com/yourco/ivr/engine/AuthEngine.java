@@ -17,7 +17,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -59,20 +61,24 @@ public class AuthEngine {
         // Store the collected token value
         session.getCollectedTokens().put(tokenType, tokenValue);
 
-        // 2. Check cross-brand token shortcut before calling external API
-        boolean valid = crossBrandEvaluator.isAccepted(session, config, tokenType, tokenValue)
-            || validateExternally(session, tokenType, tokenValue);
+        // 2. Resolve backup token: if the submitted token matches a backup
+        //    for a required token, treat it as the required one
+        TokenType resolvedType = resolveBackupToken(session, config, tokenType);
+
+        // 3. Check cross-brand token shortcut before calling external API
+        boolean valid = crossBrandEvaluator.isAccepted(session, config, resolvedType, tokenValue)
+            || validateExternally(session, resolvedType, tokenValue);
 
         if (!valid) {
-            return handleFailure(session, config, tokenType);
+            return handleFailure(session, config, resolvedType);
         }
 
-        // 3. Mark validated and record cross-brand provenance
-        session.getValidatedTokens().add(tokenType);
-        session.getAttemptCounts().remove(tokenType);
-        crossBrandEvaluator.recordValidated(session, tokenType);
+        // 4. Mark validated and record cross-brand provenance
+        session.getValidatedTokens().add(resolvedType);
+        session.getAttemptCounts().remove(resolvedType);
+        crossBrandEvaluator.recordValidated(session, resolvedType);
 
-        // 4. Evaluate progress toward targetLevel
+        // 5. Evaluate progress toward targetLevel
         return evaluateProgress(session, config);
     }
 
@@ -116,12 +122,14 @@ public class AuthEngine {
 
         TokenPath activePath = rule.getPaths().get(activePathIdx);
 
-        // Check if active path is fully satisfied
+        // Check if active path is fully satisfied (including backup tokens)
         boolean pathComplete = true;
         for (TokenType required : activePath.getRequiredTokens()) {
             if (!session.getValidatedTokens().contains(required)) {
-                pathComplete = false;
-                break;
+                if (!isSatisfiedByBackup(session, activePath, required)) {
+                    pathComplete = false;
+                    break;
+                }
             }
         }
 
@@ -138,14 +146,8 @@ public class AuthEngine {
                 .build();
         }
 
-        // Find next missing token on this path
-        TokenType nextToken = null;
-        for (TokenType required : activePath.getRequiredTokens()) {
-            if (!session.getValidatedTokens().contains(required)) {
-                nextToken = required;
-                break;
-            }
-        }
+        // Find next missing token on this path (considering backups)
+        TokenType nextToken = findNextMissingToken(session, activePath);
 
         if (nextToken == null) {
             // Should not happen given pathComplete check above, but guard anyway
@@ -163,6 +165,9 @@ public class AuthEngine {
         session.setStatus(SessionStatus.COLLECTING);
         sessionRepo.save(session);
 
+        // Determine accepted tokens for this step (required token + any backups)
+        List<TokenType> acceptedTokens = buildAcceptedTokens(activePath, nextToken);
+
         String prompt = promptResolver.resolvePrompt(nextToken, activePath, rule.getMaxRetriesPerToken());
         return SessionResponse.builder()
             .sessionId(session.getSessionId())
@@ -171,6 +176,7 @@ public class AuthEngine {
             .targetLevel(session.getTargetLevel())
             .nextRequiredToken(nextToken)
             .remainingAttempts(rule.getMaxRetriesPerToken())
+            .acceptedTokens(acceptedTokens)
             .prompt(prompt)
             .build();
     }
@@ -214,19 +220,14 @@ public class AuthEngine {
             pruneTokensNotInPath(session, nextPath);
             sessionRepo.save(session);
 
-            TokenType nextToken = null;
-            for (TokenType required : nextPath.getRequiredTokens()) {
-                if (!session.getValidatedTokens().contains(required)) {
-                    nextToken = required;
-                    break;
-                }
-            }
+            TokenType nextToken = findNextMissingToken(session, nextPath);
 
             if (nextToken == null) {
                 // All tokens in fallback path already validated — re-evaluate
                 return evaluateProgress(session, config);
             }
 
+            List<TokenType> acceptedTokens = buildAcceptedTokens(nextPath, nextToken);
             String prompt = promptResolver.resolvePrompt(nextToken, nextPath, rule.getMaxRetriesPerToken());
             return SessionResponse.builder()
                 .sessionId(session.getSessionId())
@@ -235,6 +236,7 @@ public class AuthEngine {
                 .targetLevel(session.getTargetLevel())
                 .nextRequiredToken(nextToken)
                 .remainingAttempts(rule.getMaxRetriesPerToken())
+                .acceptedTokens(acceptedTokens)
                 .prompt("Fallback: " + prompt)
                 .build();
         }
@@ -248,7 +250,81 @@ public class AuthEngine {
 
     private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {
         Set<TokenType> keep = new HashSet<>(newPath.getRequiredTokens());
+        // Also keep any backup tokens that satisfy required tokens in the new path
+        if (newPath.getBackupTokens() != null) {
+            for (Map.Entry<TokenType, List<TokenType>> entry : newPath.getBackupTokens().entrySet()) {
+                keep.addAll(entry.getValue());
+            }
+        }
         session.getValidatedTokens().retainAll(keep);
+    }
+
+    /**
+     * Resolve the submitted token type to the actual required token type
+     * by checking backup token mappings.
+     */
+    private TokenType resolveBackupToken(IvrSession session, BrandAuthConfig config, TokenType submittedType) {
+        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        if (rule == null) return submittedType;
+
+        int activePathIdx = session.getActivePathIndexByLevel()
+            .getOrDefault(session.getTargetLevel(), 0);
+        if (activePathIdx >= rule.getPaths().size()) return submittedType;
+
+        TokenPath activePath = rule.getPaths().get(activePathIdx);
+        if (activePath.getBackupTokens() == null) return submittedType;
+
+        for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
+            if (entry.getValue().contains(submittedType)) {
+                return entry.getKey();
+            }
+        }
+        return submittedType;
+    }
+
+    /**
+     * Check if a required token is satisfied by a validated backup token.
+     */
+    private boolean isSatisfiedByBackup(IvrSession session, TokenPath activePath, TokenType required) {
+        if (activePath.getBackupTokens() == null) return false;
+        List<TokenType> backups = activePath.getBackupTokens().get(required);
+        if (backups == null) return false;
+        for (TokenType backup : backups) {
+            if (session.getValidatedTokens().contains(backup)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Find the next missing token on the active path, considering backup tokens.
+     */
+    private TokenType findNextMissingToken(IvrSession session, TokenPath activePath) {
+        for (TokenType required : activePath.getRequiredTokens()) {
+            if (!session.getValidatedTokens().contains(required)) {
+                if (!isSatisfiedByBackup(session, activePath, required)) {
+                    return required;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Build the list of accepted token types for the next step.
+     * Includes the required token plus any backup alternatives.
+     */
+    private List<TokenType> buildAcceptedTokens(TokenPath activePath, TokenType nextToken) {
+        List<TokenType> accepted = new ArrayList<>();
+        accepted.add(nextToken);
+        if (activePath.getBackupTokens() != null) {
+            List<TokenType> backups = activePath.getBackupTokens().get(nextToken);
+            if (backups != null) {
+                accepted.addAll(backups);
+            }
+        }
+        return accepted;
     }
 
     private boolean isLocked(IvrSession session) {

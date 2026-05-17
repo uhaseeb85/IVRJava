@@ -15,7 +15,10 @@
       "paths": [
         {
           "pathIndex": 0,
-          "requiredTokens": ["ACCOUNT_NUMBER", "DATE_OF_BIRTH"]
+          "requiredTokens": ["ACCOUNT_NUMBER", "DATE_OF_BIRTH"],
+          "backupTokens": {
+            "DATE_OF_BIRTH": ["SSN_LAST4", "CARD_LAST4"]
+          }
         },
         {
           "pathIndex": 1,
