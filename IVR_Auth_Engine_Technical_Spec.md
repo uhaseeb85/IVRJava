@@ -1,0 +1,1108 @@
+# IVR Token Authentication Engine
+### Multi-Brand | Progressive Auth Levels | Rule-Driven
+**Technical Implementation Document — Version 1.1 | Java 8 | Spring Boot 2.7.x**
+
+---
+
+## Table of Contents
+
+1. [System Overview](#1-system-overview)
+2. [Domain Model](#2-domain-model)
+3. [Brand Configuration (JSON)](#3-brand-configuration-json)
+4. [Auth Engine — Core Logic](#4-auth-engine--core-logic)
+5. [Token Validator Layer](#5-token-validator-layer)
+6. [Cross-Brand Token Sharing](#6-cross-brand-token-sharing)
+7. [REST API Specification](#7-rest-api-specification)
+8. [Session Service](#8-session-service)
+9. [Session Storage (SQLite)](#9-session-storage-sqlite)
+10. [Key Sequence Flows](#10-key-sequence-flows)
+11. [Exception Handling](#11-exception-handling)
+12. [Package Structure](#12-package-structure)
+13. [Implementation Checklist](#13-implementation-checklist)
+
+---
+
+## 1. System Overview
+
+This document specifies the design and implementation of a multi-brand IVR Token Authentication Engine built on Java 8 and Spring Boot 2.7.x. The system allows multiple brands to define independent authentication rule sets, share token validators, and optionally share validated tokens across sessions. Callers can target a specific auth level, upgrade mid-session, and reuse previously validated tokens.
+
+### 1.1 Core Capabilities
+
+- **Multi-brand rule isolation** — each brand carries its own level definitions, token paths, retry limits, and lockout policies
+- **Shared token validators** — a global registry of validators (OTP, PIN, account number, voice, etc.) any brand can reference
+- **Token sharing policies** — a brand can declare that tokens validated in another brand's context are reusable within the same session
+- **Progressive authentication** — a session starts at `NONE`, reaches targeted levels step by step, and can escalate further without restarting
+- **Declarative rules** — all behaviour is driven by JSON config; no logic changes require code deployments
+- **Path fallbacks** — when the primary token path fails (retries exhausted), the engine automatically switches to a configured fallback path
+
+### 1.2 High-Level Architecture
+
+| Layer | Responsibility |
+|---|---|
+| REST API | Accepts IVR platform calls; maps HTTP to session commands |
+| Auth Engine | Core state machine; evaluates rules, drives path progression |
+| Rules Registry | Loads and serves brand-specific `AuthRuleSet` objects from JSON on classpath |
+| Validator Registry | Maps token types to their `TokenValidator` implementations |
+| Session Store | SQLite-backed via JdbcTemplate; holds `IvrSession` with full token/level state |
+| External APIs | Called per-token by validators; results cached at session scope |
+
+---
+
+## 2. Domain Model
+
+### 2.1 Core Enums
+
+```java
+// TokenType.java
+public enum TokenType {
+    ACCOUNT_NUMBER, PIN, OTP, SSN_LAST4, VOICE_PRINT, DATE_OF_BIRTH, CARD_LAST4
+}
+
+// AuthLevel.java  — rank drives upgrade comparisons
+public enum AuthLevel {
+    NONE(0), BASIC(1), STANDARD(2), ELEVATED(3), ADMIN(4);
+
+    private final int rank;
+    AuthLevel(int rank) { this.rank = rank; }
+    public int getRank() { return rank; }
+    public boolean isHigherThan(AuthLevel other) { return this.rank > other.rank; }
+}
+```
+
+### 2.2 Brand Configuration Model
+
+```java
+// BrandAuthConfig.java
+@Data
+public class BrandAuthConfig {
+    private String brandId;                         // e.g. "BRAND_A"
+    private Map<AuthLevel, LevelRule> levelRules;   // one rule per level
+    private TokenSharingPolicy sharingPolicy;       // cross-brand token reuse
+}
+
+// LevelRule.java
+@Data
+public class LevelRule {
+    private AuthLevel level;
+    private List<TokenPath> paths;    // [0]=primary, [1..n]=fallbacks
+    private int maxRetriesPerToken;   // applies to each token in every path
+    private int lockoutSeconds;       // 0 = no lockout
+}
+
+// TokenPath.java
+@Data
+public class TokenPath {
+    private int pathIndex;
+    private List<TokenType> requiredTokens;  // ordered: prompt in this order
+    private String description;              // e.g. "PIN path"
+}
+```
+
+### 2.3 Token Sharing Policy
+
+```java
+// TokenSharingPolicy.java
+@Data
+public class TokenSharingPolicy {
+    // Tokens that are universally trusted across any brand context
+    private Set<TokenType> globallySharedTokens;
+
+    // Tokens accepted only when validated in specific other brands
+    // Key: TokenType, Value: set of brandIds whose validation is trusted
+    private Map<TokenType, Set<String>> conditionallySharedFrom;
+
+    // Optional: max age in seconds for a cross-brand token to still be trusted
+    private int crossBrandTokenMaxAgeSeconds;  // 0 = no TTL
+}
+```
+
+### 2.4 Session State
+
+```java
+// IvrSession.java
+@Data
+public class IvrSession {
+    private String sessionId;
+    private String brandId;
+    private String callerId;
+    private AuthLevel currentLevel;            // highest confirmed level
+    private AuthLevel targetLevel;             // what caller is trying to reach
+    private SessionStatus status;
+
+    // Tokens collected this session (raw values — encrypt at rest)
+    private Map<TokenType, String> collectedTokens;
+
+    // Tokens fully validated — key to auth decisions
+    private Set<TokenType> validatedTokens;
+
+    // Tracks per-token attempt counts within the active path
+    private Map<TokenType, Integer> attemptCounts;
+
+    // Active path index per level (allows independent path tracking)
+    private Map<AuthLevel, Integer> activePathIndexByLevel;
+
+    // Cross-brand token provenance: token → (brandId, validatedAt timestamp)
+    private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
+
+    private Instant lockedUntil;
+    private Instant createdAt;
+    private Instant lastActivityAt;
+}
+
+public enum SessionStatus {
+    COLLECTING, VALIDATING, AUTHENTICATED, LOCKED, EXPIRED, FAILED
+}
+
+@Data @AllArgsConstructor
+public class CrossBrandTokenRecord {
+    private String sourceBrandId;
+    private Instant validatedAt;
+}
+```
+
+---
+
+## 3. Brand Configuration (JSON)
+
+Each brand's rule set lives in its own JSON file loaded at startup from the classpath (`resources/brands/`). Brand IDs must match exactly what the IVR platform sends in session start requests.
+
+### 3.1 Brand A — Full Example
+
+```json
+{
+  "brandId": "BRAND_A",
+  "levelRules": {
+    "BASIC": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "description": "Account lookup",
+          "requiredTokens": ["ACCOUNT_NUMBER"]
+        }
+      ],
+      "maxRetriesPerToken": 3,
+      "lockoutSeconds": 0
+    },
+    "STANDARD": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "description": "Account + PIN",
+          "requiredTokens": ["ACCOUNT_NUMBER", "PIN"]
+        },
+        {
+          "pathIndex": 1,
+          "description": "Account + OTP fallback",
+          "requiredTokens": ["ACCOUNT_NUMBER", "OTP"]
+        }
+      ],
+      "maxRetriesPerToken": 3,
+      "lockoutSeconds": 300
+    },
+    "ELEVATED": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "description": "Full factor",
+          "requiredTokens": ["ACCOUNT_NUMBER", "PIN", "OTP"]
+        },
+        {
+          "pathIndex": 1,
+          "description": "Voice biometric fallback",
+          "requiredTokens": ["ACCOUNT_NUMBER", "VOICE_PRINT", "OTP"]
+        }
+      ],
+      "maxRetriesPerToken": 2,
+      "lockoutSeconds": 600
+    }
+  },
+  "sharingPolicy": {
+    "globallySharedTokens": ["ACCOUNT_NUMBER"],
+    "conditionallySharedFrom": {
+      "OTP": ["BRAND_B", "BRAND_C"],
+      "PIN": ["BRAND_B"]
+    },
+    "crossBrandTokenMaxAgeSeconds": 1800
+  }
+}
+```
+
+### 3.2 Brand B — Simpler Config
+
+```json
+{
+  "brandId": "BRAND_B",
+  "levelRules": {
+    "BASIC": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "requiredTokens": ["ACCOUNT_NUMBER"]
+        }
+      ],
+      "maxRetriesPerToken": 3,
+      "lockoutSeconds": 0
+    },
+    "STANDARD": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "requiredTokens": ["ACCOUNT_NUMBER", "DATE_OF_BIRTH"]
+        },
+        {
+          "pathIndex": 1,
+          "requiredTokens": ["ACCOUNT_NUMBER", "CARD_LAST4"]
+        }
+      ],
+      "maxRetriesPerToken": 2,
+      "lockoutSeconds": 300
+    }
+  },
+  "sharingPolicy": {
+    "globallySharedTokens": ["ACCOUNT_NUMBER"],
+    "conditionallySharedFrom": {},
+    "crossBrandTokenMaxAgeSeconds": 0
+  }
+}
+```
+
+---
+
+## 4. Auth Engine — Core Logic
+
+The `AuthEngine` is the heart of the system. It is stateless itself; all state is passed via `IvrSession`. This enables horizontal scaling with no affinity requirements.
+
+### 4.1 AuthEngine.java
+
+```java
+@Service
+@RequiredArgsConstructor
+public class AuthEngine {
+
+    private final BrandRulesRegistry     rulesRegistry;
+    private final TokenValidatorRegistry validatorRegistry;
+    private final SessionRepository      sessionRepo;
+    private final CrossBrandTokenEvaluator crossBrandEvaluator;
+
+    /** Called when the IVR platform submits a token value. */
+    public SessionResponse submitToken(String sessionId,
+                                       TokenType tokenType,
+                                       String tokenValue) {
+        IvrSession session = sessionRepo.getOrThrow(sessionId);
+        BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+
+        // 1. Lockout guard
+        if (isLocked(session)) return buildLockedResponse(session);
+
+        // 2. Check cross-brand token shortcut before calling external API
+        boolean valid = crossBrandEvaluator.isAccepted(session, config, tokenType, tokenValue)
+            || validateExternally(session, tokenType, tokenValue);
+
+        if (!valid) return handleFailure(session, config, tokenType);
+
+        // 3. Mark validated and record cross-brand provenance
+        session.getValidatedTokens().add(tokenType);
+        session.getAttemptCounts().remove(tokenType);  // reset on success
+        crossBrandEvaluator.recordValidated(session, tokenType);
+
+        // 4. Evaluate progress toward targetLevel
+        return evaluateProgress(session, config);
+    }
+
+    /** Request to reach a higher auth level (mid-session upgrade). */
+    public SessionResponse escalate(String sessionId, AuthLevel newTarget) {
+        IvrSession session = sessionRepo.getOrThrow(sessionId);
+        AuthLevel current = session.getCurrentLevel();
+
+        if (!newTarget.isHigherThan(current))
+            throw new IllegalArgumentException("Target must exceed current level");
+
+        session.setTargetLevel(newTarget);
+        sessionRepo.save(session);
+
+        // Re-evaluate immediately — existing tokens may already satisfy the new level
+        BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+        return evaluateProgress(session, config);
+    }
+
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    SessionResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
+        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        int activePathIdx = session.getActivePathIndexByLevel()
+            .getOrDefault(session.getTargetLevel(), 0);
+        TokenPath activePath = rule.getPaths().get(activePathIdx);
+
+        // Check if active path is fully satisfied
+        boolean pathComplete = activePath.getRequiredTokens().stream()
+            .allMatch(t -> session.getValidatedTokens().contains(t));
+
+        if (pathComplete) {
+            session.setCurrentLevel(session.getTargetLevel());
+            session.setStatus(SessionStatus.AUTHENTICATED);
+            sessionRepo.save(session);
+            return SessionResponse.authenticated(session);
+        }
+
+        // Find next missing token on this path
+        TokenType nextToken = activePath.getRequiredTokens().stream()
+            .filter(t -> !session.getValidatedTokens().contains(t))
+            .findFirst().orElseThrow();
+
+        session.setStatus(SessionStatus.COLLECTING);
+        sessionRepo.save(session);
+        return SessionResponse.collect(session, nextToken, rule.getMaxRetriesPerToken());
+    }
+
+    private SessionResponse handleFailure(IvrSession session,
+                                           BrandAuthConfig config,
+                                           TokenType tokenType) {
+        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        Map<TokenType, Integer> counts = session.getAttemptCounts();
+        int attempts = counts.merge(tokenType, 1, Integer::sum);
+        int remaining = rule.getMaxRetriesPerToken() - attempts;
+
+        if (remaining > 0) {
+            sessionRepo.save(session);
+            return SessionResponse.retry(session, tokenType, remaining);
+        }
+
+        // Try advancing to next fallback path
+        int currentPathIdx = session.getActivePathIndexByLevel()
+            .getOrDefault(session.getTargetLevel(), 0);
+        int nextPathIdx = currentPathIdx + 1;
+
+        if (nextPathIdx < rule.getPaths().size()) {
+            session.getActivePathIndexByLevel().put(session.getTargetLevel(), nextPathIdx);
+            session.getAttemptCounts().clear();
+            pruneTokensNotInPath(session, rule.getPaths().get(nextPathIdx));
+            sessionRepo.save(session);
+
+            TokenType nextToken = rule.getPaths().get(nextPathIdx)
+                .getRequiredTokens().stream()
+                .filter(t -> !session.getValidatedTokens().contains(t))
+                .findFirst().orElseThrow();
+            return SessionResponse.fallback(session, nextToken);
+        }
+
+        // All paths exhausted → lock
+        session.setStatus(SessionStatus.LOCKED);
+        session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
+        sessionRepo.save(session);
+        return SessionResponse.locked(session);
+    }
+
+    private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {
+        Set<TokenType> keep = new HashSet<>(newPath.getRequiredTokens());
+        session.getValidatedTokens().retainAll(keep);
+    }
+
+    private boolean isLocked(IvrSession session) {
+        return session.getStatus() == SessionStatus.LOCKED
+            && session.getLockedUntil() != null
+            && Instant.now().isBefore(session.getLockedUntil());
+    }
+
+    private boolean validateExternally(IvrSession session,
+                                        TokenType tokenType,
+                                        String tokenValue) {
+        TokenValidator validator = validatorRegistry.resolve(session.getBrandId(), tokenType);
+        TokenValidationContext ctx = new TokenValidationContext(
+            tokenType, tokenValue, session.getCallerId(),
+            session.getCollectedTokens(), session.getBrandId()
+        );
+        return validator.validate(ctx).isValid();
+    }
+}
+```
+
+---
+
+## 5. Token Validator Layer
+
+Token validators are stateless Spring beans. All validators implement a common interface. The `TokenValidatorRegistry` resolves the correct validator for each token type. Brand-specific overrides can be registered to shadow the default.
+
+### 5.1 TokenValidator Interface
+
+```java
+public interface TokenValidator {
+    TokenType supportedType();
+    ValidationResult validate(TokenValidationContext ctx);
+}
+
+@Value
+public class TokenValidationContext {
+    TokenType tokenType;
+    String tokenValue;
+    String callerId;
+    Map<TokenType, String> sessionTokens;   // other collected tokens as context
+    String brandId;
+}
+
+@Value
+public class ValidationResult {
+    boolean valid;
+    ValidationErrorCode errorCode;  // null if valid
+
+    public static ValidationResult ok() {
+        return new ValidationResult(true, null);
+    }
+    public static ValidationResult fail(ValidationErrorCode code) {
+        return new ValidationResult(false, code);
+    }
+}
+
+public enum ValidationErrorCode {
+    INVALID, EXPIRED, NOT_FOUND, RATE_LIMITED, EXTERNAL_ERROR
+}
+```
+
+### 5.2 Sample Validator — OTP
+
+```java
+@Component
+public class OtpTokenValidator implements TokenValidator {
+
+    private final OtpServiceClient otpClient;
+
+    @Override
+    public TokenType supportedType() { return TokenType.OTP; }
+
+    @Override
+    public ValidationResult validate(TokenValidationContext ctx) {
+        try {
+            OtpVerifyResponse resp = otpClient.verify(
+                ctx.getCallerId(),
+                ctx.getTokenValue(),
+                ctx.getBrandId()
+            );
+            return resp.isValid()
+                ? ValidationResult.ok()
+                : ValidationResult.fail(resp.isExpired() ? EXPIRED : INVALID);
+        } catch (ExternalApiException e) {
+            log.error("OTP validation error", e);
+            return ValidationResult.fail(EXTERNAL_ERROR);  // fail closed
+        }
+    }
+}
+```
+
+### 5.3 TokenValidatorRegistry
+
+```java
+@Component
+public class TokenValidatorRegistry {
+
+    // Default validators keyed by token type
+    private final Map<TokenType, TokenValidator> defaults;
+
+    // Brand-specific overrides: brandId -> (tokenType -> validator)
+    private final Map<String, Map<TokenType, TokenValidator>> brandOverrides;
+
+    @Autowired
+    public TokenValidatorRegistry(List<TokenValidator> validators,
+                                  List<BrandTokenValidatorOverride> overrides) {
+        this.defaults = validators.stream()
+            .collect(toMap(TokenValidator::supportedType, v -> v));
+        this.brandOverrides = overrides.stream()
+            .collect(groupingBy(BrandTokenValidatorOverride::getBrandId,
+                toMap(o -> o.getValidator().supportedType(),
+                      BrandTokenValidatorOverride::getValidator)));
+    }
+
+    public TokenValidator resolve(String brandId, TokenType type) {
+        return Optional.ofNullable(brandOverrides.get(brandId))
+            .map(m -> m.get(type))
+            .orElseGet(() -> Optional.ofNullable(defaults.get(type))
+                .orElseThrow(() -> new UnsupportedTokenTypeException(type)));
+    }
+}
+```
+
+---
+
+## 6. Cross-Brand Token Sharing
+
+The sharing policy allows a brand to trust tokens validated in another brand's context within the same session. This is resolved before making any external API call — avoiding duplicate validation round-trips.
+
+### 6.1 CrossBrandTokenEvaluator.java
+
+```java
+@Component
+@RequiredArgsConstructor
+public class CrossBrandTokenEvaluator {
+
+    public boolean isAccepted(IvrSession session,
+                              BrandAuthConfig config,
+                              TokenType tokenType,
+                              String tokenValue) {
+        TokenSharingPolicy policy = config.getSharingPolicy();
+        if (policy == null) return false;
+
+        // 1. Globally shared — trusted from any brand
+        if (policy.getGloballySharedTokens().contains(tokenType)) {
+            return session.getValidatedTokens().contains(tokenType);
+        }
+
+        // 2. Conditionally shared — trust only from listed brands
+        Set<String> trustedBrands = policy.getConditionallySharedFrom()
+            .getOrDefault(tokenType, Set.of());
+
+        CrossBrandTokenRecord record = session.getCrossBrandTokens().get(tokenType);
+        if (record == null) return false;
+        if (!trustedBrands.contains(record.getSourceBrandId())) return false;
+
+        // 3. TTL check
+        int maxAge = policy.getCrossBrandTokenMaxAgeSeconds();
+        if (maxAge > 0) {
+            Instant expiry = record.getValidatedAt().plusSeconds(maxAge);
+            if (Instant.now().isAfter(expiry)) return false;
+        }
+
+        return true;
+    }
+
+    /** Record a token validated in this session for potential reuse by other brands. */
+    public void recordValidated(IvrSession session, TokenType type) {
+        session.getCrossBrandTokens().put(type,
+            new CrossBrandTokenRecord(session.getBrandId(), Instant.now()));
+    }
+}
+```
+
+> **Design Note — Token Value vs Token Presence**
+> Cross-brand sharing checks presence in `validatedTokens`, not the raw value. If a different value is submitted for an already-validated globally-shared token, it is re-validated externally. This prevents a caller from submitting a wrong value and still getting credit via the sharing shortcut.
+
+---
+
+## 7. REST API Specification
+
+### 7.1 Endpoints
+
+| Method + Path | Purpose | Notes |
+|---|---|---|
+| `POST /ivr/session/start` | Create session, set brand + target | Returns first token prompt |
+| `POST /ivr/session/{id}/token` | Submit a collected token | Core loop endpoint |
+| `POST /ivr/session/{id}/escalate` | Request higher auth level | Incremental — reuses existing tokens |
+| `GET /ivr/session/{id}/status` | Poll current session state | For async IVR flows |
+| `DELETE /ivr/session/{id}` | End session (hangup) | Cleanup only |
+
+### 7.2 SessionController.java
+
+```java
+@RestController
+@RequestMapping("/ivr/session")
+@RequiredArgsConstructor
+public class SessionController {
+
+    private final SessionService sessionService;
+
+    @PostMapping("/start")
+    public ResponseEntity<SessionResponse> start(
+            @RequestBody @Valid StartSessionRequest req) {
+        return ResponseEntity.ok(sessionService.start(req));
+    }
+
+    @PostMapping("/{sessionId}/token")
+    public ResponseEntity<SessionResponse> submitToken(
+            @PathVariable String sessionId,
+            @RequestBody @Valid TokenSubmitRequest req) {
+        return ResponseEntity.ok(
+            sessionService.submitToken(sessionId, req.getTokenType(), req.getTokenValue())
+        );
+    }
+
+    @PostMapping("/{sessionId}/escalate")
+    public ResponseEntity<SessionResponse> escalate(
+            @PathVariable String sessionId,
+            @RequestBody @Valid EscalateRequest req) {
+        return ResponseEntity.ok(
+            sessionService.escalate(sessionId, req.getTargetLevel())
+        );
+    }
+
+    @GetMapping("/{sessionId}/status")
+    public ResponseEntity<SessionResponse> status(@PathVariable String sessionId) {
+        return ResponseEntity.ok(sessionService.getStatus(sessionId));
+    }
+
+    @DeleteMapping("/{sessionId}")
+    public ResponseEntity<Void> end(@PathVariable String sessionId) {
+        sessionService.end(sessionId);
+        return ResponseEntity.noContent().build();
+    }
+}
+```
+
+### 7.3 Request / Response DTOs
+
+```java
+// StartSessionRequest.java
+@Data
+public class StartSessionRequest {
+    @NotBlank  private String brandId;
+    @NotBlank  private String callerId;
+    @NotNull   private AuthLevel targetLevel;
+    // Optional: pre-validated tokens carried in from a prior brand context
+    private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
+}
+
+// TokenSubmitRequest.java
+@Data
+public class TokenSubmitRequest {
+    @NotNull   private TokenType tokenType;
+    @NotBlank  private String tokenValue;
+}
+
+// EscalateRequest.java
+@Data
+public class EscalateRequest {
+    @NotNull   private AuthLevel targetLevel;
+}
+
+// SessionResponse.java
+@Data @Builder
+public class SessionResponse {
+    private String          sessionId;
+    private SessionStatus   status;
+    private AuthLevel       currentLevel;
+    private AuthLevel       targetLevel;
+    private TokenType       nextRequiredToken;  // null when AUTHENTICATED or LOCKED
+    private Integer         remainingAttempts;
+    private String          prompt;             // human-readable IVR prompt text
+    private Instant         lockedUntil;        // set when status=LOCKED
+}
+```
+
+---
+
+## 8. Session Service
+
+```java
+@Service
+@RequiredArgsConstructor
+public class SessionService {
+
+    private final AuthEngine         engine;
+    private final SessionRepository  sessionRepo;
+    private final BrandRulesRegistry rulesRegistry;
+
+    public SessionResponse start(StartSessionRequest req) {
+        BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
+        if (config == null)
+            throw new UnknownBrandException(req.getBrandId());
+
+        IvrSession session = IvrSession.builder()
+            .sessionId(UUID.randomUUID().toString())
+            .brandId(req.getBrandId())
+            .callerId(req.getCallerId())
+            .currentLevel(AuthLevel.NONE)
+            .targetLevel(req.getTargetLevel())
+            .status(SessionStatus.COLLECTING)
+            .collectedTokens(new EnumMap<>(TokenType.class))
+            .validatedTokens(EnumSet.noneOf(TokenType.class))
+            .attemptCounts(new EnumMap<>(TokenType.class))
+            .activePathIndexByLevel(new EnumMap<>(AuthLevel.class))
+            .crossBrandTokens(Optional.ofNullable(req.getCrossBrandTokens())
+                .orElse(new EnumMap<>(TokenType.class)))
+            .createdAt(Instant.now())
+            .lastActivityAt(Instant.now())
+            .build();
+
+        sessionRepo.save(session);
+
+        // Evaluate immediately — cross-brand tokens may already satisfy some levels
+        return engine.evaluateProgress(session, config);
+    }
+
+    public SessionResponse submitToken(String id, TokenType type, String value) {
+        return engine.submitToken(id, type, value);
+    }
+
+    public SessionResponse escalate(String id, AuthLevel target) {
+        return engine.escalate(id, target);
+    }
+
+    public SessionResponse getStatus(String id) {
+        IvrSession session = sessionRepo.getOrThrow(id);
+        return SessionResponse.fromSession(session);
+    }
+
+    public void end(String id) {
+        sessionRepo.delete(id);
+    }
+}
+```
+
+---
+
+## 9. Session Storage (SQLite)
+
+Sessions are stored in a SQLite database accessed via `JdbcTemplate`. The `IvrSession` object is serialized to JSON for complex fields (maps, sets, nested objects) using Jackson. A `@Scheduled` cleanup job removes expired sessions.
+
+### 9.1 Database Schema
+
+```sql
+CREATE TABLE IF NOT EXISTS ivr_session (
+    session_id              TEXT PRIMARY KEY,
+    brand_id                TEXT NOT NULL,
+    caller_id               TEXT NOT NULL,
+    current_level           TEXT NOT NULL DEFAULT 'NONE',
+    target_level            TEXT NOT NULL,
+    status                  TEXT NOT NULL DEFAULT 'COLLECTING',
+    collected_tokens        TEXT,       -- JSON: Map<TokenType, String>
+    validated_tokens        TEXT,       -- JSON: Set<TokenType>
+    attempt_counts          TEXT,       -- JSON: Map<TokenType, Integer>
+    active_path_index       TEXT,       -- JSON: Map<AuthLevel, Integer>
+    cross_brand_tokens      TEXT,       -- JSON: Map<TokenType, CrossBrandTokenRecord>
+    locked_until            TEXT,       -- ISO-8601 timestamp
+    created_at              TEXT NOT NULL,
+    last_activity_at        TEXT NOT NULL
+);
+```
+
+### 9.2 SQLiteSessionRepository
+
+```java
+@Repository
+@RequiredArgsConstructor
+public class SqliteSessionRepository implements SessionRepository {
+
+    private static final Duration TTL = Duration.ofMinutes(30);
+
+    private final JdbcTemplate jdbc;
+    private final ObjectMapper mapper;
+
+    @Override
+    public void save(IvrSession session) {
+        session.setLastActivityAt(Instant.now());
+        String sql = "INSERT OR REPLACE INTO ivr_session " +
+            "(session_id, brand_id, caller_id, current_level, target_level, status, " +
+            "collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
+            "cross_brand_tokens, locked_until, created_at, last_activity_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        jdbc.update(sql,
+            session.getSessionId(),
+            session.getBrandId(),
+            session.getCallerId(),
+            session.getCurrentLevel().name(),
+            session.getTargetLevel().name(),
+            session.getStatus().name(),
+            toJson(session.getCollectedTokens()),
+            toJson(session.getValidatedTokens()),
+            toJson(session.getAttemptCounts()),
+            toJson(session.getActivePathIndexByLevel()),
+            toJson(session.getCrossBrandTokens()),
+            toIso(session.getLockedUntil()),
+            toIso(session.getCreatedAt()),
+            toIso(session.getLastActivityAt())
+        );
+    }
+
+    @Override
+    public IvrSession getOrThrow(String sessionId) {
+        String sql = "SELECT * FROM ivr_session WHERE session_id = ?";
+        try {
+            return jdbc.queryForObject(sql, new Object[]{sessionId}, this::mapRow);
+        } catch (EmptyResultDataAccessException e) {
+            throw new SessionNotFoundException(sessionId);
+        }
+    }
+
+    @Override
+    public void delete(String sessionId) {
+        jdbc.update("DELETE FROM ivr_session WHERE session_id = ?", sessionId);
+    }
+
+    /** Scheduled cleanup of expired sessions. */
+    @Scheduled(fixedRateString = "${ivr.session.cleanup.interval:60000}")
+    public void cleanupExpired() {
+        Instant cutoff = Instant.now().minus(TTL);
+        jdbc.update("DELETE FROM ivr_session WHERE last_activity_at < ?", toIso(cutoff));
+    }
+
+    // ── Mapping helpers ──────────────────────────────────────────────────────
+
+    private IvrSession mapRow(ResultSet rs, int rowNum) throws SQLException {
+        IvrSession s = new IvrSession();
+        s.setSessionId(rs.getString("session_id"));
+        s.setBrandId(rs.getString("brand_id"));
+        s.setCallerId(rs.getString("caller_id"));
+        s.setCurrentLevel(AuthLevel.valueOf(rs.getString("current_level")));
+        s.setTargetLevel(AuthLevel.valueOf(rs.getString("target_level")));
+        s.setStatus(SessionStatus.valueOf(rs.getString("status")));
+        s.setCollectedTokens(fromJsonMap(rs.getString("collected_tokens"), TokenType.class, String.class));
+        s.setValidatedTokens(fromJsonSet(rs.getString("validated_tokens"), TokenType.class));
+        s.setAttemptCounts(fromJsonMap(rs.getString("attempt_counts"), TokenType.class, Integer.class));
+        s.setActivePathIndexByLevel(fromJsonMap(rs.getString("active_path_index"), AuthLevel.class, Integer.class));
+        s.setCrossBrandTokens(fromJsonCrossBrand(rs.getString("cross_brand_tokens")));
+        s.setLockedUntil(fromIso(rs.getString("locked_until")));
+        s.setCreatedAt(fromIso(rs.getString("created_at")));
+        s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));
+        return s;
+    }
+
+    private String toJson(Object value) {
+        if (value == null) return null;
+        try { return mapper.writeValueAsString(value); }
+        catch (JsonProcessingException e) { throw new SessionSerializationException(e); }
+    }
+
+    private <K, V> Map<K, V> fromJsonMap(String json, Class<K> keyType, Class<V> valueType) {
+        if (json == null || json.isEmpty()) return new EnumMap<>((Class<K>)keyType);
+        try {
+            return mapper.readValue(json,
+                mapper.getTypeFactory().constructMapType(EnumMap.class, keyType, valueType));
+        } catch (IOException e) { throw new SessionSerializationException(e); }
+    }
+
+    private <T> Set<T> fromJsonSet(String json, Class<T> elementType) {
+        if (json == null || json.isEmpty()) return EnumSet.noneOf((Class<T>)elementType);
+        try {
+            return mapper.readValue(json,
+                mapper.getTypeFactory().constructCollectionType(EnumSet.class, elementType));
+        } catch (IOException e) { throw new SessionSerializationException(e); }
+    }
+
+    private Map<TokenType, CrossBrandTokenRecord> fromJsonCrossBrand(String json) {
+        if (json == null || json.isEmpty()) return new EnumMap<>(TokenType.class);
+        try {
+            return mapper.readValue(json,
+                mapper.getTypeFactory().constructMapType(EnumMap.class,
+                    TokenType.class, CrossBrandTokenRecord.class));
+        } catch (IOException e) { throw new SessionSerializationException(e); }
+    }
+
+    private String toIso(Instant instant) {
+        return instant != null ? instant.toString() : null;
+    }
+
+    private Instant fromIso(String iso) {
+        return iso != null ? Instant.parse(iso) : null;
+    }
+}
+```
+
+---
+
+## 10. Key Sequence Flows
+
+### 10.1 Normal Auth Flow (Single Brand, No Fallback)
+
+```
+IVR Platform          SessionController     AuthEngine             ExternalAPI
+     |                       |                   |                     |
+     |  POST /session/start  |                   |                     |
+     |---------------------->|                   |                     |
+     |                       |  start(req)       |                     |
+     |                       |------------------>|                     |
+     |  {nextToken:ACCOUNT}  |  evaluateProgress |                     |
+     |<----------------------|<------------------|                     |
+     |                       |                   |                     |
+     |  POST /token ACCOUNT  |                   |                     |
+     |---------------------->|                   |                     |
+     |                       |  submitToken      |  validate(ACCOUNT)  |
+     |                       |------------------>|------------------->|
+     |                       |                   |  {valid: true}      |
+     |                       |                   |<--------------------|
+     |  {nextToken:PIN}      |  evaluateProgress |                     |
+     |<----------------------|<------------------|                     |
+     |                       |                   |                     |
+     |  POST /token PIN      |                   |                     |
+     |---------------------->|                   |  validate(PIN)      |
+     |                       |                   |------------------->|
+     |                       |                   |  {valid: true}      |
+     |                       |                   |<--------------------|
+     |  {AUTHENTICATED}      |                   |                     |
+     |<----------------------|                   |                     |
+```
+
+### 10.2 Fallback Path Triggered
+
+```
+Session targets STANDARD, primary path = [ACCOUNT_NUMBER, PIN]
+PIN fails maxRetries (3 attempts) → engine switches to fallback path [ACCOUNT_NUMBER, OTP]
+ACCOUNT_NUMBER is already validated and present in both paths → retained, not re-prompted
+Engine prompts only for OTP
+
+State delta:
+  activePathIndexByLevel[STANDARD]: 0 → 1
+  attemptCounts: cleared
+  validatedTokens: {ACCOUNT_NUMBER} retained (in new path), {PIN} removed
+```
+
+### 10.3 Mid-Session Escalation Flow
+
+```
+Session is AUTHENTICATED at STANDARD (validatedTokens: {ACCOUNT_NUMBER, PIN})
+IVR platform calls POST /session/{id}/escalate { targetLevel: ELEVATED }
+
+Engine logic:
+  1. Sets targetLevel = ELEVATED
+  2. Calls evaluateProgress immediately
+  3. ELEVATED path[0] = [ACCOUNT_NUMBER, PIN, OTP]
+     ACCOUNT_NUMBER validated ✓   PIN validated ✓   OTP missing
+  4. Returns { nextRequiredToken: OTP }  — only OTP is prompted
+
+Caller enters OTP → validated → status = AUTHENTICATED, currentLevel = ELEVATED
+```
+
+### 10.4 Cross-Brand Token Reuse
+
+```
+Brand A session already validated OTP.
+crossBrandTokens records: { OTP → { sourceBrandId: "BRAND_A", validatedAt: T } }
+
+New session starts for Brand B, passes crossBrandTokens in the start request.
+
+Brand B sharingPolicy does NOT list OTP as conditionallySharedFrom Brand A:
+  → CrossBrandTokenEvaluator returns false
+  → OTP validator called externally as normal
+
+Brand C sharingPolicy lists OTP as conditionallySharedFrom: [BRAND_A], TTL = 1800s:
+  → CrossBrandTokenEvaluator checks TTL, returns true
+  → OTP marked validated — no external API call made
+```
+
+---
+
+## 11. Exception Handling
+
+```java
+@RestControllerAdvice
+public class IvrExceptionHandler {
+
+    @ExceptionHandler(SessionNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNotFound(SessionNotFoundException e) {
+        return ResponseEntity.status(404)
+            .body(new ErrorResponse("SESSION_NOT_FOUND", e.getMessage()));
+    }
+
+    @ExceptionHandler(SessionLockedException.class)
+    public ResponseEntity<ErrorResponse> handleLocked(SessionLockedException e) {
+        return ResponseEntity.status(423)
+            .body(new ErrorResponse("SESSION_LOCKED", e.getMessage()));
+    }
+
+    @ExceptionHandler(UnknownBrandException.class)
+    public ResponseEntity<ErrorResponse> handleBrand(UnknownBrandException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("UNKNOWN_BRAND", e.getMessage()));
+    }
+
+    @ExceptionHandler(UnsupportedTokenTypeException.class)
+    public ResponseEntity<ErrorResponse> handleToken(UnsupportedTokenTypeException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("UNSUPPORTED_TOKEN", e.getMessage()));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegal(IllegalArgumentException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("INVALID_REQUEST", e.getMessage()));
+    }
+}
+```
+
+---
+
+## 12. Package Structure
+
+```
+com.yourco.ivr
+├── api
+│   ├── SessionController.java
+│   └── dto/
+│       ├── StartSessionRequest.java
+│       ├── TokenSubmitRequest.java
+│       ├── EscalateRequest.java
+│       └── SessionResponse.java
+├── domain
+│   ├── AuthLevel.java
+│   ├── TokenType.java
+│   ├── IvrSession.java
+│   ├── SessionStatus.java
+│   ├── CrossBrandTokenRecord.java
+│   └── config/
+│       ├── BrandAuthConfig.java
+│       ├── LevelRule.java
+│       ├── TokenPath.java
+│       └── TokenSharingPolicy.java
+├── engine
+│   ├── AuthEngine.java
+│   ├── CrossBrandTokenEvaluator.java
+│   └── PromptResolver.java
+├── service
+│   └── SessionService.java
+├── validator
+│   ├── TokenValidator.java
+│   ├── TokenValidatorRegistry.java
+│   ├── TokenValidationContext.java
+│   ├── ValidationResult.java
+│   └── impl/
+│       ├── AccountNumberValidator.java
+│       ├── PinValidator.java
+│       ├── OtpTokenValidator.java
+│       ├── VoicePrintValidator.java
+│       └── SsnLast4Validator.java
+├── registry
+│   ├── BrandRulesRegistry.java
+│   └── BrandRulesLoader.java
+├── repository
+│   ├── SessionRepository.java
+│   └── SqliteSessionRepository.java
+└── exception/
+    ├── SessionNotFoundException.java
+    ├── SessionLockedException.java
+    ├── UnknownBrandException.java
+    └── UnsupportedTokenTypeException.java
+```
+
+---
+
+## 13. Implementation Checklist
+
+### Phase 1 — Core Foundation
+1. Define `AuthLevel` and `TokenType` enums
+2. Implement domain model: `IvrSession`, `BrandAuthConfig`, `LevelRule`, `TokenPath`, `TokenSharingPolicy`
+3. Implement JSON loader: `BrandRulesLoader` reads `/brands/*.json`, populates `BrandRulesRegistry`
+4. Implement `SessionRepository` with SQLite (JdbcTemplate) and Jackson serialization
+5. Write unit tests for domain model serialization round-trips
+
+### Phase 2 — Auth Engine
+1. Implement `AuthEngine.evaluateProgress()` — path satisfaction check
+2. Implement `AuthEngine.handleFailure()` — retry countdown and path fallback switch
+3. Implement `AuthEngine.escalate()` — target upgrade with incremental token reuse
+4. Implement `pruneTokensNotInPath()` — token retention logic across path switch
+5. Unit test all engine branches: success, retry, fallback, lockout, escalation
+
+### Phase 3 — Validators
+1. Implement `TokenValidator` interface and `ValidationResult`
+2. Implement stub validators for each `TokenType` (return configurable mock responses)
+3. Wire `TokenValidatorRegistry` with Spring auto-discovery of `@Component` validators
+4. Implement `CrossBrandTokenEvaluator` — global share, conditional share, TTL checks
+5. Replace stubs with real external API clients one validator at a time
+
+### Phase 4 — API Layer
+1. Implement `SessionController` and all 5 endpoints
+2. Implement `SessionService` wiring engine and session repo
+3. Implement `IvrExceptionHandler` with appropriate HTTP status codes
+4. Add request validation (`@Valid`, `@NotNull`, `@NotBlank`) on all DTOs
+5. Integration-test each endpoint with MockMvc against in-memory session store
+
+### Phase 5 — Multi-Brand
+1. Create JSON configs for each brand under `resources/brands/`
+2. Test that unknown `brandId` returns 400 with `UNKNOWN_BRAND` error code
+3. Test cross-brand token sharing: globally shared, conditionally shared, TTL expiry
+4. Test that a brand with no sharing policy never accepts cross-brand tokens
+
+### Phase 6 — Hardening
+1. Encrypt token values at rest in SQLite (AES-GCM, per-session key)
+2. Add distributed rate limiting per `callerId` to back the per-token retry limits
+3. Add session TTL enforcement: reject requests on expired sessions with `410 Gone`
+4. Add structured audit logging: `sessionId`, `brandId`, `tokenType`, result — **never log token values**
+5. Load-test the SQLite session store under expected concurrent IVR call volume
+
+> ⚠️ **Security Note — Token Values**
+> Never log raw token values (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.
+> Store `collectedTokens` encrypted in SQLite using a per-session AES key, itself wrapped with a KMS key.

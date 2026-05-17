@@ -1,0 +1,62 @@
+# ── Java / Maven ─────────────────────────────────────────────────────────────
+target/
+*.class
+*.jar
+*.war
+*.nar
+*.ear
+*.zip
+*.tar.gz
+*.rar
+hs_err_pid*
+replay_pid*
+
+# ── Spring Boot ──────────────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+application-local.properties
+application-dev.properties
+application-secret.properties
+!.mvn/wrapper/maven-wrapper.jar
+
+# ── IDE / Editor ─────────────────────────────────────────────────────────────
+# Eclipse
+.project
+.classpath
+.settings/
+bin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# VS Code
+.vscode/
+*.swp
+*.swo
+*~
+
+# NetBeans
+nb-configuration.xml
+nbactions.xml
+
+# ── OS ───────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── Logs ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+log/
+
+# ── Build / Temp ─────────────────────────────────────────────────────────────
+build/
+tmp/
+*.tmp
+*.bak
+*.orig

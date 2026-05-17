@@ -1,0 +1,34 @@
+{
+  "brandId": "BRAND_B",
+  "levelRules": {
+    "BASIC": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "requiredTokens": ["ACCOUNT_NUMBER"]
+        }
+      ],
+      "maxRetriesPerToken": 3,
+      "lockoutSeconds": 0
+    },
+    "STANDARD": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "requiredTokens": ["ACCOUNT_NUMBER", "DATE_OF_BIRTH"]
+        },
+        {
+          "pathIndex": 1,
+          "requiredTokens": ["ACCOUNT_NUMBER", "CARD_LAST4"]
+        }
+      ],
+      "maxRetriesPerToken": 2,
+      "lockoutSeconds": 300
+    }
+  },
+  "sharingPolicy": {
+    "globallySharedTokens": ["ACCOUNT_NUMBER"],
+    "conditionallySharedFrom": {},
+    "crossBrandTokenMaxAgeSeconds": 0
+  }
+}
