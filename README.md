@@ -9,9 +9,9 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 
 ## ✨ Features
 
-- **Multi-brand isolation** — Each brand defines its own auth levels, token paths, retry limits, and lockout policies
+- **Multi-brand isolation** — Each brand defines its own auth levels, token paths, retry limits, and fail policies
 - **Progressive authentication** — Sessions start at `NONE` and step up to the target level; mid-session escalation is supported
-- **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path
+- **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path before failing
 - **Backup token alternatives** — Each required token can declare alternative token types that the client may submit instead (e.g. accept `SSN_LAST4` or `DATE_OF_BIRTH` in place of `PIN`)
 - **Automatic cross-brand token sharing** — Any token validated in one brand's session is automatically reusable in another brand's session — no per-brand policy configuration needed
 - **Initial tokens at session start** — Clients can submit pre-collected tokens when creating a session
@@ -126,6 +126,23 @@ curl -X POST http://localhost:8081/ivr/session/{sessionId}/escalate \
 # Response → { "nextRequiredToken": "OTP", ... }
 ```
 
+### Initial Tokens at Session Start
+
+Clients can submit pre-collected tokens when creating a session:
+
+```bash
+curl -X POST http://localhost:8081/ivr/session/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "brandId": "BRAND_A",
+    "callerId": "5551234567",
+    "targetLevel": "STANDARD",
+    "initialTokens": {"ACCOUNT_NUMBER": "123456789"}
+  }'
+```
+
+The engine processes initial tokens through the same validation pipeline before returning the first response.
+
 ---
 
 ## ⚙️ Configuration
@@ -134,7 +151,18 @@ curl -X POST http://localhost:8081/ivr/session/{sessionId}/escalate \
 
 Brand configs are stored in `./config/brands/*.json` (external to the JAR). They persist across restarts and can be managed via the Brand Editor UI at `http://localhost:8081/`.
 
-### Brand A (full example — `brand-a.json`)
+Each brand config has the following structure:
+
+- **`brandId`** — unique brand identifier (e.g. `BRAND_A`)
+- **`levelRules`** — map of `AuthLevel` → `LevelRule`:
+  - **`paths`** — ordered list of `TokenPath` objects. `paths[0]` is the primary path; `paths[1..n]` are fallback paths activated when retries are exhausted on the current path
+    - **`pathIndex`** — position in the path list
+    - **`description`** — human-readable label
+    - **`requiredTokens`** — ordered list of `TokenType` values that must all be validated to complete this path
+    - **`backupTokens`** *(optional)* — map from a required token to alternative token types the client may submit. The client is told which tokens are accepted via the `acceptedTokens` response field. However, the required token itself must still be collected directly for the path to complete.
+  - **`maxRetriesPerToken`** — number of failed attempts allowed per token type before triggering a path fallback or failing the session
+
+### Brand A (full example)
 
 ```json
 {
@@ -144,8 +172,7 @@ Brand configs are stored in `./config/brands/*.json` (external to the JAR). They
       "paths": [
         { "pathIndex": 0, "description": "Account lookup", "requiredTokens": ["ACCOUNT_NUMBER"] }
       ],
-      "maxRetriesPerToken": 3,
-      "lockoutSeconds": 0
+      "maxRetriesPerToken": 3
     },
     "STANDARD": {
       "paths": [
@@ -155,8 +182,7 @@ Brand configs are stored in `./config/brands/*.json` (external to the JAR). They
         { "pathIndex": 1, "description": "Account + OTP fallback",
           "requiredTokens": ["ACCOUNT_NUMBER", "OTP"] }
       ],
-      "maxRetriesPerToken": 3,
-      "lockoutSeconds": 300
+      "maxRetriesPerToken": 3
     },
     "ELEVATED": {
       "paths": [
@@ -166,8 +192,7 @@ Brand configs are stored in `./config/brands/*.json` (external to the JAR). They
         { "pathIndex": 1, "description": "Voice biometric fallback",
           "requiredTokens": ["ACCOUNT_NUMBER", "VOICE_PRINT", "OTP"] }
       ],
-      "maxRetriesPerToken": 2,
-      "lockoutSeconds": 600
+      "maxRetriesPerToken": 2
     }
   }
 }
@@ -230,6 +255,9 @@ src/main/resources/
 config/brands/               # External brand config directory
 ├── brand-a.json
 └── brand-b.json
+
+src/test/java/com/yourco/ivr/
+└── IvrAuthIntegrationTest.java   # 7 integration tests (no mocking)
 ```
 
 ---
@@ -253,6 +281,7 @@ mvn test
 | API Docs | Springdoc OpenAPI 1.7 | Auto-generates Swagger UI from annotations |
 | Build | Maven | Industry standard for enterprise Java |
 | Code Gen | Lombok | Reduces boilerplate |
+| Testing | JUnit 5 + SpringBootTest | Integration tests with real HTTP calls |
 
 ---
 
@@ -261,7 +290,6 @@ mvn test
 - **Never log raw token values** — log only `tokenType` and validation outcome
 - Token values in `collectedTokens` should be encrypted at rest (see Phase 6 in the technical spec)
 - Session IDs are UUIDs — no sequential enumeration possible
-- Lockout is enforced server-side and cannot be bypassed
 - Token values are stored in `collectedTokens` map and submitted via API — use HTTPS in production
 
 ---
