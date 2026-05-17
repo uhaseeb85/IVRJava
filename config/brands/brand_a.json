@@ -1,0 +1,49 @@
+{
+  "brandId" : "BRAND_A",
+  "levelRules" : {
+    "BASIC" : {
+      "paths" : [ {
+        "pathIndex" : 0,
+        "description" : "Account lookup",
+        "requiredTokens" : [ "ACCOUNT_NUMBER" ],
+        "backupTokens" : null
+      } ],
+      "maxRetriesPerToken" : 3,
+      "lockoutSeconds" : 0
+    },
+    "STANDARD" : {
+      "paths" : [ {
+        "pathIndex" : 0,
+        "description" : "Account + PIN",
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "PIN" ],
+        "backupTokens" : {
+          "PIN" : [ "SSN_LAST4", "DATE_OF_BIRTH" ]
+        }
+      }, {
+        "pathIndex" : 1,
+        "description" : "Account + OTP fallback",
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "OTP" ],
+        "backupTokens" : null
+      } ],
+      "maxRetriesPerToken" : 3,
+      "lockoutSeconds" : 300
+    },
+    "ELEVATED" : {
+      "paths" : [ {
+        "pathIndex" : 0,
+        "description" : "Full factor",
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "PIN", "OTP" ],
+        "backupTokens" : {
+          "PIN" : [ "SSN_LAST4", "DATE_OF_BIRTH" ]
+        }
+      }, {
+        "pathIndex" : 1,
+        "description" : "Voice biometric fallback",
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "VOICE_PRINT", "OTP" ],
+        "backupTokens" : null
+      } ],
+      "maxRetriesPerToken" : 2,
+      "lockoutSeconds" : 600
+    }
+}
+}

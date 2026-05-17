@@ -159,12 +159,12 @@ src/
 
 ### Brand Configurations (JSON)
 
-Brand rules live in `src/main/resources/brands/*.json`. Each file defines:
+Brand rules live in `./config/brands/*.json` (external directory). Each file defines:
 - **`levelRules`** — one `LevelRule` per `AuthLevel` (BASIC, STANDARD, ELEVATED, etc.)
   - **`paths`** — ordered list of token paths; [0] = primary, [1..n] = fallbacks
   - **`maxRetriesPerToken`** — attempts before path fallback or lockout
   - **`lockoutSeconds`** — lockout duration when all paths exhausted
-- **`sharingPolicy`** — cross-brand token acceptance rules (globallyShared, conditionallySharedFrom, TTL)
+- **`backupTokens`** — optional mapping from a required token to alternative tokens the client may submit instead (e.g. `PIN` can be replaced by `SSN_LAST4` or `DATE_OF_BIRTH`)
 
 Add a new brand by creating a new `.json` file in the `brands/` directory and restarting.
 

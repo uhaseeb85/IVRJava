@@ -1,0 +1,32 @@
+{
+  "brandId" : "BRAND_B",
+  "levelRules" : {
+    "BASIC" : {
+      "paths" : [ {
+        "pathIndex" : 0,
+        "description" : null,
+        "requiredTokens" : [ "ACCOUNT_NUMBER" ],
+        "backupTokens" : null
+      } ],
+      "maxRetriesPerToken" : 3,
+      "lockoutSeconds" : 0
+    },
+    "STANDARD" : {
+      "paths" : [ {
+        "pathIndex" : 0,
+        "description" : null,
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "DATE_OF_BIRTH" ],
+        "backupTokens" : {
+          "DATE_OF_BIRTH" : [ "SSN_LAST4", "CARD_LAST4" ]
+        }
+      }, {
+        "pathIndex" : 1,
+        "description" : null,
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "CARD_LAST4" ],
+        "backupTokens" : null
+      } ],
+      "maxRetriesPerToken" : 2,
+      "lockoutSeconds" : 300
+    }
+}
+}

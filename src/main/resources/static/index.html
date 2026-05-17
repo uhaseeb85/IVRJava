@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IVR Brand Config Editor</title>
+<script src="https://unpkg.com/react@16/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@16/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/babel-standalone@6/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f0f2f5;color:#1a1a2e}
+.app{max-width:1100px;margin:0 auto;padding:20px}
+h1{font-size:24px;margin-bottom:20px;color:#16213e}
+.card{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.1);padding:20px;margin-bottom:16px}
+.btn{padding:8px 16px;border:none;border:none;border-radius:6px;cursor:pointer;font-size:14px;font-weight:500;display:inline-flex;align-items:center;gap:4px}
+.btn-primary{background:#0f3460;color:#fff}
+.btn-success{background:#27ae60;color:#fff}
+.btn-danger{background:#e74c3c;color:#fff}
+.btn-outline{background:transparent:transparent;border:1px solid #ddd;color:#333}
+.btn-sm{padding:4px 10px;font-size:12px}
+table{width:100%;border-collapse:collapse}
+th,td{text-align:left;padding:12px;border-bottom:1px solid #eee}
+th{color:#666;font-weight:600;font-size:13px;text-transform:uppercase}
+tr:hover{background:#f8f9fa;cursor:pointer}
+.form-group{margin-bottom:14px}
+.form-group label{display:block;font-weight:600;margin-bottom:4px;font-size:13px;color:#555}
+.form-group input,.form-group select{width:100%;padding:8px 12px;border:1px solid #ddd;border-radius:6px;font-size:14px}
+.form-row{display:flex;gap:12px}
+.form-row>*{flex:1}
+.level-card{border:1px solid #e0e0e0;border-radius:8px;padding:16px;margin-bottom:12px}
+.level-card h3{font-size:16px;color:#0f3460}
+.path-card{background:#f8f9fa;border:1px solid #e8e8e8;border-radius:6px;padding:12px;margin-bottom:10px}
+.path-card h4{font-size:13px;color:#666;margin-bottom:8px}
+.tag{display:inline-block;background:#e8f0fe;color:#0f3460;padding:2px 8px;border-radius:12px;font-size:12px;margin:2px;cursor:pointer;user-select:none}
+.tag-active{background:#0f3460;color:#fff}
+.tag-remove{cursor:pointer;margin-left:4px;color:#e74c3c;font-weight:bold}
+.section-title{font-size:18px;font-weight:600;margin:24px 0 12px;color:#16213e;padding-bottom:8px;border-bottom:2px solid #e0e0e0}
+.json-preview{background:#1a1a2e;color:#a0d2db;padding:16px;border-radius:8px;font-family:monospace;font-size:13px;white-space:pre-wrap;max-height:400px;overflow:auto}
+.flex-between{display:flex;justify-content:space-between;align-items:center}
+.flex{display:flex;align-items:center;gap:8px}
+.empty-state{text-align:center;padding:40px;color:#999}
+.toast{position:fixed;bottom:24px;right:24px;background:#27ae60;color:#fff;padding:12px 24px;border-radius:8px;z-index:1000}
+.toast-error{background:#e74c3c}
+.loading{text-align:center;padding:40px;color:#999}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const API = {
+  list: () => fetch('/api/brands').then(r => r.json()),
+  get: (id) => fetch('/api/brands/' + id).then(r => r.json()),
+  save: (cfg) => {
+    const isNew = !cfg._existing;
+    const url = isNew ? '/api/brands' : '/api/brands/' + cfg.brandId;
+    return fetch(url, {
+      method: isNew ? 'POST' : 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg)
+    }).then(r => { if (!r.ok) throw Error(); return r.json(); });
+  },
+  del: (id) => fetch('/api/brands/' + id, { method: 'DELETE' })
+};
+
+const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'];
+const TYPES = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'];
+
+function freshConfig() {
+  return {
+    brandId: '',
+    levelRules: {
+      BASIC: {
+        paths: [{ pathIndex: 0, description: '', requiredTokens: [], backupTokens: null }],
+        maxRetriesPerToken: 3,
+        lockoutSeconds: 0
+      }
+    }
+  };
+}
+  };
+}
+
+function App() {
+  const [page, setPage] = React.useState('list');
+  const [brands, setBrands] = React.useState([]);
+  const [cfg, setCfg] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [toast, setToast] = React.useState(null);
+  const [showJson, setShowJson] = React.useState(false);
+
+  React.useEffect(() => {
+    API.list().then(list => { setBrands(list); setLoading(false); }).catch(() => setLoading(false));
+  }, []);
+
+  const showToast = (msg, type) => {
+    setToast({ msg, type: type || 'success' });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  const openNew = () => {
+    setCfg(freshConfig());
+    setPage('editor');
+    setShowJson(false);
+  };
+
+  const openEdit = async (id) => {
+    try {
+      const c = await API.get(id);
+      c._existing = true;
+      setCfg(c);
+      setPage('editor');
+      setShowJson(false);
+    } catch (e) {
+      showToast('Failed to load brand', 'error');
+    }
+  };
+
+  const saveConfig = async () => {
+    try {
+      const saved = await API.save(cfg);
+      showToast('Brand "' + saved.brandId + '" saved');
+      const list = await API.list();
+      setBrands(list);
+      saved._existing = true;
+      setCfg(saved);
+    } catch (e) {
+      showToast('Save failed', 'error');
+    }
+  };
+
+  const deleteBrand = async (id) => {
+    if (!confirm('Delete brand "' + id + '"?')) return;
+    await API.del(id);
+    showToast('Brand "' + id + '" deleted');
+    setBrands(brands.filter(b => b.brandId !== id));
+  };
+
+  // ── Editor View ──────────────────────────────────────────────────────────
+  if (page === 'editor' && cfg) {
+    const set = (path, val) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      const keys = path.split('.');
+      let obj = n;
+      for (let i = 0; i < keys.length - 1; i++) {
+        if (!obj[keys[i]]) obj[keys[i]] = {};
+        obj = obj[keys[i]];
+      }
+      obj[keys[keys.length - 1]] = val;
+      setCfg(n);
+    };
+
+    const toggleArr = (path, item) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      const keys = path.split('.');
+      let obj = n;
+      for (let i = 0; i < keys.length; i++) obj = obj[keys[i]];
+      const idx = obj.indexOf(item);
+      if (idx >= 0) obj.splice(idx, 1); else obj.push(item);
+      setCfg(n);
+    };
+
+    const addLevel = (lvl) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      if (!n.levelRules) n.levelRules = {};
+      n.levelRules[lvl] = {
+        paths: [{ pathIndex: 0, description: '', requiredTokens: [], backupTokens: null }],
+        maxRetriesPerToken: 3,
+        lockoutSeconds: 0
+      };
+      setCfg(n);
+    };
+
+    const removeLevel = (lvl) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      delete n.levelRules[lvl];
+      setCfg(n);
+    };
+
+    const addPath = (lvl) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      const paths = n.levelRules[lvl].paths;
+      paths.push({ pathIndex: paths.length, description: '', requiredTokens: [], backupTokens: null });
+      setCfg(n);
+    };
+
+    const removePath = (lvl, pi) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      n.levelRules[lvl].paths = n.levelRules[lvl].paths.filter(p => p.pathIndex !== pi);
+      setCfg(n);
+    };
+
+    const toggleToken = (lvl, pi, tok) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      const p = n.levelRules[lvl].paths.find(x => x.pathIndex === pi);
+      if (!p) return;
+      const idx = p.requiredTokens.indexOf(tok);
+      if (idx >= 0) p.requiredTokens.splice(idx, 1); else p.requiredTokens.push(tok);
+      setCfg(n);
+    };
+
+    const toggleBackup = (lvl, pi, req, alt) => {
+      const n = JSON.parse(JSON.stringify(cfg));
+      const p = n.levelRules[lvl].paths.find(x => x.pathIndex === pi);
+      if (!p) return;
+      if (!p.backupTokens) p.backupTokens = {};
+      if (!p.backupTokens[req]) p.backupTokens[req] = [];
+      const idx = p.backupTokens[req].indexOf(alt);
+      if (idx >= 0) p.backupTokens[req].splice(idx, 1); else p.backupTokens[req].push(alt);
+      if (p.backupTokens[req].length === 0) delete p.backupTokens[req];
+      if (Object.keys(p.backupTokens).length === 0) p.backupTokens = null;
+      setCfg(n);
+    };
+
+    return (
+      <div className="app">
+        <h1>Brand Config Editor</h1>
+        {toast && <div className={'toast' + (toast.type === 'error' ? ' toast-error' : '')}>{toast.msg}</div>}
+        <div className="flex-between" style={{ marginBottom: 16 }}>
+          <button className="btn btn-outline" onClick={() => setPage('list')}>Back to List</button>
+          <div className="flex">
+            <button className="btn btn-outline" onClick={() => setShowJson(!showJson)}>{showJson ? 'Hide' : 'Show'} JSON</button>
+            <button className="btn btn-success" onClick={saveConfig}>Save</button>
+          </div>
+        </div>
+
+        <div className="card">
+          <h2 className="section-title" style={{ marginTop: 0 }}>Brand Info</h2>
+          <div className="form-group">
+            <label>Brand ID</label>
+            <input value={cfg.brandId} onChange={e => set('brandId', e.target.value)} placeholder="e.g. BRAND_C" readOnly={cfg._existing} />
+          </div>
+        </div>
+
+        <h2 className="section-title">Level Rules</h2>
+        {LEVELS.map(lvl => (
+          <div key={lvl} className="level-card">
+            <div className="flex-between">
+              <h3>{lvl} {cfg.levelRules[lvl] && <span style={{ color: '#27ae60' }}> OK</span>}</h3>
+              {cfg.levelRules[lvl]
+                ? <button className="btn btn-outline btn-sm" onClick={() => removeLevel(lvl)}>Remove</button>
+                : <button className="btn btn-primary btn-sm" onClick={() => addLevel(lvl)}>+ Add</button>}
+            </div>
+            {cfg.levelRules[lvl] && (
+              <div>
+                <div className="form-row">
+                  <div className="form-group">
+                    <label>Max Retries</label>
+                    <input type="number" min="1" value={cfg.levelRules[lvl].maxRetriesPerToken}
+                      onChange={e => set('levelRules.' + lvl + '.maxRetriesPerToken', parseInt(e.target.value) || 1)} />
+                  </div>
+                  <div className="form-group">
+                    <label>Lockout (sec)</label>
+                    <input type="number" min="0" value={cfg.levelRules[lvl].lockoutSeconds}
+                      onChange={e => set('levelRules.' + lvl + '.lockoutSeconds', parseInt(e.target.value) || 0)} />
+                  </div>
+                </div>
+                <div className="flex-between" style={{ marginBottom: 8 }}>
+                  <label style={{ fontWeight: 600, fontSize: 13, color: '#555' }}>Paths</label>
+                  <button className="btn btn-primary btn-sm" onClick={() => addPath(lvl)}>+ Add Path</button>
+                </div>
+                {cfg.levelRules[lvl].paths.map((p, pi) => (
+                  <div key={p.pathIndex} className="path-card">
+                    <div className="flex-between">
+                      <h4>Path {p.pathIndex} {pi === 0 ? '(Primary)' : '(Fallback)'}</h4>
+                      {cfg.levelRules[lvl].paths.length > 1 &&
+                        <button className="btn btn-danger btn-sm" onClick={() => removePath(lvl, p.pathIndex)}>Remove</button>}
+                    </div>
+                    <div className="form-group" style={{ marginTop: 8 }}>
+                      <label>Description</label>
+                      <input value={p.description || ''} placeholder="e.g. Account + PIN"
+                        onChange={e => set('levelRules.' + lvl + '.paths[' + pi + '].description', e.target.value)} />
+                    </div>
+                    <div className="form-group">
+                      <label>Required Tokens</label>
+                      <div>
+                        {TYPES.map(t => {
+                          const sel = p.requiredTokens.includes(t);
+                          return <span key={t} className={'tag' + (sel ? ' tag-active' : '')}
+                            onClick={() => toggleToken(lvl, p.pathIndex, t)}>{t}</span>;
+                        })}
+                      </div>
+                    </div>
+                    {p.requiredTokens.map(req => (
+                      <div key={req} className="form-group" style={{ marginBottom: 4 }}>
+                        <label style={{ fontSize: 12 }}>Backups for <strong>{req}</strong>:</label>
+                        <div className="flex" style={{ flexWrap: 'wrap' }}>
+                          {TYPES.filter(t => t !== req).map(t => {
+                            const sel = p.backupTokens && p.backupTokens[req] && p.backupTokens[req].includes(t);
+                            return <label key={t} style={{ fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 2 }}>
+                              <input type="checkbox" checked={!!sel}
+                                onChange={() => toggleBackup(lvl, p.pathIndex, req, t)} /> {t}
+                            </label>;
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+
+        <h2 className="section-title">Cross-Brand Token Sharing</h2>
+        <div className="card">
+          <p style={{fontSize:13,color:'#666',marginBottom:12}}>
+            Any token validated in one brand's session is automatically reusable
+            in another brand's session. No additional configuration needed.
+          </p>
+        </div>
+
+        {showJson && (
+          <div className="card">
+            <h3 style={{ marginBottom: 8 }}>JSON Preview</h3>
+            <div className="json-preview">{JSON.stringify(cfg, null, 2)}</div>
+          </div>
+        )}
+        <div style={{ height: 40 }} />
+      </div>
+    );
+  }
+
+  // ── List View ─────────────────────────────────────────────────────────────
+  return (
+    <div className="app">
+      <h1>IVR Brand Config Editor</h1>
+      {toast && <div className={'toast' + (toast.type === 'error' ? ' toast-error' : '')}>{toast.msg}</div>}
+      <div style={{ marginBottom: 16 }}>
+        <button className="btn btn-primary" onClick={openNew}>+ Create New Brand</button>
+      </div>
+      {loading
+        ? <div className="loading">Loading...</div>
+        : brands.length === 0
+          ? <div className="empty-state"><h2>No brands found.</h2></div>
+          : <div className="card">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Brand ID</th>
+                    <th>Levels</th>
+                    <th>Sharing</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {brands.map(b => (
+                    <tr key={b.brandId} onClick={() => openEdit(b.brandId)}>
+                      <td><strong>{b.brandId}</strong></td>
+                      <td>{b.levelRules ? Object.keys(b.levelRules).join(', ') : '-'}</td>
+                      <td>Auto</td>
+                      <td>
+                        <button className="btn btn-danger btn-sm" onClick={e => {
+                          e.stopPropagation();
+                          deleteBrand(b.brandId);
+                        }}>Delete</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>}
+    </div>
+  );
+}
+
+ReactDOM.render(<App />, document.getElementById('root'));
+</script>
+</body>
+</html>
