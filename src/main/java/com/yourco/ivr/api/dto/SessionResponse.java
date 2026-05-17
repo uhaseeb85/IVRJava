@@ -31,7 +31,7 @@ public class SessionResponse {
     @Schema(description = "Auth level the session is trying to reach")
     private AuthLevel targetLevel;
 
-    @Schema(description = "Next token type the caller needs to provide (null when AUTHENTICATED or LOCKED)")
+    @Schema(description = "Next token type the caller needs to provide (null when AUTHENTICATED or FAILED)")
     private TokenType nextRequiredToken;
 
     @Schema(description = "Remaining retry attempts for the current token")
@@ -39,9 +39,6 @@ public class SessionResponse {
 
     @Schema(description = "Human-readable IVR prompt text")
     private String prompt;
-
-    @Schema(description = "If locked, when the lock expires")
-    private Instant lockedUntil;
 
     @Schema(description = "List of token types the client is allowed to submit at this step (includes the nextRequiredToken plus any backup alternatives)")
     private List<TokenType> acceptedTokens;
@@ -52,7 +49,6 @@ public class SessionResponse {
             .status(session.getStatus())
             .currentLevel(session.getCurrentLevel())
             .targetLevel(session.getTargetLevel())
-            .lockedUntil(session.getLockedUntil())
             .build();
     }
 }

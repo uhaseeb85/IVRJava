@@ -8,5 +8,4 @@ import java.util.List;
 public class LevelRule {
     private List<TokenPath> paths;
     private int maxRetriesPerToken;
-    private int lockoutSeconds;
 }

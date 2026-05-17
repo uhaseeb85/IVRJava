@@ -53,7 +53,7 @@ public class SessionService {
             for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
                 SessionResponse tokenResponse = engine.submitToken(
                     session.getSessionId(), entry.getKey(), entry.getValue());
-                if (tokenResponse.getStatus() == SessionStatus.LOCKED) {
+                if (tokenResponse.getStatus() == SessionStatus.FAILED) {
                     return tokenResponse;
                 }
             }

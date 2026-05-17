@@ -16,7 +16,6 @@ import com.yourco.ivr.validator.TokenValidatorRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -53,15 +52,10 @@ public class AuthEngine {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
 
-        // 1. Lockout guard
-        if (isLocked(session)) {
-            return buildLockedResponse(session);
-        }
-
         // Store the collected token value
         session.getCollectedTokens().put(tokenType, tokenValue);
 
-        // 2. Check cross-brand token shortcut before calling external API
+        // 1. Check cross-brand token shortcut before calling external API
         boolean valid = crossBrandEvaluator.isAccepted(session, tokenType)
             || validateExternally(session, tokenType, tokenValue);
 
@@ -69,12 +63,12 @@ public class AuthEngine {
             return handleFailure(session, config, tokenType);
         }
 
-        // 3. Mark the submitted token as validated (as itself, not remapped)
+        // 2. Mark the submitted token as validated (as itself, not remapped)
         session.getValidatedTokens().add(tokenType);
         session.getAttemptCounts().remove(tokenType);
         crossBrandEvaluator.recordValidated(session, tokenType);
 
-        // 4. Evaluate progress toward targetLevel
+        // 3. Evaluate progress toward targetLevel
         return evaluateProgress(session, config);
     }
 
@@ -109,11 +103,16 @@ public class AuthEngine {
         int activePathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
 
         if (activePathIdx >= rule.getPaths().size()) {
-            // All paths exhausted — lock
-            session.setStatus(SessionStatus.LOCKED);
-            session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
+            // All paths exhausted — fail
+            session.setStatus(SessionStatus.FAILED);
             sessionRepo.save(session);
-            return buildLockedResponse(session);
+            return SessionResponse.builder()
+                .sessionId(session.getSessionId())
+                .status(SessionStatus.FAILED)
+                .currentLevel(session.getCurrentLevel())
+                .targetLevel(session.getTargetLevel())
+                .prompt("Authentication failed. All retry attempts exhausted.")
+                .build();
         }
 
         TokenPath activePath = rule.getPaths().get(activePathIdx);
@@ -247,11 +246,16 @@ public class AuthEngine {
                 .build();
         }
 
-        // All paths exhausted — lock
-        session.setStatus(SessionStatus.LOCKED);
-        session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
+        // All paths exhausted — fail
+        session.setStatus(SessionStatus.FAILED);
         sessionRepo.save(session);
-        return buildLockedResponse(session);
+        return SessionResponse.builder()
+            .sessionId(session.getSessionId())
+            .status(SessionStatus.FAILED)
+            .currentLevel(session.getCurrentLevel())
+            .targetLevel(session.getTargetLevel())
+            .prompt("Authentication failed. All retry attempts exhausted.")
+            .build();
     }
 
     private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {
@@ -281,12 +285,6 @@ public class AuthEngine {
         return accepted;
     }
 
-    private boolean isLocked(IvrSession session) {
-        return session.getStatus() == SessionStatus.LOCKED
-            && session.getLockedUntil() != null
-            && Instant.now().isBefore(session.getLockedUntil());
-    }
-
     private boolean validateExternally(IvrSession session,
                                         TokenType tokenType,
                                         String tokenValue) {
@@ -298,14 +296,4 @@ public class AuthEngine {
         return validator.validate(ctx).isValid();
     }
 
-    private SessionResponse buildLockedResponse(IvrSession session) {
-        return SessionResponse.builder()
-            .sessionId(session.getSessionId())
-            .status(SessionStatus.LOCKED)
-            .currentLevel(session.getCurrentLevel())
-            .targetLevel(session.getTargetLevel())
-            .lockedUntil(session.getLockedUntil())
-            .prompt("Your account has been temporarily locked due to too many failed attempts.")
-            .build();
-    }
 }

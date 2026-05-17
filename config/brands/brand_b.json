@@ -8,8 +8,7 @@
         "requiredTokens" : [ "ACCOUNT_NUMBER" ],
         "backupTokens" : null
       } ],
-      "maxRetriesPerToken" : 3,
-      "lockoutSeconds" : 0
+      "maxRetriesPerToken" : 3
     },
     "STANDARD" : {
       "paths" : [ {
@@ -25,8 +24,7 @@
         "requiredTokens" : [ "ACCOUNT_NUMBER", "CARD_LAST4" ],
         "backupTokens" : null
       } ],
-      "maxRetriesPerToken" : 2,
-      "lockoutSeconds" : 300
+      "maxRetriesPerToken" : 2
     }
-}
+  }
 }

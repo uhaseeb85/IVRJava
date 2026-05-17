@@ -39,8 +39,7 @@ public class SessionController {
     @Operation(summary = "Submit a token", description = "Submit a collected token value (PIN, OTP, etc.) for validation against the current session's active path.")
     @ApiResponses({
         @ApiResponse(responseCode = "200", description = "Token processed; next prompt or authentication result returned"),
-        @ApiResponse(responseCode = "404", description = "Session not found"),
-        @ApiResponse(responseCode = "423", description = "Session is locked due to too many failed attempts")
+        @ApiResponse(responseCode = "404", description = "Session not found")
     })
     @PostMapping("/{sessionId}/token")
     public ResponseEntity<SessionResponse> submitToken(

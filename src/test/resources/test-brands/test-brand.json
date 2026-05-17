@@ -1,5 +1,5 @@
 {
-  "brandId" : "BRAND_A",
+  "brandId" : "TEST_BRAND",
   "levelRules" : {
     "BASIC" : {
       "paths" : [ {
@@ -25,22 +25,6 @@
         "backupTokens" : null
       } ],
       "maxRetriesPerToken" : 3
-    },
-    "ELEVATED" : {
-      "paths" : [ {
-        "pathIndex" : 0,
-        "description" : "Full factor",
-        "requiredTokens" : [ "ACCOUNT_NUMBER", "PIN", "OTP" ],
-        "backupTokens" : {
-          "PIN" : [ "SSN_LAST4", "DATE_OF_BIRTH" ]
-        }
-      }, {
-        "pathIndex" : 1,
-        "description" : "Voice biometric fallback",
-        "requiredTokens" : [ "ACCOUNT_NUMBER", "VOICE_PRINT", "OTP" ],
-        "backupTokens" : null
-      } ],
-      "maxRetriesPerToken" : 2
     }
   }
 }
