@@ -1,0 +1,16 @@
+{
+  "policies": [
+    {
+      "sourceSystemId": "LEGACY_IVR",
+      "honoredTokens": ["ACCOUNT_NUMBER", "PIN", "OTP", "SSN_LAST4", "DATE_OF_BIRTH"],
+      "maxHonoredLevel": "STANDARD",
+      "enabled": true
+    },
+    {
+      "sourceSystemId": "SALESFORCE",
+      "honoredTokens": ["ACCOUNT_NUMBER"],
+      "maxHonoredLevel": "BASIC",
+      "enabled": true
+    }
+  ]
+}

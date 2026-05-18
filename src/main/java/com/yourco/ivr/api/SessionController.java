@@ -1,5 +1,6 @@
 package com.yourco.ivr.api;
 
+import com.yourco.ivr.api.dto.CallTransferRequest;
 import com.yourco.ivr.api.dto.EscalateRequest;
 import com.yourco.ivr.api.dto.SessionResponse;
 import com.yourco.ivr.api.dto.StartSessionRequest;
@@ -69,6 +70,17 @@ public class SessionController {
     public ResponseEntity<SessionResponse> status(
             @Parameter(description = "Session ID") @PathVariable String sessionId) {
         return ResponseEntity.ok(sessionService.getStatus(sessionId));
+    }
+
+    @Operation(summary = "Transfer a call", description = "Accept a caller transferred from an external system with pre-validated tokens. Tokens are filtered per source policy and the caller's auth level is capped at the policy's max level.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "200", description = "Transfer accepted; next token prompt returned"),
+        @ApiResponse(responseCode = "400", description = "Unknown brand or invalid request"),
+        @ApiResponse(responseCode = "403", description = "Source system not allowed or disabled")
+    })
+    @PostMapping("/transfer")
+    public ResponseEntity<SessionResponse> transfer(@RequestBody @Valid CallTransferRequest req) {
+        return ResponseEntity.ok(sessionService.transfer(req));
     }
 
     @Operation(summary = "End session", description = "End / hang up an IVR session and clean up stored data.")

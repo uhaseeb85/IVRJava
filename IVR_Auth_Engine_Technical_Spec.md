@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 1.2 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 1.3 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -12,13 +12,14 @@
 4. [Auth Engine — Core Logic](#4-auth-engine--core-logic)
 5. [Token Validator Layer](#5-token-validator-layer)
 6. [Cross-Brand Token Sharing](#6-cross-brand-token-sharing)
-7. [REST API Specification](#7-rest-api-specification)
-8. [Session Service](#8-session-service)
-9. [Session Storage (SQLite)](#9-session-storage-sqlite)
-10. [Key Sequence Flows](#10-key-sequence-flows)
-11. [Exception Handling](#11-exception-handling)
-12. [Package Structure](#12-package-structure)
-13. [Implementation Checklist](#13-implementation-checklist)
+7. [Call Transfer](#7-call-transfer)
+8. [REST API Specification](#8-rest-api-specification)
+9. [Session Service](#9-session-service)
+10. [Session Storage (SQLite)](#10-session-storage-sqlite)
+11. [Key Sequence Flows](#11-key-sequence-flows)
+12. [Exception Handling](#12-exception-handling)
+13. [Package Structure](#13-package-structure)
+14. [Implementation Checklist](#14-implementation-checklist)
 
 ---
 
@@ -33,7 +34,7 @@ This document specifies the design and implementation of a multi-brand IVR Token
 - **Token sharing policies** — a brand can declare that tokens validated in another brand's context are reusable within the same session
 - **Progressive authentication** — a session starts at `NONE`, reaches targeted levels step by step, and can escalate further without restarting
 - **Declarative rules** — all behaviour is driven by JSON config; no logic changes require code deployments
-- **Path fallbacks** — when the primary token path fails (retries exhausted), the engine automatically switches to a configured fallback path
+- **Call transfer support** — external IVR systems can transfer callers mid-authentication with pre-validated tokens; per-source policies control which tokens and auth levels are honored
 
 ### 1.2 High-Level Architecture
 
@@ -43,6 +44,7 @@ This document specifies the design and implementation of a multi-brand IVR Token
 | Auth Engine | Core state machine; evaluates rules, drives path progression |
 | Rules Registry | Loads and serves brand-specific `AuthRuleSet` objects from JSON on classpath |
 | Validator Registry | Maps token types to their `TokenValidator` implementations |
+| Transfer Policies Registry | Loads and serves per-source `TransferPolicy` objects from external JSON |
 | Session Store | SQLite-backed via JdbcTemplate; holds `IvrSession` with full token/level state |
 | External APIs | Called per-token by validators; results cached at session scope |
 
@@ -148,6 +150,9 @@ public class IvrSession {
 
     // Cross-brand token provenance: token → (brandId, validatedAt timestamp)
     private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
+
+    // Source system that transferred this call (null if session started locally)
+    private String transferredFrom;
 
     private Instant lockedUntil;
     private Instant createdAt;
@@ -580,19 +585,158 @@ public class CrossBrandTokenEvaluator {
 
 ---
 
-## 7. REST API Specification
+## 7. Call Transfer
 
-### 7.1 Endpoints
+Call transfer allows an external IVR/authentication system to hand off a caller mid-authentication to this engine. The caller's pre-validated tokens and achieved auth level are carried over, so the caller does not re-authenticate tokens they have already provided.
+
+### 7.1 Transfer Policies
+
+Each external source system is governed by a `TransferPolicy` that controls which tokens are honored and the maximum auth level accepted.
+
+**Config file:** `config/transfers/transfer-policies.json`
+
+```json
+{
+  "policies": [
+    {
+      "sourceSystemId": "LEGACY_IVR",
+      "honoredTokens": ["ACCOUNT_NUMBER", "PIN", "OTP", "SSN_LAST4", "DATE_OF_BIRTH"],
+      "maxHonoredLevel": "STANDARD",
+      "enabled": true
+    },
+    {
+      "sourceSystemId": "SALESFORCE",
+      "honoredTokens": ["ACCOUNT_NUMBER"],
+      "maxHonoredLevel": "BASIC",
+      "enabled": true
+    }
+  ]
+}
+```
+
+### 7.2 Transfer Policy Model
+
+```java
+// TransferPolicy.java
+@Data
+public class TransferPolicy {
+    private String sourceSystemId;
+    private List<TokenType> honoredTokens;   // token types trusted from this source
+    private AuthLevel maxHonoredLevel;       // highest level honored from this source
+    private boolean enabled;                 // toggle on/off
+}
+
+// TransferPoliciesConfig.java — wrapper for JSON deserialization
+@Data
+public class TransferPoliciesConfig {
+    private List<TransferPolicy> policies;
+}
+```
+
+### 7.3 TransferPoliciesRegistry
+
+```java
+@Component
+public class TransferPoliciesRegistry {
+
+    private final Map<String, TransferPolicy> policies = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    public void init() {
+        // Loads JSON from ivr.transfer.config-dir (default ./config/transfers/)
+        loadPolicies();
+    }
+
+    public TransferPolicy get(String sourceSystemId);
+    public boolean isTokenHonored(String sourceSystemId, TokenType tokenType);
+    public AuthLevel getMaxHonoredLevel(String sourceSystemId);
+}
+```
+
+### 7.4 Transfer Request DTO
+
+```java
+// CallTransferRequest.java
+@Data
+public class CallTransferRequest {
+    @NotBlank  private String sourceSystemId;     // e.g. "LEGACY_IVR"
+    @NotBlank  private String brandId;             // target brand
+    @NotBlank  private String callerId;            // caller identifier
+    private AuthLevel currentLevel;                 // level reached in source (default NONE)
+    @NotNull   private AuthLevel targetLevel;       // level to reach
+    private List<TokenType> validatedTokens;        // token types already validated externally
+}
+```
+
+### 7.5 Transfer Flow
+
+```
+External System (LEGACY_IVR)    TransferController     TransferPoliciesRegistry     AuthEngine
+        |                              |                           |                    |
+        | POST /ivr/session/transfer   |                           |                    |
+        | {source:"LEGACY_IVR",        |                           |                    |
+        |  validated:[ACCOUNT_NUMBER],  |                           |                    |
+        |  currentLevel:BASIC,          |                           |                    |
+        |  targetLevel:STANDARD}        |                           |                    |
+        |----------------------------->|                           |                    |
+        |                              |  get("LEGACY_IVR")        |                    |
+        |                              |-------------------------->|                    |
+        |                              |     TransferPolicy        |                    |
+        |                              |<--------------------------|                    |
+        |                              |                           |                    |
+        |                              | Filter honoredTokens      |                    |
+        |                              | Cap currentLevel          |                    |
+        |                              | Create IvrSession         |                    |
+        |                              |                           |                    |
+        |                              | transferSession(session,  |                    |
+        |                              |   config, honoredTokens)  |                    |
+        |                              |-------------------------->|                    |
+        |  {nextRequiredToken:PIN}     |  evaluateProgress         |                    |
+        |<-----------------------------|<--------------------------|                    |
+```
+
+**Processing rules:**
+1. Unknown or disabled `sourceSystemId` → **403 FORBIDDEN**
+2. `validatedTokens` filtered to only those in the policy's `honoredTokens`
+3. `currentLevel` capped at the policy's `maxHonoredLevel`
+4. Filtered tokens added to both `validatedTokens` and `crossBrandTokens` (with source = `sourceSystemId`)
+5. Session created with `transferredFrom` set, attempt counts reset to zero
+6. `evaluateProgress()` runs immediately — returns next prompt or `AUTHENTICATED`
+
+### 7.6 AuthEngine.transferSession()
+
+```java
+public SessionResponse transferSession(IvrSession session,
+                                       BrandAuthConfig config,
+                                       List<TokenType> validatedTokens,
+                                       String sourceSystemId) {
+    Instant now = Instant.now();
+    for (TokenType tokenType : validatedTokens) {
+        session.getValidatedTokens().add(tokenType);
+        session.getCrossBrandTokens().put(tokenType,
+            new CrossBrandTokenRecord(sourceSystemId, now));
+    }
+    sessionRepo.save(session);
+    return evaluateProgress(session, config);
+}
+```
+
+---
+
+## 8. REST API Specification
+
+### 8.1 Endpoints
 
 | Method + Path | Purpose | Notes |
 |---|---|---|
 | `POST /ivr/session/start` | Create session, set brand + target | Returns first token prompt |
+| `POST /ivr/session/transfer` | Accept call transfer with pre-validated tokens | Per-source token/level policies apply |
 | `POST /ivr/session/{id}/token` | Submit a collected token | Core loop endpoint |
 | `POST /ivr/session/{id}/escalate` | Request higher auth level | Incremental — reuses existing tokens |
 | `GET /ivr/session/{id}/status` | Poll current session state | For async IVR flows |
 | `DELETE /ivr/session/{id}` | End session (hangup) | Cleanup only |
 
-### 7.2 SessionController.java
+### 8.2 SessionController.java
 
 ```java
 @RestController
@@ -639,7 +783,7 @@ public class SessionController {
 }
 ```
 
-### 7.3 Request / Response DTOs
+### 8.3 Request / Response DTOs
 
 ```java
 // StartSessionRequest.java
@@ -653,6 +797,17 @@ public class StartSessionRequest {
     // Optional: pre-collected token values submitted at session start
     // (e.g. caller already entered account number before session began)
     private Map<TokenType, String> initialTokens;
+}
+
+// CallTransferRequest.java
+@Data
+public class CallTransferRequest {
+    @NotBlank  private String sourceSystemId;
+    @NotBlank  private String brandId;
+    @NotBlank  private String callerId;
+    private AuthLevel currentLevel;
+    @NotNull   private AuthLevel targetLevel;
+    private List<TokenType> validatedTokens;
 }
 
 // TokenSubmitRequest.java
@@ -685,7 +840,7 @@ public class SessionResponse {
 
 ---
 
-## 8. Session Service
+## 9. Session Service
 
 ```java
 @Service
@@ -745,11 +900,11 @@ public class SessionService {
 
 ---
 
-## 9. Session Storage (SQLite)
+## 10. Session Storage (SQLite)
 
 Sessions are stored in a SQLite database accessed via `JdbcTemplate`. The `IvrSession` object is serialized to JSON for complex fields (maps, sets, nested objects) using Jackson. A `@Scheduled` cleanup job removes expired sessions.
 
-### 9.1 Database Schema
+### 10.1 Database Schema
 
 ```sql
 CREATE TABLE IF NOT EXISTS ivr_session (
@@ -764,13 +919,14 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     attempt_counts          TEXT,       -- JSON: Map<TokenType, Integer>
     active_path_index       TEXT,       -- JSON: Map<AuthLevel, Integer>
     cross_brand_tokens      TEXT,       -- JSON: Map<TokenType, CrossBrandTokenRecord>
+    transferred_from        TEXT,       -- Source system ID if call was transferred
     locked_until            TEXT,       -- ISO-8601 timestamp
     created_at              TEXT NOT NULL,
     last_activity_at        TEXT NOT NULL
 );
 ```
 
-### 9.2 SQLiteSessionRepository
+### 10.2 SqliteSessionRepository
 
 ```java
 @Repository
@@ -894,9 +1050,9 @@ public class SqliteSessionRepository implements SessionRepository {
 
 ---
 
-## 10. Key Sequence Flows
+## 11. Key Sequence Flows
 
-### 10.1 Normal Auth Flow (Single Brand, No Fallback)
+### 11.1 Normal Auth Flow (Single Brand, No Fallback)
 
 ```
 IVR Platform          SessionController     AuthEngine             ExternalAPI
@@ -926,7 +1082,7 @@ IVR Platform          SessionController     AuthEngine             ExternalAPI
      |<----------------------|                   |                     |
 ```
 
-### 10.2 Fallback Path Triggered
+### 11.2 Fallback Path Triggered
 
 ```
 Session targets STANDARD, primary path = [ACCOUNT_NUMBER, PIN]
@@ -940,7 +1096,7 @@ State delta:
   validatedTokens: {ACCOUNT_NUMBER} retained (in new path), {PIN} removed
 ```
 
-### 10.3 Mid-Session Escalation Flow
+### 11.3 Mid-Session Escalation Flow
 
 ```
 Session is AUTHENTICATED at STANDARD (validatedTokens: {ACCOUNT_NUMBER, PIN})
@@ -956,7 +1112,7 @@ Engine logic:
 Caller enters OTP → validated → status = AUTHENTICATED, currentLevel = ELEVATED
 ```
 
-### 10.4 Cross-Brand Token Reuse
+### 11.4 Cross-Brand Token Reuse
 
 ```
 Brand A session already validated OTP.
@@ -973,9 +1129,54 @@ Brand C sharingPolicy lists OTP as conditionallySharedFrom: [BRAND_A], TTL = 180
   → OTP marked validated — no external API call made
 ```
 
+### 11.5 Call Transfer Flow
+
+```
+External System (LEGACY_IVR)   SessionController   TransferPoliciesRegistry   AuthEngine
+       |                             |                       |                    |
+       | POST /ivr/session/transfer  |                       |                    |
+       | {source:"LEGACY_IVR",       |                       |                    |
+       |  validated:[ACCOUNT_NUMBER],|                       |                    |
+       |  currentLevel:BASIC,        |                       |                    |
+       |  targetLevel:STANDARD}      |                       |                    |
+       |---------------------------->|                       |                    |
+       |                             |  get("LEGACY_IVR")    |                    |
+       |                             |---------------------->|                    |
+       |                             |   TransferPolicy      |                    |
+       |                             |<----------------------|                    |
+       |                             |                       |                    |
+       |                             | Filter tokens against |                    |
+       |                             |   honoredTokens list  |                    |
+       |                             | Cap currentLevel at   |                    |
+       |                             |   maxHonoredLevel     |                    |
+       |                             | Create IvrSession     |                    |
+       |                             | (transferredFrom set) |                    |
+       |                             |                       |                    |
+       |                             | transferSession()     |                    |
+       |                             |---------------------->|                    |
+       |                             |                       | populate validated |
+       |                             |                       | & crossBrandTokens |
+       |                             |                       | evaluateProgress() |
+       | {nextRequiredToken: PIN}    |                       |                    |
+       |<----------------------------|<----------------------|                    |
+```
+
+State after transfer:
+  sessionId = <uuid>
+  brandId = "BRAND_A"
+  callerId = "5551234567"
+  currentLevel = BASIC (capped to maxHonoredLevel if needed)
+  targetLevel = STANDARD
+  status = COLLECTING
+  validatedTokens = {ACCOUNT_NUMBER}  (only tokens honored by policy)
+  crossBrandTokens = {ACCOUNT_NUMBER -> {sourceBrandId: "LEGACY_IVR", validatedAt: T}}
+  transferredFrom = "LEGACY_IVR"
+  attemptCounts = {}  (fresh start, always reset)
+```
+
 ---
 
-## 11. Exception Handling
+## 12. Exception Handling
 
 ```java
 @RestControllerAdvice
@@ -991,6 +1192,12 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleLocked(SessionLockedException e) {
         return ResponseEntity.status(423)
             .body(new ErrorResponse("SESSION_LOCKED", e.getMessage()));
+    }
+
+    @ExceptionHandler(TransferNotAllowedException.class)
+    public ResponseEntity<ErrorResponse> handleTransferNotAllowed(TransferNotAllowedException e) {
+        return ResponseEntity.status(403)
+            .body(new ErrorResponse("TRANSFER_NOT_ALLOWED", e.getMessage()));
     }
 
     @ExceptionHandler(UnknownBrandException.class)
@@ -1015,13 +1222,14 @@ public class IvrExceptionHandler {
 
 ---
 
-## 12. Package Structure
+## 13. Package Structure
 
 ```
 com.yourco.ivr
 ├── api
 │   ├── SessionController.java
 │   └── dto/
+│       ├── CallTransferRequest.java
 │       ├── StartSessionRequest.java
 │       ├── TokenSubmitRequest.java
 │       ├── EscalateRequest.java
@@ -1036,13 +1244,16 @@ com.yourco.ivr
 │       ├── BrandAuthConfig.java
 │       ├── LevelRule.java
 │       ├── TokenPath.java
-│       └── TokenSharingPolicy.java
+│       ├── TokenSharingPolicy.java
+│       ├── TransferPolicy.java
+│       └── TransferPoliciesConfig.java
 ├── engine
 │   ├── AuthEngine.java
 │   ├── CrossBrandTokenEvaluator.java
 │   └── PromptResolver.java
 ├── service
-│   └── SessionService.java
+│   ├── SessionService.java
+│   └── BrandService.java
 ├── validator
 │   ├── TokenValidator.java
 │   ├── TokenValidatorRegistry.java
@@ -1056,20 +1267,24 @@ com.yourco.ivr
 │       └── SsnLast4Validator.java
 ├── registry
 │   ├── BrandRulesRegistry.java
-│   └── BrandRulesLoader.java
+│   ├── BrandRulesLoader.java
+│   └── TransferPoliciesRegistry.java
 ├── repository
+│   ├── DatabaseConfig.java
 │   ├── SessionRepository.java
 │   └── SqliteSessionRepository.java
 └── exception/
     ├── SessionNotFoundException.java
     ├── SessionLockedException.java
+    ├── SessionSerializationException.java
+    ├── TransferNotAllowedException.java
     ├── UnknownBrandException.java
     └── UnsupportedTokenTypeException.java
 ```
 
 ---
 
-## 13. Implementation Checklist
+## 14. Implementation Checklist
 
 ### Phase 1 — Core Foundation
 1. Define `AuthLevel` and `TokenType` enums
@@ -1111,6 +1326,18 @@ com.yourco.ivr
 3. Add session TTL enforcement: reject requests on expired sessions with `410 Gone`
 4. Add structured audit logging: `sessionId`, `brandId`, `tokenType`, result — **never log token values**
 5. Load-test the SQLite session store under expected concurrent IVR call volume
+
+### Phase 7 — Call Transfer
+1. Implement `TransferPolicy`, `TransferPoliciesConfig` domain models
+2. Implement `TransferPoliciesRegistry` with JSON loading from `./config/transfers/`
+3. Implement `CallTransferRequest` DTO with `@Valid` constraints
+4. Implement `TransferNotAllowedException` and wire into `IvrExceptionHandler` (HTTP 403)
+5. Add `transferredFrom` field to `IvrSession`, DB schema, and repository
+6. Implement `AuthEngine.transferSession()` — populate validated/cross-brand tokens from transfer
+7. Implement `POST /ivr/session/transfer` endpoint in `SessionController`
+8. Wire token filtering and level capping in `SessionService.transfer()`
+9. Create default `config/transfers/transfer-policies.json` with sample policies
+10. Integration-test: happy path, token filtering, level capping, unknown source, disabled source
 
 > ⚠️ **Security Note — Token Values**
 > Never log raw token values (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.

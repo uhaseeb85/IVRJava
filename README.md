@@ -14,6 +14,7 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path before failing
 - **Backup token alternatives** — Each required token can declare alternative token types that the client may submit instead (e.g. accept `SSN_LAST4` or `DATE_OF_BIRTH` in place of `PIN`)
 - **Automatic cross-brand token sharing** — Any token validated in one brand's session is automatically reusable in another brand's session — no per-brand policy configuration needed
+- **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored
 - **Initial tokens at session start** — Clients can submit pre-collected tokens when creating a session
 - **Declarative JSON config** — All brand rules live in `./config/brands/*.json`; no code changes needed to add or modify brands
 - **Brand Config Editor UI** — Web-based editor at `http://localhost:8081/` to create, view, update, and delete brand configs
@@ -26,9 +27,10 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 
 | Layer | Technology | Responsibility |
 |---|---|---|
-| REST API | Spring MVC | Accepts IVR platform calls on 5 session endpoints + brand CRUD |
+| REST API | Spring MVC | Accepts IVR platform calls on 6 session endpoints + brand CRUD |
 | Auth Engine | Plain Java (Spring `@Service`) | Core state machine — evaluates rules, drives path progression |
 | Rules Registry | Jackson + external JSON | Loads and caches `BrandAuthConfig` objects from `./config/brands/` |
+| Transfer Policies Registry | Jackson + external JSON | Loads per-source `TransferPolicy` objects from `./config/transfers/` |
 | Validator Registry | Spring Bean Discovery | Maps `TokenType` → `TokenValidator` implementations |
 | Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level state as JSON columns |
 | Brand Config API | Spring MVC + File I/O | CRUD endpoints for managing brand JSON files |
@@ -75,6 +77,7 @@ http://localhost:8081/
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `POST` | `/ivr/session/start` | Create a new session for a brand + target level |
+| `POST` | `/ivr/session/transfer` | Accept a call transfer with pre-validated tokens |
 | `POST` | `/ivr/session/{id}/token` | Submit a collected token (PIN, OTP, etc.) |
 | `POST` | `/ivr/session/{id}/escalate` | Request a higher auth level mid-session |
 | `GET` | `/ivr/session/{id}/status` | Poll current session state |
@@ -143,6 +146,27 @@ curl -X POST http://localhost:8081/ivr/session/start \
 
 The engine processes initial tokens through the same validation pipeline before returning the first response.
 
+### 🚚 Call Transfer
+
+Accept a caller transferred from an external system with pre-validated tokens:
+
+```bash
+curl -X POST http://localhost:8081/ivr/session/transfer \
+  -H "Content-Type: application/json" \
+  -d '{
+    "sourceSystemId": "LEGACY_IVR",
+    "brandId": "BRAND_A",
+    "callerId": "5551234567",
+    "currentLevel": "BASIC",
+    "targetLevel": "STANDARD",
+    "validatedTokens": ["ACCOUNT_NUMBER"]
+  }'
+
+# Response → { "nextRequiredToken": "PIN", "currentLevel": "BASIC", ... }
+```
+
+Tokens are filtered per the source system's transfer policy (see `./config/transfers/`). The caller's `currentLevel` is capped at the policy's `maxHonoredLevel`. Attempt counts always reset.
+
 ---
 
 ## ⚙️ Configuration
@@ -207,6 +231,34 @@ Each brand config has the following structure:
 | `ivr.session.ttl-minutes` | `30` | Session time-to-live |
 | `ivr.session.cleanup.interval` | `60000` | Expired session cleanup interval (ms) |
 | `ivr.brands.config-dir` | `./config/brands` | External brand config directory |
+| `ivr.transfer.config-dir` | `./config/transfers` | External transfer policies directory |
+
+### Transfer Policies (JSON)
+
+Per-source transfer policies control which external systems can transfer calls and what tokens/levels are honored:
+
+```json
+{
+  "policies": [
+    {
+      "sourceSystemId": "LEGACY_IVR",
+      "honoredTokens": ["ACCOUNT_NUMBER", "PIN", "OTP", "SSN_LAST4", "DATE_OF_BIRTH"],
+      "maxHonoredLevel": "STANDARD",
+      "enabled": true
+    },
+    {
+      "sourceSystemId": "SALESFORCE",
+      "honoredTokens": ["ACCOUNT_NUMBER"],
+      "maxHonoredLevel": "BASIC",
+      "enabled": true
+    }
+  ]
+}
+```
+
+- **`honoredTokens`** — token types trusted from this source
+- **`maxHonoredLevel`** — highest auth level honored (caller's claimed level is capped)
+- **`enabled`** — toggle the source on/off
 
 ---
 
@@ -215,17 +267,24 @@ Each brand config has the following structure:
 ```
 src/main/java/com/yourco/ivr/
 ├── api/                    # REST layer
-│   ├── SessionController.java       # Session endpoints
+│   ├── SessionController.java       # Session endpoints (6 total)
 │   ├── BrandController.java         # Brand CRUD endpoints
 │   ├── IvrExceptionHandler.java     # Global error handler
 │   └── dto/                         # Request/Response DTOs
+│       ├── CallTransferRequest.java  # Call transfer DTO
+│       └── ...
 ├── domain/                 # Core domain model
 │   ├── AuthLevel.java              # Auth level enum with rank
 │   ├── TokenType.java              # 7 token types
 │   ├── IvrSession.java             # Full session state
 │   ├── SessionStatus.java          # Session lifecycle states
 │   ├── CrossBrandTokenRecord.java
-│   └── config/                     # Brand config model
+│   └── config/                     # Brand config model + transfer policy
+│       ├── BrandAuthConfig.java
+│       ├── LevelRule.java
+│       ├── TokenPath.java
+│       ├── TransferPolicy.java
+│       └── TransferPoliciesConfig.java
 ├── engine/                 # Auth state machine
 │   ├── AuthEngine.java             # Core engine
 │   ├── CrossBrandTokenEvaluator.java
@@ -239,7 +298,8 @@ src/main/java/com/yourco/ivr/
 │   └── impl/                       # 7 stub validators
 ├── registry/
 │   ├── BrandRulesRegistry.java
-│   └── BrandRulesLoader.java       # Loads configs at startup
+│   ├── BrandRulesLoader.java       # Loads brand configs at startup
+│   └── TransferPoliciesRegistry.java # Loads transfer policies at startup
 ├── repository/
 │   ├── DatabaseConfig.java         # DB schema initializer
 │   ├── SessionRepository.java      # Interface
@@ -248,6 +308,7 @@ src/main/java/com/yourco/ivr/
 │   ├── SessionNotFoundException.java
 │   ├── SessionLockedException.java
 │   ├── SessionSerializationException.java
+│   ├── TransferNotAllowedException.java
 │   ├── UnknownBrandException.java
 │   └── UnsupportedTokenTypeException.java
 ├── IvrAuthEngineApplication.java
@@ -262,8 +323,11 @@ config/brands/               # External brand config directory (loaded at startu
 ├── brand_a.json              # BRAND_A — full example with 3 levels, backup tokens
 └── brand_b.json              # BRAND_B — simpler config with 2 levels
 
+config/transfers/             # External transfer policy directory
+└── transfer-policies.json    # Per-source token/level policies
+
 src/test/java/com/yourco/ivr/
-└── IvrAuthIntegrationTest.java   # 7 integration tests (no mocking)
+└── IvrAuthIntegrationTest.java   # 12 integration tests (no mocking)
 ```
 
 ---

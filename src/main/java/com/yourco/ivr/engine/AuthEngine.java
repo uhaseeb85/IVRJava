@@ -5,6 +5,7 @@ import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
+import com.yourco.ivr.domain.CrossBrandTokenRecord;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
@@ -71,6 +72,27 @@ public class AuthEngine {
         crossBrandEvaluator.recordValidated(session, tokenType);
 
         // 3. Evaluate progress toward targetLevel
+        return evaluateProgress(session, config);
+    }
+
+    /**
+     * Create a session from a call transfer with pre-validated external tokens.
+     * The session is pre-populated with validated tokens and the caller's
+     * current auth level from the source system.
+     */
+    public SessionResponse transferSession(IvrSession session,
+                                           BrandAuthConfig config,
+                                           List<TokenType> validatedTokens,
+                                           String sourceSystemId) {
+        Instant now = Instant.now();
+
+        for (TokenType tokenType : validatedTokens) {
+            session.getValidatedTokens().add(tokenType);
+            session.getCrossBrandTokens().put(tokenType,
+                new CrossBrandTokenRecord(sourceSystemId, now));
+        }
+
+        sessionRepo.save(session);
         return evaluateProgress(session, config);
     }
 

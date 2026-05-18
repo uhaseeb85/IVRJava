@@ -3,6 +3,7 @@ package com.yourco.ivr.api;
 import com.yourco.ivr.api.dto.ErrorResponse;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
+import com.yourco.ivr.exception.TransferNotAllowedException;
 import com.yourco.ivr.exception.UnknownBrandException;
 import com.yourco.ivr.exception.UnsupportedTokenTypeException;
 import org.springframework.http.ResponseEntity;
@@ -37,6 +38,12 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleToken(UnsupportedTokenTypeException e) {
         return ResponseEntity.status(400)
             .body(new ErrorResponse("UNSUPPORTED_TOKEN", e.getMessage()));
+    }
+
+    @ExceptionHandler(TransferNotAllowedException.class)
+    public ResponseEntity<ErrorResponse> handleTransferNotAllowed(TransferNotAllowedException e) {
+        return ResponseEntity.status(403)
+            .body(new ErrorResponse("TRANSFER_NOT_ALLOWED", e.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

@@ -1,5 +1,6 @@
 package com.yourco.ivr;
 
+import com.yourco.ivr.api.dto.CallTransferRequest;
 import com.yourco.ivr.api.dto.EscalateRequest;
 import com.yourco.ivr.api.dto.SessionResponse;
 import com.yourco.ivr.api.dto.StartSessionRequest;
@@ -10,6 +11,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.*;
+
+import java.util.Arrays;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -190,5 +193,97 @@ class IvrAuthIntegrationTest {
         ResponseEntity<String> resp = rest.postForEntity(
             "/ivr/session/start", startReq, String.class);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
+    // ── Call Transfer Tests ──────────────────────────────────────────────────
+
+    @Test
+    void testTransferHappyPath() {
+        // LEGACY_IVR has validated ACCOUNT_NUMBER at BASIC, target STANDARD
+        CallTransferRequest req = new CallTransferRequest();
+        req.setSourceSystemId("LEGACY_IVR");
+        req.setBrandId("BRAND_A");
+        req.setCallerId("5551234567");
+        req.setCurrentLevel(AuthLevel.BASIC);
+        req.setTargetLevel(AuthLevel.STANDARD);
+        req.setValidatedTokens(Arrays.asList(TokenType.ACCOUNT_NUMBER));
+
+        ResponseEntity<SessionResponse> resp = rest.postForEntity(
+            "/ivr/session/transfer", req, SessionResponse.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        // ACCOUNT_NUMBER already validated, next should be PIN
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+    }
+
+    @Test
+    void testTransferAlreadyAtTargetLevel() {
+        // LEGACY_IVR has validated ACCOUNT_NUMBER, target BASIC → already there
+        CallTransferRequest req = new CallTransferRequest();
+        req.setSourceSystemId("LEGACY_IVR");
+        req.setBrandId("BRAND_A");
+        req.setCallerId("5552223333");
+        req.setCurrentLevel(AuthLevel.NONE);
+        req.setTargetLevel(AuthLevel.BASIC);
+        req.setValidatedTokens(Arrays.asList(TokenType.ACCOUNT_NUMBER));
+
+        ResponseEntity<SessionResponse> resp = rest.postForEntity(
+            "/ivr/session/transfer", req, SessionResponse.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        // ACCOUNT_NUMBER satisfies BASIC level fully
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+    }
+
+    @Test
+    void testTransferTokenFiltering() {
+        // SALESFORCE only honors ACCOUNT_NUMBER, not PIN
+        CallTransferRequest req = new CallTransferRequest();
+        req.setSourceSystemId("SALESFORCE");
+        req.setBrandId("BRAND_A");
+        req.setCallerId("5553334444");
+        req.setCurrentLevel(AuthLevel.NONE);
+        req.setTargetLevel(AuthLevel.STANDARD);
+        req.setValidatedTokens(Arrays.asList(TokenType.ACCOUNT_NUMBER, TokenType.PIN));
+
+        ResponseEntity<SessionResponse> resp = rest.postForEntity(
+            "/ivr/session/transfer", req, SessionResponse.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        // PIN should NOT have been honored — so next token is PIN
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+    }
+
+    @Test
+    void testTransferLevelCapping() {
+        // SALESFORCE maxHonoredLevel is BASIC, but request claims STANDARD
+        CallTransferRequest req = new CallTransferRequest();
+        req.setSourceSystemId("SALESFORCE");
+        req.setBrandId("BRAND_A");
+        req.setCallerId("5554445555");
+        req.setCurrentLevel(AuthLevel.STANDARD);
+        req.setTargetLevel(AuthLevel.STANDARD);
+        req.setValidatedTokens(Arrays.asList(TokenType.ACCOUNT_NUMBER));
+
+        ResponseEntity<SessionResponse> resp = rest.postForEntity(
+            "/ivr/session/transfer", req, SessionResponse.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        // Current level should be capped at BASIC (maxHonoredLevel)
+        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+    }
+
+    @Test
+    void testTransferUnknownSource() {
+        CallTransferRequest req = new CallTransferRequest();
+        req.setSourceSystemId("UNKNOWN_SYSTEM");
+        req.setBrandId("BRAND_A");
+        req.setCallerId("5555556666");
+        req.setCurrentLevel(AuthLevel.NONE);
+        req.setTargetLevel(AuthLevel.BASIC);
+        req.setValidatedTokens(Arrays.asList(TokenType.ACCOUNT_NUMBER));
+
+        ResponseEntity<String> resp = rest.postForEntity(
+            "/ivr/session/transfer", req, String.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 }

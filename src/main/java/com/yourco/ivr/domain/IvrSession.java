@@ -23,6 +23,7 @@ public class IvrSession {
     private Map<AuthLevel, Integer> activePathIndexByLevel;
     private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
 
+    private String transferredFrom;
     private Instant lockedUntil;
     private Instant createdAt;
     private Instant lastActivityAt;

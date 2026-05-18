@@ -51,8 +51,8 @@ public class SqliteSessionRepository implements SessionRepository {
         String sql = "INSERT OR REPLACE INTO ivr_session " +
             "(session_id, brand_id, caller_id, current_level, target_level, status, " +
             "collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
-            "cross_brand_tokens, locked_until, created_at, last_activity_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "cross_brand_tokens, transferred_from, locked_until, created_at, last_activity_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         jdbc.update(sql,
             session.getSessionId(),
             session.getBrandId(),
@@ -65,6 +65,7 @@ public class SqliteSessionRepository implements SessionRepository {
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),
             toJson(session.getCrossBrandTokens()),
+            session.getTransferredFrom(),
             toIso(session.getLockedUntil()),
             toIso(session.getCreatedAt()),
             toIso(session.getLastActivityAt())
@@ -127,6 +128,7 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setAttemptCounts(fromJsonEnumMap(rs.getString("attempt_counts"), TokenType.class, Integer.class));
         s.setActivePathIndexByLevel(fromJsonEnumMap(rs.getString("active_path_index"), AuthLevel.class, Integer.class));
         s.setCrossBrandTokens(fromJsonCrossBrand(rs.getString("cross_brand_tokens")));
+        s.setTransferredFrom(rs.getString("transferred_from"));
         s.setLockedUntil(fromIso(rs.getString("locked_until")));
         s.setCreatedAt(fromIso(rs.getString("created_at")));
         s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));

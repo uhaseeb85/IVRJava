@@ -242,23 +242,24 @@ mvn test -Dtest=AuthEngineTest
 
 - [ ] Code compiles (`mvn clean compile`)
 - [ ] All tests pass (`mvn test`)
-- [ ] New tests added for any new functionality
+- [ ] **New unit/integration tests added for every new feature or behavior change**
 - [ ] Brand JSON configs validated against `BrandAuthConfig` model
 - [ ] No token values logged anywhere
+- [ ] **README.md updated** with any new endpoints, config, or behavior
+- [ ] **IVR_Auth_Engine_Technical_Spec.md updated** with any new or changed architecture
 
-### ⚠️ Critical: Keep the Technical Spec Updated
+### ✅ Always Required for Every Change
 
-The **`IVR_Auth_Engine_Technical_Spec.md`** file in the project root is the single source of truth for system design. **Any change to the following MUST be reflected in the spec document:**
+| Change Type | Action Required |
+|---|---|
+| New endpoint, DTO, or API contract change | Update **Technical Spec** and **README** |
+| New domain model (class, enum, field) | Update **Technical Spec** |
+| New behavior (engine logic, flow change) | Update **Technical Spec** and add **tests** |
+| New config property or JSON structure | Update **Technical Spec**, **README**, and **application.properties** comment |
+| Bug fix | Add a **test** that reproduces the bug |
+| Refactor | Ensure existing **tests still pass** |
 
-1. **New endpoints, request/response DTOs, or changes to existing API contracts**
-2. **Changes to the domain model** (new enums, new fields on `IvrSession`, new config properties)
-3. **Changes to brand configuration structure** (new fields in JSON configs)
-4. **Changes to the auth engine logic** (new fallback behavior, different retry/lockout semantics)
-5. **Changes to storage technology** (schema changes, new repositories)
-6. **Changes to token sharing policy evaluation**
-7. **New token types or validators**
-
-> Always update the spec before or in the same PR as the code change. A stale spec leads to architectural drift and confusion.
+> **The README, Technical Spec, and tests are not optional. They are part of the definition of done.**
 
 ---
 
