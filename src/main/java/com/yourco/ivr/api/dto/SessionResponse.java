@@ -40,6 +40,9 @@ public class SessionResponse {
     @Schema(description = "Human-readable IVR prompt text")
     private String prompt;
 
+    @Schema(description = "When locked, the time until which the session is locked")
+    private Instant lockedUntil;
+
     @Schema(description = "List of token types the client is allowed to submit at this step (includes the nextRequiredToken plus any backup alternatives)")
     private List<TokenType> acceptedTokens;
 

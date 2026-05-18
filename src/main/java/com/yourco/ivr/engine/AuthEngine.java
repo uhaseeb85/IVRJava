@@ -16,6 +16,7 @@ import com.yourco.ivr.validator.TokenValidatorRegistry;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -63,8 +64,9 @@ public class AuthEngine {
             return handleFailure(session, config, tokenType);
         }
 
-        // 2. Mark the submitted token as validated (as itself, not remapped)
-        session.getValidatedTokens().add(tokenType);
+        // 2. Map backup token to the required token if applicable
+        TokenType resolvedToken = resolveBackupToken(session, config, tokenType);
+        session.getValidatedTokens().add(resolvedToken);
         session.getAttemptCounts().remove(tokenType);
         crossBrandEvaluator.recordValidated(session, tokenType);
 
@@ -182,6 +184,30 @@ public class AuthEngine {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
+    /**
+     * If the submitted token type matches a backup token for a required token
+     * on the active path, map it to the required token so the path check passes.
+     */
+    private TokenType resolveBackupToken(IvrSession session, BrandAuthConfig config, TokenType submittedType) {
+        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        if (rule == null) return submittedType;
+
+        int activePathIdx = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
+        if (activePathIdx >= rule.getPaths().size()) return submittedType;
+
+        TokenPath activePath = rule.getPaths().get(activePathIdx);
+        if (activePath.getBackupTokens() != null) {
+            for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
+                TokenType required = entry.getKey();
+                List<TokenType> backups = entry.getValue();
+                if (!session.getValidatedTokens().contains(required) && backups.contains(submittedType)) {
+                    return required;
+                }
+            }
+        }
+        return submittedType;
+    }
+
     private SessionResponse handleFailure(IvrSession session,
                                            BrandAuthConfig config,
                                            TokenType tokenType) {
@@ -246,14 +272,16 @@ public class AuthEngine {
                 .build();
         }
 
-        // All paths exhausted — fail
-        session.setStatus(SessionStatus.FAILED);
+        // All paths exhausted — lockout
+        session.setStatus(SessionStatus.LOCKED);
+        session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
         return SessionResponse.builder()
             .sessionId(session.getSessionId())
-            .status(SessionStatus.FAILED)
+            .status(SessionStatus.LOCKED)
             .currentLevel(session.getCurrentLevel())
             .targetLevel(session.getTargetLevel())
+            .lockedUntil(session.getLockedUntil())
             .prompt("Authentication failed. All retry attempts exhausted.")
             .build();
     }

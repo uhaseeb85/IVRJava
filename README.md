@@ -32,8 +32,8 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 | Validator Registry | Spring Bean Discovery | Maps `TokenType` → `TokenValidator` implementations |
 | Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level state as JSON columns |
 | Brand Config API | Spring MVC + File I/O | CRUD endpoints for managing brand JSON files |
-| Brand Editor UI | React SPA (in-browser Babel) | Visual editor for brand configurations |
-| API Docs | Springdoc OpenAPI 1.7 | Auto-generates Swagger UI from annotations |
+| Brand Editor UI | React SPA (in-browser Babel) | Visual editor for brand configurations at `http://localhost:8081/` |
+| API Docs | Springdoc OpenAPI 1.7 | Auto-generates Swagger UI at `http://localhost:8081/swagger-ui.html` |
 
 ---
 
@@ -241,9 +241,15 @@ src/main/java/com/yourco/ivr/
 │   ├── BrandRulesRegistry.java
 │   └── BrandRulesLoader.java       # Loads configs at startup
 ├── repository/
-│   ├── SessionRepository.java
-│   └── SqliteSessionRepository.java
+│   ├── DatabaseConfig.java         # DB schema initializer
+│   ├── SessionRepository.java      # Interface
+│   └── SqliteSessionRepository.java # SQLite + JdbcTemplate
 ├── exception/              # Custom exceptions
+│   ├── SessionNotFoundException.java
+│   ├── SessionLockedException.java
+│   ├── SessionSerializationException.java
+│   ├── UnknownBrandException.java
+│   └── UnsupportedTokenTypeException.java
 ├── IvrAuthEngineApplication.java
 └── OpenApiConfig.java
 
@@ -252,9 +258,9 @@ src/main/resources/
 ├── schema.sql
 └── static/index.html        # Brand Config Editor SPA
 
-config/brands/               # External brand config directory
-├── brand-a.json
-└── brand-b.json
+config/brands/               # External brand config directory (loaded at startup)
+├── brand_a.json              # BRAND_A — full example with 3 levels, backup tokens
+└── brand_b.json              # BRAND_B — simpler config with 2 levels
 
 src/test/java/com/yourco/ivr/
 └── IvrAuthIntegrationTest.java   # 7 integration tests (no mocking)

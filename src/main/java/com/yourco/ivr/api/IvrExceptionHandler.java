@@ -1,6 +1,7 @@
 package com.yourco.ivr.api;
 
 import com.yourco.ivr.api.dto.ErrorResponse;
+import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.exception.UnknownBrandException;
 import com.yourco.ivr.exception.UnsupportedTokenTypeException;
@@ -18,6 +19,12 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleNotFound(SessionNotFoundException e) {
         return ResponseEntity.status(404)
             .body(new ErrorResponse("SESSION_NOT_FOUND", e.getMessage()));
+    }
+
+    @ExceptionHandler(SessionLockedException.class)
+    public ResponseEntity<ErrorResponse> handleLocked(SessionLockedException e) {
+        return ResponseEntity.status(423)
+            .body(new ErrorResponse("SESSION_LOCKED", e.getMessage()));
     }
 
     @ExceptionHandler(UnknownBrandException.class)
