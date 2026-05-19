@@ -12,7 +12,7 @@ import java.util.Map;
 
 @Data
 @Schema(description = "Request to start a new IVR authentication session")
-public class StartSessionRequest {
+public class StartAuthenticateRequest {
     @Schema(description = "Brand identifier (e.g. BRAND_A, BRAND_B)", example = "BRAND_A")
     @NotBlank
     private String brandId;

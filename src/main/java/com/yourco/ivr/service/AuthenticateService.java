@@ -1,8 +1,8 @@
 package com.yourco.ivr.service;
 
+import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.api.dto.CallTransferRequest;
-import com.yourco.ivr.api.dto.SessionResponse;
-import com.yourco.ivr.api.dto.StartSessionRequest;
+import com.yourco.ivr.api.dto.StartAuthenticateRequest;
 import com.yourco.ivr.domain.*;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.engine.AuthEngine;
@@ -23,7 +23,7 @@ import java.util.Map;
 import java.util.UUID;
 
 @Service
-public class SessionService {
+public class AuthenticateService {
 
     private final AuthEngine engine;
     private final SessionRepository sessionRepo;
@@ -33,12 +33,12 @@ public class SessionService {
     private final CustomerPreferenceProvider preferenceProvider;
     private final DisambiguationEngine disambiguationEngine;
 
-    public SessionService(AuthEngine engine, SessionRepository sessionRepo,
-                          BrandRulesRegistry rulesRegistry,
-                          TransferPoliciesRegistry transferRegistry,
-                          PartyLookupProvider partyLookup,
-                          CustomerPreferenceProvider preferenceProvider,
-                          DisambiguationEngine disambiguationEngine) {
+    public AuthenticateService(AuthEngine engine, SessionRepository sessionRepo,
+                               BrandRulesRegistry rulesRegistry,
+                               TransferPoliciesRegistry transferRegistry,
+                               PartyLookupProvider partyLookup,
+                               CustomerPreferenceProvider preferenceProvider,
+                               DisambiguationEngine disambiguationEngine) {
         this.engine = engine;
         this.sessionRepo = sessionRepo;
         this.rulesRegistry = rulesRegistry;
@@ -48,7 +48,7 @@ public class SessionService {
         this.disambiguationEngine = disambiguationEngine;
     }
 
-    public SessionResponse start(StartSessionRequest req) {
+    public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
 
         IvrSession session = new IvrSession();
@@ -78,7 +78,7 @@ public class SessionService {
         sessionRepo.save(session);
 
         if (parties.size() > 1) {
-            SessionResponse disResp = disambiguationEngine.start(
+            AuthenticateResponse disResp = disambiguationEngine.start(
                 session, config.getDisambiguation());
             if (session.getPhase() == SessionPhase.AUTHENTICATING) {
                 return engine.evaluateProgress(session, config);
@@ -95,7 +95,7 @@ public class SessionService {
         // Process any initial tokens provided at session start
         if (req.getInitialTokens() != null && !req.getInitialTokens().isEmpty()) {
             for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
-                SessionResponse tokenResponse = engine.submitToken(
+                AuthenticateResponse tokenResponse = engine.submitToken(
                     session.getSessionId(), entry.getKey(), entry.getValue());
                 if (tokenResponse.getStatus() == SessionStatus.FAILED) {
                     return tokenResponse;
@@ -110,7 +110,7 @@ public class SessionService {
         return engine.evaluateProgress(session, config);
     }
 
-    public SessionResponse transfer(CallTransferRequest req) {
+    public AuthenticateResponse transfer(CallTransferRequest req) {
         // 1. Verify source system is known and enabled
         if (transferRegistry.get(req.getSourceSystemId()) == null) {
             throw new TransferNotAllowedException(
@@ -157,17 +157,17 @@ public class SessionService {
         return engine.transferSession(session, config, honoredTokens, req.getSourceSystemId());
     }
 
-    public SessionResponse submitToken(String sessionId, TokenType tokenType, String tokenValue) {
+    public AuthenticateResponse submitToken(String sessionId, TokenType tokenType, String tokenValue) {
         return engine.submitToken(sessionId, tokenType, tokenValue);
     }
 
-    public SessionResponse escalate(String sessionId, AuthLevel targetLevel) {
+    public AuthenticateResponse escalate(String sessionId, AuthLevel targetLevel) {
         return engine.escalate(sessionId, targetLevel);
     }
 
-    public SessionResponse getStatus(String sessionId) {
+    public AuthenticateResponse getStatus(String sessionId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
-        return SessionResponse.fromSession(session);
+        return AuthenticateResponse.fromSession(session);
     }
 
     public void end(String sessionId) {

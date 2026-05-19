@@ -1,6 +1,6 @@
 package com.yourco.ivr.engine;
 
-import com.yourco.ivr.api.dto.SessionResponse;
+import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.SessionPhase;
@@ -53,7 +53,7 @@ public class AuthEngine {
     /**
      * Called when the IVR platform submits a token value.
      */
-    public SessionResponse submitToken(String sessionId,
+    public AuthenticateResponse submitToken(String sessionId,
                                         TokenType tokenType,
                                         String tokenValue) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
@@ -62,7 +62,7 @@ public class AuthEngine {
         // Route to disambiguation if session is still resolving parties
         if (session.getPhase() == SessionPhase.DISAMBIGUATION) {
             DisambiguationConfig disConfig = config.getDisambiguation();
-            SessionResponse disResp = disambiguationEngine.handleToken(
+            AuthenticateResponse disResp = disambiguationEngine.handleToken(
                 session, tokenType, tokenValue, disConfig);
             if (session.getPhase() == SessionPhase.AUTHENTICATING) {
                 return evaluateProgress(session, config);
@@ -96,7 +96,7 @@ public class AuthEngine {
      * The session is pre-populated with validated tokens and the caller's
      * current auth level from the source system.
      */
-    public SessionResponse transferSession(IvrSession session,
+    public AuthenticateResponse transferSession(IvrSession session,
                                            BrandAuthConfig config,
                                            List<TokenType> validatedTokens,
                                            String sourceSystemId) {
@@ -115,7 +115,7 @@ public class AuthEngine {
     /**
      * Request to reach a higher auth level (mid-session upgrade).
      */
-    public SessionResponse escalate(String sessionId, AuthLevel newTarget) {
+    public AuthenticateResponse escalate(String sessionId, AuthLevel newTarget) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
         AuthLevel current = session.getCurrentLevel();
 
@@ -133,7 +133,7 @@ public class AuthEngine {
     /**
      * Evaluate whether the current validated tokens satisfy the target level.
      */
-    public SessionResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
+    public AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
         if (rule == null) {
             throw new IllegalArgumentException("No rule defined for level: " + session.getTargetLevel());
@@ -218,8 +218,8 @@ public class AuthEngine {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    private SessionResponse.SessionResponseBuilder baseResponse(IvrSession session) {
-        return SessionResponse.builder()
+    private AuthenticateResponse.AuthenticateResponseBuilder baseResponse(IvrSession session) {
+        return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
             .phase(session.getPhase())
             .currentLevel(session.getCurrentLevel())
@@ -252,7 +252,7 @@ public class AuthEngine {
         return submittedType;
     }
 
-    private SessionResponse handleFailure(IvrSession session,
+    private AuthenticateResponse handleFailure(IvrSession session,
                                            BrandAuthConfig config,
                                            TokenType tokenType) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
@@ -370,7 +370,7 @@ public class AuthEngine {
         return null;
     }
 
-    private SessionResponse advanceToNextPathOrFail(IvrSession session, BrandAuthConfig config,
+    private AuthenticateResponse advanceToNextPathOrFail(IvrSession session, BrandAuthConfig config,
                                                       LevelRule rule, int currentPathIdx) {
         Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
         int nextPathIdx = currentPathIdx + 1;

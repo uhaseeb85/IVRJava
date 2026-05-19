@@ -1,6 +1,6 @@
 package com.yourco.ivr.engine;
 
-import com.yourco.ivr.api.dto.SessionResponse;
+import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.domain.*;
 import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.engine.impl.ExcludeInactiveRule;
@@ -37,7 +37,7 @@ public class DisambiguationEngine {
         this.promptResolver = promptResolver;
     }
 
-    public SessionResponse start(IvrSession session, DisambiguationConfig config) {
+    public AuthenticateResponse start(IvrSession session, DisambiguationConfig config) {
         // 1. Apply configured rules
         List<Party> parties = applyRules(session.getCandidateParties(), config);
 
@@ -69,7 +69,7 @@ public class DisambiguationEngine {
         return buildResponse(session, prompt, nextToken);
     }
 
-    public SessionResponse handleToken(IvrSession session, TokenType tokenType,
+    public AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
                                         String tokenValue, DisambiguationConfig config) {
         // 1. Verify token is usable for disambiguation
         if (!TOKEN_FIELD_MAP.containsKey(tokenType)) {
@@ -194,7 +194,7 @@ public class DisambiguationEngine {
         }
     }
 
-    private SessionResponse resolveParty(IvrSession session, Party party) {
+    private AuthenticateResponse resolveParty(IvrSession session, Party party) {
         session.setMatchedParty(party);
         session.setCandidateParties(Collections.singletonList(party));
         session.setPhase(SessionPhase.AUTHENTICATING);
@@ -208,8 +208,8 @@ public class DisambiguationEngine {
             "Identity verified. Proceeding with authentication.", null);
     }
 
-    private SessionResponse buildResponse(IvrSession session, String prompt, TokenType nextToken) {
-        return SessionResponse.builder()
+    private AuthenticateResponse buildResponse(IvrSession session, String prompt, TokenType nextToken) {
+        return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
             .status(session.getStatus())
             .phase(session.getPhase())

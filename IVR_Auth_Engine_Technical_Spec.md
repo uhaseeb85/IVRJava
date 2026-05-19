@@ -297,7 +297,7 @@ public class AuthEngine {
     private final CrossBrandTokenEvaluator crossBrandEvaluator;
 
     /** Called when the IVR platform submits a token value. */
-    public SessionResponse submitToken(String sessionId,
+    public AuthenticateResponse submitToken(String sessionId,
                                        TokenType tokenType,
                                        String tokenValue) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
@@ -322,7 +322,7 @@ public class AuthEngine {
     }
 
     /** Request to reach a higher auth level (mid-session upgrade). */
-    public SessionResponse escalate(String sessionId, AuthLevel newTarget) {
+    public AuthenticateResponse escalate(String sessionId, AuthLevel newTarget) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
         AuthLevel current = session.getCurrentLevel();
 
@@ -339,7 +339,7 @@ public class AuthEngine {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
-    SessionResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
+    AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
         int activePathIdx = session.getActivePathIndexByLevel()
             .getOrDefault(session.getTargetLevel(), 0);
@@ -353,7 +353,7 @@ public class AuthEngine {
             session.setCurrentLevel(session.getTargetLevel());
             session.setStatus(SessionStatus.AUTHENTICATED);
             sessionRepo.save(session);
-            return SessionResponse.authenticated(session);
+            return AuthenticateResponse.authenticated(session);
         }
 
         // Find next missing token on this path
@@ -363,10 +363,10 @@ public class AuthEngine {
 
         session.setStatus(SessionStatus.COLLECTING);
         sessionRepo.save(session);
-        return SessionResponse.collect(session, nextToken, rule.getMaxRetriesPerToken());
+        return AuthenticateResponse.collect(session, nextToken, rule.getMaxRetriesPerToken());
     }
 
-    private SessionResponse handleFailure(IvrSession session,
+    private AuthenticateResponse handleFailure(IvrSession session,
                                            BrandAuthConfig config,
                                            TokenType tokenType) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
@@ -376,7 +376,7 @@ public class AuthEngine {
 
         if (remaining > 0) {
             sessionRepo.save(session);
-            return SessionResponse.retry(session, tokenType, remaining);
+            return AuthenticateResponse.retry(session, tokenType, remaining);
         }
 
         // Try advancing to next fallback path
@@ -394,14 +394,14 @@ public class AuthEngine {
                 .getRequiredTokens().stream()
                 .filter(t -> !session.getValidatedTokens().contains(t))
                 .findFirst().orElseThrow();
-            return SessionResponse.fallback(session, nextToken);
+            return AuthenticateResponse.fallback(session, nextToken);
         }
 
         // All paths exhausted → lock
         session.setStatus(SessionStatus.LOCKED);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
-        return SessionResponse.locked(session);
+        return AuthenticateResponse.locked(session);
     }
 
     private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {
@@ -675,7 +675,7 @@ public class CallTransferRequest {
 ```
 External System (LEGACY_IVR)    TransferController     TransferPoliciesRegistry     AuthEngine
         |                              |                           |                    |
-        | POST /ivr/session/transfer   |                           |                    |
+        | POST /ivr/authenticate/transfer   |                           |                    |
         | {source:"LEGACY_IVR",        |                           |                    |
         |  validated:[ACCOUNT_NUMBER],  |                           |                    |
         |  currentLevel:BASIC,          |                           |                    |
@@ -708,7 +708,7 @@ External System (LEGACY_IVR)    TransferController     TransferPoliciesRegistry 
 ### 7.6 AuthEngine.transferSession()
 
 ```java
-public SessionResponse transferSession(IvrSession session,
+public AuthenticateResponse transferSession(IvrSession session,
                                        BrandAuthConfig config,
                                        List<TokenType> validatedTokens,
                                        String sourceSystemId) {
@@ -731,103 +731,69 @@ public SessionResponse transferSession(IvrSession session,
 
 | Method + Path | Purpose | Notes |
 |---|---|---|
-| `POST /ivr/session/start` | Create session, set brand + target | Returns first token prompt |
-| `POST /ivr/session/transfer` | Accept call transfer with pre-validated tokens | Per-source token/level policies apply |
-| `POST /ivr/session/{id}/token` | Submit a collected token | Core loop endpoint |
-| `POST /ivr/session/{id}/escalate` | Request higher auth level | Incremental — reuses existing tokens |
-| `GET /ivr/session/{id}/status` | Poll current session state | For async IVR flows |
-| `DELETE /ivr/session/{id}` | End session (hangup) | Cleanup only |
+| `POST /ivr/authenticate` | Unified endpoint — start, transfer, submit token, or escalate | Discriminated by payload fields |
+| `GET /ivr/authenticate/{id}/status` | Poll current session state | For async IVR flows |
+| `DELETE /ivr/authenticate/{id}` | End session (hangup) | Cleanup only |
 
-### 8.2 SessionController.java
+**Discrimination logic:**
+- No `sessionId`, no `sourceSystemId` → START
+- No `sessionId`, has `sourceSystemId` → TRANSFER
+- Has `sessionId`, has `tokenType` → TOKEN
+- Has `sessionId`, no `tokenType`, has `targetLevel` → ESCALATE
+
+### 8.2 AuthenticateController.java
 
 ```java
 @RestController
-@RequestMapping("/ivr/session")
-@RequiredArgsConstructor
-public class SessionController {
+@RequestMapping("/ivr/authenticate")
+public class AuthenticateController {
 
-    private final SessionService sessionService;
+    private final AuthenticateService sessionService;
 
-    @PostMapping("/start")
-    public ResponseEntity<SessionResponse> start(
-            @RequestBody @Valid StartSessionRequest req) {
-        return ResponseEntity.ok(sessionService.start(req));
-    }
-
-    @PostMapping("/{sessionId}/token")
-    public ResponseEntity<SessionResponse> submitToken(
-            @PathVariable String sessionId,
-            @RequestBody @Valid TokenSubmitRequest req) {
-        return ResponseEntity.ok(
-            sessionService.submitToken(sessionId, req.getTokenType(), req.getTokenValue())
-        );
-    }
-
-    @PostMapping("/{sessionId}/escalate")
-    public ResponseEntity<SessionResponse> escalate(
-            @PathVariable String sessionId,
-            @RequestBody @Valid EscalateRequest req) {
-        return ResponseEntity.ok(
-            sessionService.escalate(sessionId, req.getTargetLevel())
-        );
+    @PostMapping
+    public ResponseEntity<AuthenticateResponse> handle(@RequestBody SessionRequest req) {
+        if (req.getSessionId() == null) {
+            if (req.getSourceSystemId() != null) {
+                return transfer(req);   // builds CallTransferRequest
+            }
+            return start(req);          // builds StartAuthenticateRequest
+        }
+        if (req.getTokenType() != null) {
+            return token(req);          // → sessionService.submitToken()
+        }
+        return escalate(req);           // → sessionService.escalate()
     }
 
     @GetMapping("/{sessionId}/status")
-    public ResponseEntity<SessionResponse> status(@PathVariable String sessionId) {
-        return ResponseEntity.ok(sessionService.getStatus(sessionId));
-    }
+    public ResponseEntity<AuthenticateResponse> status(@PathVariable String sessionId);
 
     @DeleteMapping("/{sessionId}")
-    public ResponseEntity<Void> end(@PathVariable String sessionId) {
-        sessionService.end(sessionId);
-        return ResponseEntity.noContent().build();
-    }
+    public ResponseEntity<Void> end(@PathVariable String sessionId);
 }
 ```
 
 ### 8.3 Request / Response DTOs
 
 ```java
-// StartSessionRequest.java
+// AuthenticateRequest.java — unified DTO for all post actions
 @Data
-public class StartSessionRequest {
-    @NotBlank  private String brandId;
-    @NotBlank  private String callerId;
-    @NotNull   private AuthLevel targetLevel;
-    // Optional: pre-validated tokens carried in from a prior brand context
+public class AuthenticateRequest {
+    private String sessionId;
+    private String brandId;
+    private String callerId;
+    private AuthLevel targetLevel;
+    private String sourceSystemId;
+    private AuthLevel currentLevel;
+    private List<TokenType> validatedTokens;
+    private TokenType tokenType;
+    private String tokenValue;
     private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
-    // Optional: pre-collected token values submitted at session start
-    // (e.g. caller already entered account number before session began)
     private Map<TokenType, String> initialTokens;
 }
 
-// CallTransferRequest.java
-@Data
-public class CallTransferRequest {
-    @NotBlank  private String sourceSystemId;
-    @NotBlank  private String brandId;
-    @NotBlank  private String callerId;
-    private AuthLevel currentLevel;
-    @NotNull   private AuthLevel targetLevel;
-    private List<TokenType> validatedTokens;
-}
-
-// TokenSubmitRequest.java
-@Data
-public class TokenSubmitRequest {
-    @NotNull   private TokenType tokenType;
-    @NotBlank  private String tokenValue;
-}
-
-// EscalateRequest.java
-@Data
-public class EscalateRequest {
-    @NotNull   private AuthLevel targetLevel;
-}
-
-// SessionResponse.java
+// AuthenticateResponse.java
 @Data @Builder
-public class SessionResponse {
+public class AuthenticateResponse {
     private String          sessionId;
     private SessionStatus   status;
     private AuthLevel       currentLevel;
@@ -847,13 +813,13 @@ public class SessionResponse {
 ```java
 @Service
 @RequiredArgsConstructor
-public class SessionService {
+public class AuthenticateService {
 
     private final AuthEngine         engine;
     private final SessionRepository  sessionRepo;
     private final BrandRulesRegistry rulesRegistry;
 
-    public SessionResponse start(StartSessionRequest req) {
+    public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
         if (config == null)
             throw new UnknownBrandException(req.getBrandId());
@@ -881,17 +847,17 @@ public class SessionService {
         return engine.evaluateProgress(session, config);
     }
 
-    public SessionResponse submitToken(String id, TokenType type, String value) {
+    public AuthenticateResponse submitToken(String id, TokenType type, String value) {
         return engine.submitToken(id, type, value);
     }
 
-    public SessionResponse escalate(String id, AuthLevel target) {
+    public AuthenticateResponse escalate(String id, AuthLevel target) {
         return engine.escalate(id, target);
     }
 
-    public SessionResponse getStatus(String id) {
+    public AuthenticateResponse getStatus(String id) {
         IvrSession session = sessionRepo.getOrThrow(id);
-        return SessionResponse.fromSession(session);
+        return AuthenticateResponse.fromSession(session);
     }
 
     public void end(String id) {
@@ -1057,7 +1023,7 @@ public class SqliteSessionRepository implements SessionRepository {
 ### 11.1 Normal Auth Flow (Single Brand, No Fallback)
 
 ```
-IVR Platform          SessionController     AuthEngine             ExternalAPI
+IVR Platform          AuthenticateController     AuthEngine             ExternalAPI
      |                       |                   |                     |
      |  POST /session/start  |                   |                     |
      |---------------------->|                   |                     |
@@ -1134,9 +1100,9 @@ Brand C sharingPolicy lists OTP as conditionallySharedFrom: [BRAND_A], TTL = 180
 ### 11.5 Call Transfer Flow
 
 ```
-External System (LEGACY_IVR)   SessionController   TransferPoliciesRegistry   AuthEngine
+External System (LEGACY_IVR)   AuthenticateController   TransferPoliciesRegistry   AuthEngine
        |                             |                       |                    |
-       | POST /ivr/session/transfer  |                       |                    |
+       | POST /ivr/authenticate/transfer  |                       |                    |
        | {source:"LEGACY_IVR",       |                       |                    |
        |  validated:[ACCOUNT_NUMBER],|                       |                    |
        |  currentLevel:BASIC,        |                       |                    |
@@ -1229,13 +1195,13 @@ public class IvrExceptionHandler {
 ```
 com.yourco.ivr
 ├── api
-│   ├── SessionController.java
+│   ├── AuthenticateController.java
 │   └── dto/
 │       ├── CallTransferRequest.java
-│       ├── StartSessionRequest.java
+│       ├── StartAuthenticateRequest.java
 │       ├── TokenSubmitRequest.java
 │       ├── EscalateRequest.java
-│       └── SessionResponse.java
+│       └── AuthenticateResponse.java
 ├── domain
 │   ├── AuthLevel.java
 │   ├── TokenType.java
@@ -1254,7 +1220,7 @@ com.yourco.ivr
 │   ├── CrossBrandTokenEvaluator.java
 │   └── PromptResolver.java
 ├── service
-│   ├── SessionService.java
+│   ├── AuthenticateService.java
 │   └── BrandService.java
 ├── validator
 │   ├── TokenValidator.java
@@ -1364,10 +1330,10 @@ public class DisambiguationEngine {
     }
 
     /** Called on session start to initialize disambiguation. */
-    SessionResponse start(IvrSession session, DisambiguationConfig config);
+    AuthenticateResponse start(IvrSession session, DisambiguationConfig config);
 
     /** Called when a token is submitted during disambiguation phase. */
-    SessionResponse handleToken(IvrSession session, TokenType tokenType,
+    AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
                                  String tokenValue, DisambiguationConfig config);
 
     /** Selects the token that best differentiates remaining parties. */
@@ -1516,7 +1482,7 @@ private TokenType findAlternativeToken(IvrSession session,
 Preferences are loaded by `DisambiguationEngine.resolveParty()` immediately after a single party is identified:
 
 ```java
-private SessionResponse resolveParty(IvrSession session, Party party) {
+private AuthenticateResponse resolveParty(IvrSession session, Party party) {
     session.setMatchedParty(party);
     session.setPhase(SessionPhase.AUTHENTICATING);
     CustomerPreference prefs = preferenceProvider.getPreferences(
@@ -1573,8 +1539,8 @@ Customer asked only for allowed tokens
 5. Replace stubs with real external API clients one validator at a time
 
 ### Phase 4 — API Layer
-1. Implement `SessionController` and all 5 endpoints
-2. Implement `SessionService` wiring engine and session repo
+1. Implement `AuthenticateController` and all 5 endpoints
+2. Implement `AuthenticateService` wiring engine and session repo
 3. Implement `IvrExceptionHandler` with appropriate HTTP status codes
 4. Add request validation (`@Valid`, `@NotNull`, `@NotBlank`) on all DTOs
 5. Integration-test each endpoint with MockMvc against in-memory session store
@@ -1599,8 +1565,8 @@ Customer asked only for allowed tokens
 4. Implement `TransferNotAllowedException` and wire into `IvrExceptionHandler` (HTTP 403)
 5. Add `transferredFrom` field to `IvrSession`, DB schema, and repository
 6. Implement `AuthEngine.transferSession()` — populate validated/cross-brand tokens from transfer
-7. Implement `POST /ivr/session/transfer` endpoint in `SessionController`
-8. Wire token filtering and level capping in `SessionService.transfer()`
+7. Implement `POST /ivr/authenticate/transfer` endpoint in `AuthenticateController`
+8. Wire token filtering and level capping in `AuthenticateService.transfer()`
 9. Create default `config/transfers/transfer-policies.json` with sample policies
 10. Integration-test: happy path, token filtering, level capping, unknown source, disabled source
 
@@ -1614,10 +1580,10 @@ Customer asked only for allowed tokens
 7. Add `phase`, `candidateParties`, `matchedParty`, `customerPreferences`, `disambiguationAttemptCount` to `IvrSession`
 8. Update DB schema and `SqliteSessionRepository` for new fields
 9. Add `DisambiguationConfig` to `BrandAuthConfig` and brand JSON files
-10. Wire party lookup and disambiguation into `SessionService.start()`
+10. Wire party lookup and disambiguation into `AuthenticateService.start()`
 11. Route `DISAMBIGUATION` phase in `AuthEngine.submitToken()` to `DisambiguationEngine`
 12. Add preference filtering in `AuthEngine.evaluateProgress()` and `buildAcceptedTokens()`
-13. Add `phase` and `matchedPartyId` to `SessionResponse`
+13. Add `phase` and `matchedPartyId` to `AuthenticateResponse`
 14. Implement `UnknownCallerException` and wire into `IvrExceptionHandler`
 15. Integration-test: single party, multi-party, rules narrowing, zero parties, max rounds, disabled config, preference filtering
 

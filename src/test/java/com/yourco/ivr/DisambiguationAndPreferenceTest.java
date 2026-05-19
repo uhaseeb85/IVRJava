@@ -1,8 +1,7 @@
 package com.yourco.ivr;
 
-import com.yourco.ivr.api.dto.SessionResponse;
-import com.yourco.ivr.api.dto.StartSessionRequest;
-import com.yourco.ivr.api.dto.TokenSubmitRequest;
+import com.yourco.ivr.api.dto.AuthenticateRequest;
+import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.domain.*;
 import com.yourco.ivr.partylookup.PartyLookupProvider;
 import com.yourco.ivr.preference.CustomerPreferenceProvider;
@@ -43,24 +42,28 @@ class DisambiguationAndPreferenceTest {
         return p;
     }
 
-    private StartSessionRequest startRequest(String brandId, String callerId, AuthLevel target) {
-        StartSessionRequest req = new StartSessionRequest();
-        req.setBrandId(brandId);
-        req.setCallerId(callerId);
-        req.setTargetLevel(target);
-        return req;
+    private AuthenticateRequest req() {
+        return new AuthenticateRequest();
     }
 
-    private TokenSubmitRequest tokenReq(TokenType type, String value) {
-        TokenSubmitRequest req = new TokenSubmitRequest();
-        req.setTokenType(type);
-        req.setTokenValue(value);
-        return req;
+    private ResponseEntity<AuthenticateResponse> post(AuthenticateRequest req) {
+        return rest.postForEntity("/ivr/authenticate", req, AuthenticateResponse.class);
     }
 
-    private ResponseEntity<SessionResponse> submitToken(String sessionId, TokenType type, String value) {
-        return rest.postForEntity(
-            "/ivr/session/" + sessionId + "/token", tokenReq(type, value), SessionResponse.class);
+    private AuthenticateRequest startReq(String brandId, String callerId, AuthLevel target) {
+        AuthenticateRequest r = req();
+        r.setBrandId(brandId);
+        r.setCallerId(callerId);
+        r.setTargetLevel(target);
+        return r;
+    }
+
+    private AuthenticateRequest tokenReq(String sessionId, TokenType type, String value) {
+        AuthenticateRequest r = req();
+        r.setSessionId(sessionId);
+        r.setTokenType(type);
+        r.setTokenValue(value);
+        return r;
     }
 
     // ── Disambiguation Tests ─────────────────────────────────────────────────
@@ -72,9 +75,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> resp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5551111111", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5551111111", AuthLevel.BASIC));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(resp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
@@ -90,9 +91,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5552222222", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5552222222", AuthLevel.BASIC));
 
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(startResp.getBody().getPhase()).isEqualTo(SessionPhase.DISAMBIGUATION);
@@ -101,12 +100,11 @@ class DisambiguationAndPreferenceTest {
 
         String sessionId = startResp.getBody().getSessionId();
 
-        // Submit token that matches P1
         String value = disambigToken == TokenType.ACCOUNT_NUMBER ? "111111"
             : disambigToken == TokenType.SSN_LAST4 ? "1234"
             : disambigToken == TokenType.DATE_OF_BIRTH ? "1985-03-15" : "";
 
-        ResponseEntity<SessionResponse> tokenResp = submitToken(sessionId, disambigToken, value);
+        ResponseEntity<AuthenticateResponse> tokenResp = post(tokenReq(sessionId, disambigToken, value));
         assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(tokenResp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
         assertThat(tokenResp.getBody().getMatchedPartyId()).isEqualTo("P1");
@@ -120,11 +118,8 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> resp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5553333333", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5553333333", AuthLevel.BASIC));
 
-        // EXCLUDE_INACTIVE rule should filter out p2, leaving only p1
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(resp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
         assertThat(resp.getBody().getMatchedPartyId()).isEqualTo("P1");
@@ -134,9 +129,7 @@ class DisambiguationAndPreferenceTest {
     void testDisambiguationZeroParties() {
         when(partyLookup.lookupByAni("5550000000")).thenReturn(Collections.emptyList());
 
-        ResponseEntity<SessionResponse> resp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5550000000", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5550000000", AuthLevel.BASIC));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
@@ -150,9 +143,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5554444444", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5554444444", AuthLevel.BASIC));
 
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(startResp.getBody().getPhase()).isEqualTo(SessionPhase.DISAMBIGUATION);
@@ -160,25 +151,20 @@ class DisambiguationAndPreferenceTest {
         String sessionId = startResp.getBody().getSessionId();
         TokenType token = startResp.getBody().getNextRequiredToken();
 
-        // Submit twice: first bumps count 1→2, second bumps 2→3 (max=3) → FAILED
-        submitToken(sessionId, token, "111111");
-        ResponseEntity<SessionResponse> resp = submitToken(sessionId, token, "111111");
+        post(tokenReq(sessionId, token, "111111"));
+        ResponseEntity<AuthenticateResponse> resp = post(tokenReq(sessionId, token, "111111"));
 
         assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.FAILED);
     }
 
     @Test
     void testDefaultDisambiguationSingleParty() {
-        // BRAND_A has no disambiguation block → uses defaults.
-        // Mock returns one party → 1 party → skip disambiguation → auth.
         Party p1 = createParty("P1", "111111", "1985-03-15", "1234", true, true);
         when(partyLookup.lookupByAni("5555555555")).thenReturn(Collections.singletonList(p1));
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> resp = rest.postForEntity(
-            "/ivr/session/start", startRequest("BRAND_A", "5555555555", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("BRAND_A", "5555555555", AuthLevel.BASIC));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(resp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
@@ -194,17 +180,14 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5556666666", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5556666666", AuthLevel.BASIC));
 
         assertThat(startResp.getBody().getPhase()).isEqualTo(SessionPhase.DISAMBIGUATION);
         String sessionId = startResp.getBody().getSessionId();
 
-        // Submit a disambiguating token
         TokenType token = startResp.getBody().getNextRequiredToken();
         String value = token == TokenType.ACCOUNT_NUMBER ? "111111" : "1234";
-        ResponseEntity<SessionResponse> tokenResp = submitToken(sessionId, token, value);
+        ResponseEntity<AuthenticateResponse> tokenResp = post(tokenReq(sessionId, token, value));
 
         assertThat(tokenResp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
         assertThat(tokenResp.getBody().getMatchedPartyId()).isEqualTo("P1");
@@ -218,23 +201,17 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5557777777", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5557777777", AuthLevel.BASIC));
 
         String sessionId = startResp.getBody().getSessionId();
         TokenType disambigToken = startResp.getBody().getNextRequiredToken();
 
-        // Submit the disambiguating token (matches P1)
         String value = disambigToken == TokenType.ACCOUNT_NUMBER ? "111111"
             : disambigToken == TokenType.SSN_LAST4 ? "1234"
             : "1985-03-15";
-        ResponseEntity<SessionResponse> resolvedResp = submitToken(sessionId, disambigToken, value);
+        ResponseEntity<AuthenticateResponse> resolvedResp = post(tokenReq(sessionId, disambigToken, value));
 
         assertThat(resolvedResp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
-
-        // Auth should start fresh — ACCOUNT_NUMBER must be collected even if it was
-        // used during disambiguation (sequential phase separation)
         assertThat(resolvedResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
     }
 
@@ -249,17 +226,13 @@ class DisambiguationAndPreferenceTest {
         prefs.setBlockedTokens(EnumSet.of(TokenType.PIN));
         when(preferenceProvider.getPreferences(anyString(), anyString())).thenReturn(prefs);
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5558888888", AuthLevel.STANDARD),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5558888888", AuthLevel.STANDARD));
 
         assertThat(startResp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
         String sessionId = startResp.getBody().getSessionId();
 
-        // Submit ACCOUNT_NUMBER
-        ResponseEntity<SessionResponse> tokenResp = submitToken(sessionId, TokenType.ACCOUNT_NUMBER, "111111");
+        ResponseEntity<AuthenticateResponse> tokenResp = post(tokenReq(sessionId, TokenType.ACCOUNT_NUMBER, "111111"));
 
-        // PIN is blocked, SSN_LAST4 is the backup — it should be the next required token
         assertThat(tokenResp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
         assertThat(tokenResp.getBody().getNextRequiredToken()).isIn(TokenType.SSN_LAST4, TokenType.DATE_OF_BIRTH);
     }
@@ -273,16 +246,12 @@ class DisambiguationAndPreferenceTest {
         prefs.setBlockedTokens(EnumSet.of(TokenType.PIN, TokenType.SSN_LAST4, TokenType.DATE_OF_BIRTH));
         when(preferenceProvider.getPreferences(anyString(), anyString())).thenReturn(prefs);
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5559999999", AuthLevel.STANDARD),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5559999999", AuthLevel.STANDARD));
 
         String sessionId = startResp.getBody().getSessionId();
 
-        // Submit ACCOUNT_NUMBER — should trigger path fallback since PIN + backups are blocked
-        ResponseEntity<SessionResponse> tokenResp = submitToken(sessionId, TokenType.ACCOUNT_NUMBER, "111111");
+        ResponseEntity<AuthenticateResponse> tokenResp = post(tokenReq(sessionId, TokenType.ACCOUNT_NUMBER, "111111"));
 
-        // Should have fallen back to path 1 (OTP path)
         assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
         assertThat(tokenResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
     }
@@ -294,15 +263,12 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5551212121", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5551212121", AuthLevel.BASIC));
 
         String sessionId = startResp.getBody().getSessionId();
 
-        // Fetch status to verify persisted session
-        ResponseEntity<SessionResponse> statusResp = rest.getForEntity(
-            "/ivr/session/" + sessionId + "/status", SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> statusResp = rest.getForEntity(
+            "/ivr/authenticate/" + sessionId + "/status", AuthenticateResponse.class);
 
         assertThat(statusResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(statusResp.getBody().getMatchedPartyId()).isEqualTo("P1");
@@ -318,15 +284,12 @@ class DisambiguationAndPreferenceTest {
         prefs.setBlockedTokens(EnumSet.of(TokenType.PIN));
         when(preferenceProvider.getPreferences(anyString(), anyString())).thenReturn(prefs);
 
-        ResponseEntity<SessionResponse> startResp = rest.postForEntity(
-            "/ivr/session/start", startRequest("TEST_BRAND", "5551313131", AuthLevel.BASIC),
-            SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5551313131", AuthLevel.BASIC));
 
         String sessionId = startResp.getBody().getSessionId();
 
-        // Fetch status — session should be rehydrated with preferences intact
-        ResponseEntity<SessionResponse> statusResp = rest.getForEntity(
-            "/ivr/session/" + sessionId + "/status", SessionResponse.class);
+        ResponseEntity<AuthenticateResponse> statusResp = rest.getForEntity(
+            "/ivr/authenticate/" + sessionId + "/status", AuthenticateResponse.class);
 
         assertThat(statusResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(statusResp.getBody().getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);

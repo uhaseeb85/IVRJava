@@ -75,7 +75,7 @@ http://localhost:8080/v3/api-docs
 4. **Try a full auth flow**:
 
    **Step 1 — Start a session:**
-   - Click `POST /ivr/session/start` → "Try it out"
+      - Click `POST /ivr/authenticate` → "Try it out"
    - Paste this body:
      ```json
      {
@@ -87,28 +87,27 @@ http://localhost:8080/v3/api-docs
    - Click "Execute" → copy the `sessionId` from the response
 
    **Step 2 — Submit an account number:**
-   - Click `POST /ivr/session/{sessionId}/token` → "Try it out"
-   - Paste the `sessionId` into the path field
-   - Body:
+   - Click `POST /ivr/authenticate` → "Try it out"
+   - Paste the `sessionId` and body:
      ```json
-     { "tokenType": "ACCOUNT_NUMBER", "tokenValue": "123456789" }
+     { "sessionId": "<id>", "tokenType": "ACCOUNT_NUMBER", "tokenValue": "123456789" }
      ```
    - Execute → you'll be prompted for PIN next
 
    **Step 3 — Submit a PIN:**
    - Same endpoint, same `sessionId`, body:
      ```json
-     { "tokenType": "PIN", "tokenValue": "1234" }
+     { "sessionId": "<id>", "tokenType": "PIN", "tokenValue": "1234" }
      ```
    - Execute → response shows `AUTHENTICATED` status
 
    **Step 4 — Escalate to ELEVATED:**
-   - Click `POST /ivr/session/{sessionId}/escalate`
-   - Body: `{ "targetLevel": "ELEVATED" }`
+   - Click `POST /ivr/authenticate`
+   - Body: `{ "sessionId": "<id>", "targetLevel": "ELEVATED" }`
    - Execute → prompted for OTP
 
    **Step 5 — Check status anytime:**
-   - Click `GET /ivr/session/{sessionId}/status`
+   - Click `GET /ivr/authenticate/{sessionId}/status`
    - Execute → see current level, validated tokens, etc.
 
 ### Swagger UI Features
@@ -127,7 +126,7 @@ src/
 ├── main/
 │   ├── java/com/yourco/ivr/
 │   │   ├── api/               # REST controllers + DTOs
-│   │   │   ├── SessionController.java
+│   │   │   ├── AuthenticateController.java
 │   │   │   ├── IvrExceptionHandler.java
 │   │   │   └── dto/
 │   │   ├── domain/            # Core domain model
@@ -137,7 +136,7 @@ src/
 │   │   │   ├── AuthEngine.java
 │   │   │   ├── CrossBrandTokenEvaluator.java
 │   │   │   └── PromptResolver.java
-│   │   ├── service/           # SessionService orchestrator
+│   │   ├── service/           # AuthenticateService orchestrator
 │   │   ├── validator/         # Token validation layer
 │   │   │   ├── TokenValidator.java (interface)
 │   │   │   ├── TokenValidatorRegistry.java
@@ -183,16 +182,14 @@ Add a new brand by creating a new `.json` file in the `brands/` directory and re
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/ivr/session/start` | Create a new session |
-| `POST` | `/ivr/session/{id}/token` | Submit a token for validation |
-| `POST` | `/ivr/session/{id}/escalate` | Request higher auth level |
-| `GET` | `/ivr/session/{id}/status` | Poll current session state |
-| `DELETE` | `/ivr/session/{id}` | End / hang up session |
+| `POST` | `/ivr/authenticate` | Unified endpoint — start, transfer, submit token, or escalate |
+| `GET` | `/ivr/authenticate/{id}/status` | Poll current session state |
+| `DELETE` | `/ivr/authenticate/{id}` | End / hang up session |
 
 ### Example: Start a Session
 
 ```bash
-curl -X POST http://localhost:8080/ivr/session/start \
+curl -X POST http://localhost:8080/ivr/authenticate \
   -H "Content-Type: application/json" \
   -d '{
     "brandId": "BRAND_A",

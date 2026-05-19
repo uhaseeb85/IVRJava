@@ -18,8 +18,8 @@ import java.util.List;
 @Builder
 @NoArgsConstructor
 @AllArgsConstructor
-@Schema(description = "Response returned by all IVR session endpoints")
-public class SessionResponse {
+@Schema(description = "Response returned by all IVR authentication endpoints")
+public class AuthenticateResponse {
     @Schema(description = "Unique session identifier")
     private String sessionId;
 
@@ -53,8 +53,8 @@ public class SessionResponse {
     @Schema(description = "ID of the matched party once disambiguation resolves (null otherwise)")
     private String matchedPartyId;
 
-    public static SessionResponse fromSession(IvrSession session) {
-        return SessionResponse.builder()
+    public static AuthenticateResponse fromSession(IvrSession session) {
+        return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
             .status(session.getStatus())
             .phase(session.getPhase())

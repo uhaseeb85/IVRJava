@@ -81,12 +81,9 @@ http://localhost:8081/
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/ivr/session/start` | Create a new session for a brand + target level |
-| `POST` | `/ivr/session/transfer` | Accept a call transfer with pre-validated tokens |
-| `POST` | `/ivr/session/{id}/token` | Submit a collected token (PIN, OTP, etc.) |
-| `POST` | `/ivr/session/{id}/escalate` | Request a higher auth level mid-session |
-| `GET` | `/ivr/session/{id}/status` | Poll current session state |
-| `DELETE` | `/ivr/session/{id}` | End / hang up a session |
+| `POST` | `/ivr/authenticate` | Unified endpoint — start, transfer, submit token, or escalate (discriminated by payload) |
+| `GET` | `/ivr/authenticate/{id}/status` | Poll current session state |
+| `DELETE` | `/ivr/authenticate/{id}` | End / hang up a session |
 
 ### Brand Config Endpoints
 
@@ -102,36 +99,29 @@ http://localhost:8081/
 
 ```bash
 # 1. Start a session
-curl -X POST http://localhost:8081/ivr/session/start \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
   -d '{"brandId":"BRAND_A","callerId":"5551234567","targetLevel":"STANDARD"}'
 
-# Response → { "nextRequiredToken": "ACCOUNT_NUMBER",
-#              "acceptedTokens": ["ACCOUNT_NUMBER"], ... }
+# Response → { "nextRequiredToken": "ACCOUNT_NUMBER", ... }
 # Copy the sessionId from the response.
 
 # 2. Submit account number
-curl -X POST http://localhost:8081/ivr/session/{sessionId}/token \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
-  -d '{"tokenType":"ACCOUNT_NUMBER","tokenValue":"123456789"}'
-
-# Response → { "nextRequiredToken": "PIN",
-#              "acceptedTokens": ["PIN", "SSN_LAST4", "DATE_OF_BIRTH"], ... }
-# Note: PIN can be substituted with SSN_LAST4 or DATE_OF_BIRTH as per backupTokens config.
+  -d '{"sessionId":"<id>","tokenType":"ACCOUNT_NUMBER","tokenValue":"123456789"}'
 
 # 3. Submit PIN → authenticated at STANDARD level
-curl -X POST http://localhost:8081/ivr/session/{sessionId}/token \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
-  -d '{"tokenType":"PIN","tokenValue":"1234"}'
+  -d '{"sessionId":"<id>","tokenType":"PIN","tokenValue":"1234"}'
 
 # Response → { "status": "AUTHENTICATED", "currentLevel": "STANDARD", ... }
 
 # 4. Escalate to ELEVATED
-curl -X POST http://localhost:8081/ivr/session/{sessionId}/escalate \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
-  -d '{"targetLevel":"ELEVATED"}'
-
-# Response → { "nextRequiredToken": "OTP", ... }
+  -d '{"sessionId":"<id>","targetLevel":"ELEVATED"}'
 ```
 
 ### Initial Tokens at Session Start
@@ -139,7 +129,7 @@ curl -X POST http://localhost:8081/ivr/session/{sessionId}/escalate \
 Clients can submit pre-collected tokens when creating a session:
 
 ```bash
-curl -X POST http://localhost:8081/ivr/session/start \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
   -d '{
     "brandId": "BRAND_A",
@@ -156,7 +146,7 @@ The engine processes initial tokens through the same validation pipeline before 
 Accept a caller transferred from an external system with pre-validated tokens:
 
 ```bash
-curl -X POST http://localhost:8081/ivr/session/transfer \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
   -d '{
     "sourceSystemId": "LEGACY_IVR",
@@ -166,8 +156,6 @@ curl -X POST http://localhost:8081/ivr/session/transfer \
     "targetLevel": "STANDARD",
     "validatedTokens": ["ACCOUNT_NUMBER"]
   }'
-
-# Response → { "nextRequiredToken": "PIN", "currentLevel": "BASIC", ... }
 ```
 
 Tokens are filtered per the source system's transfer policy (see `./config/transfers/`). The caller's `currentLevel` is capped at the policy's `maxHonoredLevel`. Attempt counts always reset.
@@ -307,7 +295,7 @@ Per-source transfer policies control which external systems can transfer calls a
 ```
 src/main/java/com/yourco/ivr/
 ├── api/                    # REST layer
-│   ├── SessionController.java       # Session endpoints (6 total)
+│   ├── AuthenticateController.java  # Unified session endpoints (3 total)
 │   ├── BrandController.java         # Brand CRUD endpoints
 │   ├── IvrExceptionHandler.java     # Global error handler
 │   └── dto/                         # Request/Response DTOs
@@ -345,7 +333,7 @@ src/main/java/com/yourco/ivr/
 │   ├── CustomerPreferenceProvider.java
 │   └── StubCustomerPreferenceProvider.java
 ├── service/
-│   ├── SessionService.java         # Session orchestrator
+│   ├── AuthenticateService.java     # Session orchestrator
 │   └── BrandService.java           # Brand file CRUD orchestrator
 ├── validator/
 │   ├── TokenValidator.java         # Interface
