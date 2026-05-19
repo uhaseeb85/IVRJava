@@ -8,6 +8,8 @@ Key capabilities:
 - Multi-brand rule isolation with independent auth levels
 - Shared token validators via a global registry
 - Cross-brand token sharing with TTL-based policies
+- Party disambiguation when ANI maps to multiple customers
+- Customer preference filtering (blocked tokens, max level caps)
 - Progressive authentication (start at `NONE`, escalate mid-session)
 - Declarative JSON-driven rules — no code changes required for reconfiguration
 

@@ -3,13 +3,14 @@ package com.yourco.ivr.service;
 import com.yourco.ivr.api.dto.CallTransferRequest;
 import com.yourco.ivr.api.dto.SessionResponse;
 import com.yourco.ivr.api.dto.StartSessionRequest;
-import com.yourco.ivr.domain.AuthLevel;
-import com.yourco.ivr.domain.IvrSession;
-import com.yourco.ivr.domain.SessionStatus;
-import com.yourco.ivr.domain.TokenType;
+import com.yourco.ivr.domain.*;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.engine.AuthEngine;
+import com.yourco.ivr.engine.DisambiguationEngine;
 import com.yourco.ivr.exception.TransferNotAllowedException;
+import com.yourco.ivr.exception.UnknownCallerException;
+import com.yourco.ivr.partylookup.PartyLookupProvider;
+import com.yourco.ivr.preference.CustomerPreferenceProvider;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.registry.TransferPoliciesRegistry;
 import com.yourco.ivr.repository.SessionRepository;
@@ -28,14 +29,23 @@ public class SessionService {
     private final SessionRepository sessionRepo;
     private final BrandRulesRegistry rulesRegistry;
     private final TransferPoliciesRegistry transferRegistry;
+    private final PartyLookupProvider partyLookup;
+    private final CustomerPreferenceProvider preferenceProvider;
+    private final DisambiguationEngine disambiguationEngine;
 
     public SessionService(AuthEngine engine, SessionRepository sessionRepo,
                           BrandRulesRegistry rulesRegistry,
-                          TransferPoliciesRegistry transferRegistry) {
+                          TransferPoliciesRegistry transferRegistry,
+                          PartyLookupProvider partyLookup,
+                          CustomerPreferenceProvider preferenceProvider,
+                          DisambiguationEngine disambiguationEngine) {
         this.engine = engine;
         this.sessionRepo = sessionRepo;
         this.rulesRegistry = rulesRegistry;
         this.transferRegistry = transferRegistry;
+        this.partyLookup = partyLookup;
+        this.preferenceProvider = preferenceProvider;
+        this.disambiguationEngine = disambiguationEngine;
     }
 
     public SessionResponse start(StartSessionRequest req) {
@@ -55,6 +65,31 @@ public class SessionService {
             session.getCrossBrandTokens().putAll(req.getCrossBrandTokens());
         }
 
+        // Party lookup and disambiguation (always-on)
+        List<Party> parties = partyLookup.lookupByAni(req.getCallerId());
+
+        if (parties.isEmpty()) {
+            throw new UnknownCallerException(req.getCallerId());
+        }
+
+        session.setPhase(parties.size() > 1
+            ? SessionPhase.DISAMBIGUATION : SessionPhase.AUTHENTICATING);
+        session.setCandidateParties(parties);
+        sessionRepo.save(session);
+
+        if (parties.size() > 1) {
+            SessionResponse disResp = disambiguationEngine.start(
+                session, config.getDisambiguation());
+            if (session.getPhase() == SessionPhase.AUTHENTICATING) {
+                return engine.evaluateProgress(session, config);
+            }
+            return disResp;
+        }
+
+        CustomerPreference prefs = preferenceProvider.getPreferences(
+            parties.get(0).getPartyId(), session.getBrandId());
+        session.setMatchedParty(parties.get(0));
+        session.setCustomerPreferences(prefs);
         sessionRepo.save(session);
 
         // Process any initial tokens provided at session start

@@ -1,10 +1,14 @@
 package com.yourco.ivr.repository;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.CrossBrandTokenRecord;
+import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.Party;
+import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.exception.SessionNotFoundException;
@@ -23,8 +27,10 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -50,9 +56,10 @@ public class SqliteSessionRepository implements SessionRepository {
         session.setLastActivityAt(Instant.now());
         String sql = "INSERT OR REPLACE INTO ivr_session " +
             "(session_id, brand_id, caller_id, current_level, target_level, status, " +
-            "collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
-            "cross_brand_tokens, transferred_from, locked_until, created_at, last_activity_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "phase, collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
+            "cross_brand_tokens, candidate_parties, matched_party, customer_preferences, " +
+            "disambiguation_attempt, transferred_from, locked_until, created_at, last_activity_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         jdbc.update(sql,
             session.getSessionId(),
             session.getBrandId(),
@@ -60,11 +67,16 @@ public class SqliteSessionRepository implements SessionRepository {
             session.getCurrentLevel().name(),
             session.getTargetLevel().name(),
             session.getStatus().name(),
+            session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name(),
             toJson(session.getCollectedTokens()),
             toJson(session.getValidatedTokens()),
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),
             toJson(session.getCrossBrandTokens()),
+            toJson(session.getCandidateParties()),
+            toJson(session.getMatchedParty()),
+            toJson(session.getCustomerPreferences()),
+            session.getDisambiguationAttemptCount(),
             session.getTransferredFrom(),
             toIso(session.getLockedUntil()),
             toIso(session.getCreatedAt()),
@@ -123,11 +135,17 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setCurrentLevel(AuthLevel.valueOf(rs.getString("current_level")));
         s.setTargetLevel(AuthLevel.valueOf(rs.getString("target_level")));
         s.setStatus(SessionStatus.valueOf(rs.getString("status")));
+        String phaseStr = rs.getString("phase");
+        s.setPhase(phaseStr != null ? SessionPhase.valueOf(phaseStr) : SessionPhase.AUTHENTICATING);
         s.setCollectedTokens(fromJsonEnumMap(rs.getString("collected_tokens"), TokenType.class, String.class));
         s.setValidatedTokens(fromJsonEnumSet(rs.getString("validated_tokens"), TokenType.class));
         s.setAttemptCounts(fromJsonEnumMap(rs.getString("attempt_counts"), TokenType.class, Integer.class));
         s.setActivePathIndexByLevel(fromJsonEnumMap(rs.getString("active_path_index"), AuthLevel.class, Integer.class));
         s.setCrossBrandTokens(fromJsonCrossBrand(rs.getString("cross_brand_tokens")));
+        s.setCandidateParties(fromJsonPartyList(rs.getString("candidate_parties")));
+        s.setMatchedParty(fromJsonSingle(rs.getString("matched_party"), Party.class));
+        s.setCustomerPreferences(fromJsonSingle(rs.getString("customer_preferences"), CustomerPreference.class));
+        s.setDisambiguationAttemptCount(rs.getInt("disambiguation_attempt"));
         s.setTransferredFrom(rs.getString("transferred_from"));
         s.setLockedUntil(fromIso(rs.getString("locked_until")));
         s.setCreatedAt(fromIso(rs.getString("created_at")));
@@ -183,5 +201,24 @@ public class SqliteSessionRepository implements SessionRepository {
 
     private static Instant fromIso(String iso) {
         return iso != null ? Instant.parse(iso) : null;
+    }
+
+    private List<Party> fromJsonPartyList(String json) {
+        if (json == null || json.isEmpty()) return new ArrayList<>();
+        try {
+            return mapper.readValue(json,
+                mapper.getTypeFactory().constructCollectionType(List.class, Party.class));
+        } catch (IOException e) {
+            throw new SessionSerializationException("Failed to deserialize party list", e);
+        }
+    }
+
+    private <T> T fromJsonSingle(String json, Class<T> clazz) {
+        if (json == null || json.isEmpty()) return null;
+        try {
+            return mapper.readValue(json, clazz);
+        } catch (IOException e) {
+            throw new SessionSerializationException("Failed to deserialize " + clazz.getSimpleName(), e);
+        }
     }
 }

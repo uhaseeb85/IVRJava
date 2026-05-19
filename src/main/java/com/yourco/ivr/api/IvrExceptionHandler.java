@@ -5,6 +5,7 @@ import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.exception.TransferNotAllowedException;
 import com.yourco.ivr.exception.UnknownBrandException;
+import com.yourco.ivr.exception.UnknownCallerException;
 import com.yourco.ivr.exception.UnsupportedTokenTypeException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
@@ -44,6 +45,12 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleTransferNotAllowed(TransferNotAllowedException e) {
         return ResponseEntity.status(403)
             .body(new ErrorResponse("TRANSFER_NOT_ALLOWED", e.getMessage()));
+    }
+
+    @ExceptionHandler(UnknownCallerException.class)
+    public ResponseEntity<ErrorResponse> handleUnknownCaller(UnknownCallerException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("UNKNOWN_CALLER", e.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

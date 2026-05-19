@@ -2,6 +2,7 @@ package com.yourco.ivr.api.dto;
 
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -46,12 +47,21 @@ public class SessionResponse {
     @Schema(description = "List of token types the client is allowed to submit at this step (includes the nextRequiredToken plus any backup alternatives)")
     private List<TokenType> acceptedTokens;
 
+    @Schema(description = "Current session phase (DISAMBIGUATION or AUTHENTICATING)")
+    private SessionPhase phase;
+
+    @Schema(description = "ID of the matched party once disambiguation resolves (null otherwise)")
+    private String matchedPartyId;
+
     public static SessionResponse fromSession(IvrSession session) {
         return SessionResponse.builder()
             .sessionId(session.getSessionId())
             .status(session.getStatus())
+            .phase(session.getPhase())
             .currentLevel(session.getCurrentLevel())
             .targetLevel(session.getTargetLevel())
+            .matchedPartyId(session.getMatchedParty() != null
+                ? session.getMatchedParty().getPartyId() : null)
             .build();
     }
 }

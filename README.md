@@ -3,7 +3,7 @@
 > **Multi-Brand | Progressive Auth Levels | Rule-Driven**  
 > Java 8 · Spring Boot 2.7.x · SQLite · OpenAPI 3.0
 
-A production-ready engine for IVR systems that need **multi-brand authentication with progressive security levels**, **automatic cross-brand token sharing**, **backup token alternatives**, and **declarative JSON-driven rules** — all without code changes.
+A production-ready engine for IVR systems that need **multi-brand authentication with progressive security levels**, **backup token alternatives**, **party disambiguation via ANI**, **customer-specific preference filtering**, and **declarative JSON-driven rules** — all without code changes.
 
 ---
 
@@ -14,6 +14,8 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path before failing
 - **Backup token alternatives** — Each required token can declare alternative token types that the client may submit instead (e.g. accept `SSN_LAST4` or `DATE_OF_BIRTH` in place of `PIN`)
 - **Automatic cross-brand token sharing** — Any token validated in one brand's session is automatically reusable in another brand's session — no per-brand policy configuration needed
+- **Party Disambiguation** — When an ANI maps to multiple parties (customers), the engine applies configurable disambiguation rules and requests differentiating tokens to resolve to a single party
+- **Customer Preference Filtering** — Once a party is identified, customer-specific preferences (e.g., blocked token types) are loaded and used to filter which tokens are offered — blocked tokens are automatically skipped and backup alternatives or fallback paths are used instead
 - **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored
 - **Initial tokens at session start** — Clients can submit pre-collected tokens when creating a session
 - **Declarative JSON config** — All brand rules live in `./config/brands/*.json`; no code changes needed to add or modify brands
@@ -32,7 +34,10 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 | Rules Registry | Jackson + external JSON | Loads and caches `BrandAuthConfig` objects from `./config/brands/` |
 | Transfer Policies Registry | Jackson + external JSON | Loads per-source `TransferPolicy` objects from `./config/transfers/` |
 | Validator Registry | Spring Bean Discovery | Maps `TokenType` → `TokenValidator` implementations |
-| Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level state as JSON columns |
+| Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level/party/preference state as JSON columns |
+| Party Lookup | Pluggable interface | Looks up parties by ANI; stub returns a single generic party |
+| Disambiguation Engine | Plain Java | Applies rules, selects differentiating tokens, resolves to single party |
+| Customer Preference Provider | Pluggable interface | Loads customer preferences (blocked tokens, max level); stub returns empty |
 | Brand Config API | Spring MVC + File I/O | CRUD endpoints for managing brand JSON files |
 | Brand Editor UI | React SPA (in-browser Babel) | Visual editor for brand configurations at `http://localhost:8081/` |
 | API Docs | Springdoc OpenAPI 1.7 | Auto-generates Swagger UI at `http://localhost:8081/swagger-ui.html` |
@@ -222,6 +227,41 @@ Each brand config has the following structure:
 }
 ```
 
+### Party Disambiguation & Customer Preferences
+
+Party disambiguation is always-on for all brands. On session start, the engine calls `PartyLookupProvider.lookupByAni(callerId)` (pluggable interface) to find parties matching the ANI.
+
+**How it works:**
+1. 0 parties → **400 error** (unknown caller)
+2. 1 party → skips disambiguation, loads `CustomerPreferenceProvider.getPreferences(partyId)`, proceeds to auth
+3. N parties → applies configured rules from `DisambiguationConfig`, then asks for differentiating tokens to resolve to a single party
+
+The `DisambiguationConfig` is a Java class with defaults (`maxDisambiguationTokens=3`, no rules). Brands can add a `"disambiguation"` block to their JSON to override these defaults.
+
+```json
+{
+  "brandId": "BRAND_A",
+  "disambiguation": {
+    "maxDisambiguationTokens": 5,
+    "rules": [
+      { "type": "EXCLUDE_INACTIVE" },
+      { "type": "PREFER_PRIMARY_ANI" }
+    ]
+  },
+  "levelRules": { ... }
+}
+```
+
+**Rule types:** `EXCLUDE_INACTIVE` (filters !active), `PREFER_PRIMARY_ANI` (keeps primaryAni=true).
+
+**Customer Preferences** control which tokens are offered:
+- `blockedTokens` — tokens excluded from prompts; engine tries backups or advances to next path
+- `maxAllowedLevel` — caps the maximum auth level for this customer
+
+To integrate real backends, replace the stub implementations:
+- `PartyLookupProvider` → point to your CRM/account system API
+- `CustomerPreferenceProvider` → point to your customer preferences datastore
+
 ### Application Properties
 
 | Property | Default | Description |
@@ -276,19 +316,34 @@ src/main/java/com/yourco/ivr/
 ├── domain/                 # Core domain model
 │   ├── AuthLevel.java              # Auth level enum with rank
 │   ├── TokenType.java              # 7 token types
+│   ├── SessionPhase.java           # DISAMBIGUATION / AUTHENTICATING
 │   ├── IvrSession.java             # Full session state
 │   ├── SessionStatus.java          # Session lifecycle states
+│   ├── Party.java                  # Customer party record
+│   ├── CustomerPreference.java     # Blocked tokens, max level caps
 │   ├── CrossBrandTokenRecord.java
 │   └── config/                     # Brand config model + transfer policy
 │       ├── BrandAuthConfig.java
+│       ├── DisambiguationConfig.java
 │       ├── LevelRule.java
 │       ├── TokenPath.java
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine/                 # Auth state machine
-│   ├── AuthEngine.java             # Core engine
+│   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering)
 │   ├── CrossBrandTokenEvaluator.java
-│   └── PromptResolver.java
+│   ├── DisambiguationEngine.java   # Party resolution + token matching
+│   ├── DisambiguationRule.java     # Rule interface
+│   ├── PromptResolver.java
+│   └── impl/
+│       ├── ExcludeInactiveRule.java
+│       └── PrimaryAniRule.java
+├── partylookup/            # ANI → Party resolution
+│   ├── PartyLookupProvider.java
+│   └── StubPartyLookupProvider.java
+├── preference/             # Customer preferences
+│   ├── CustomerPreferenceProvider.java
+│   └── StubCustomerPreferenceProvider.java
 ├── service/
 │   ├── SessionService.java         # Session orchestrator
 │   └── BrandService.java           # Brand file CRUD orchestrator
@@ -310,6 +365,7 @@ src/main/java/com/yourco/ivr/
 │   ├── SessionSerializationException.java
 │   ├── TransferNotAllowedException.java
 │   ├── UnknownBrandException.java
+│   ├── UnknownCallerException.java
 │   └── UnsupportedTokenTypeException.java
 ├── IvrAuthEngineApplication.java
 └── OpenApiConfig.java
@@ -327,7 +383,8 @@ config/transfers/             # External transfer policy directory
 └── transfer-policies.json    # Per-source token/level policies
 
 src/test/java/com/yourco/ivr/
-└── IvrAuthIntegrationTest.java   # 12 integration tests (no mocking)
+└── IvrAuthIntegrationTest.java           # 12 integration tests (auth, transfer, backup, fallback)
+└── DisambiguationAndPreferenceTest.java   # 12 integration tests (disambiguation + preferences, uses MockBean)
 ```
 
 ---

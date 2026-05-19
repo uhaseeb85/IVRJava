@@ -3,10 +3,13 @@ package com.yourco.ivr.engine;
 import com.yourco.ivr.api.dto.SessionResponse;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.CrossBrandTokenRecord;
+import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
 import com.yourco.ivr.registry.BrandRulesRegistry;
@@ -14,7 +17,6 @@ import com.yourco.ivr.repository.SessionRepository;
 import com.yourco.ivr.validator.TokenValidationContext;
 import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.TokenValidatorRegistry;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -32,27 +34,41 @@ public class AuthEngine {
     private final SessionRepository sessionRepo;
     private final CrossBrandTokenEvaluator crossBrandEvaluator;
     private final PromptResolver promptResolver;
+    private final DisambiguationEngine disambiguationEngine;
 
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       TokenValidatorRegistry validatorRegistry,
                       SessionRepository sessionRepo,
                       CrossBrandTokenEvaluator crossBrandEvaluator,
-                      PromptResolver promptResolver) {
+                      PromptResolver promptResolver,
+                      DisambiguationEngine disambiguationEngine) {
         this.rulesRegistry = rulesRegistry;
         this.validatorRegistry = validatorRegistry;
         this.sessionRepo = sessionRepo;
         this.crossBrandEvaluator = crossBrandEvaluator;
         this.promptResolver = promptResolver;
+        this.disambiguationEngine = disambiguationEngine;
     }
 
     /**
      * Called when the IVR platform submits a token value.
      */
     public SessionResponse submitToken(String sessionId,
-                                       TokenType tokenType,
-                                       String tokenValue) {
+                                        TokenType tokenType,
+                                        String tokenValue) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+
+        // Route to disambiguation if session is still resolving parties
+        if (session.getPhase() == SessionPhase.DISAMBIGUATION) {
+            DisambiguationConfig disConfig = config.getDisambiguation();
+            SessionResponse disResp = disambiguationEngine.handleToken(
+                session, tokenType, tokenValue, disConfig);
+            if (session.getPhase() == SessionPhase.AUTHENTICATING) {
+                return evaluateProgress(session, config);
+            }
+            return disResp;
+        }
 
         // Store the collected token value
         session.getCollectedTokens().put(tokenType, tokenValue);
@@ -130,11 +146,8 @@ public class AuthEngine {
             // All paths exhausted — fail
             session.setStatus(SessionStatus.FAILED);
             sessionRepo.save(session);
-            return SessionResponse.builder()
-                .sessionId(session.getSessionId())
+            return baseResponse(session)
                 .status(SessionStatus.FAILED)
-                .currentLevel(session.getCurrentLevel())
-                .targetLevel(session.getTargetLevel())
                 .prompt("Authentication failed. All retry attempts exhausted.")
                 .build();
         }
@@ -154,11 +167,8 @@ public class AuthEngine {
             session.setCurrentLevel(session.getTargetLevel());
             session.setStatus(SessionStatus.AUTHENTICATED);
             sessionRepo.save(session);
-            return SessionResponse.builder()
-                .sessionId(session.getSessionId())
+            return baseResponse(session)
                 .status(SessionStatus.AUTHENTICATED)
-                .currentLevel(session.getCurrentLevel())
-                .targetLevel(session.getTargetLevel())
                 .prompt("Authentication successful. You are now at " + session.getCurrentLevel() + " level.")
                 .build();
         }
@@ -177,26 +187,28 @@ public class AuthEngine {
             session.setCurrentLevel(session.getTargetLevel());
             session.setStatus(SessionStatus.AUTHENTICATED);
             sessionRepo.save(session);
-            return SessionResponse.builder()
-                .sessionId(session.getSessionId())
+            return baseResponse(session)
                 .status(SessionStatus.AUTHENTICATED)
-                .currentLevel(session.getCurrentLevel())
-                .targetLevel(session.getTargetLevel())
                 .build();
+        }
+
+        // Apply customer preference filtering: if nextToken is blocked, try backups
+        if (isBlocked(session, nextToken)) {
+            nextToken = findAlternativeToken(session, activePath, nextToken);
+            if (nextToken == null) {
+                return advanceToNextPathOrFail(session, config, rule, activePathIdx);
+            }
         }
 
         session.setStatus(SessionStatus.COLLECTING);
         sessionRepo.save(session);
 
         // Determine accepted tokens for this step (required token + any backups)
-        List<TokenType> acceptedTokens = buildAcceptedTokens(activePath, nextToken);
+        List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, nextToken);
 
         String prompt = promptResolver.resolvePrompt(nextToken, activePath, rule.getMaxRetriesPerToken());
-        return SessionResponse.builder()
-            .sessionId(session.getSessionId())
+        return baseResponse(session)
             .status(SessionStatus.COLLECTING)
-            .currentLevel(session.getCurrentLevel())
-            .targetLevel(session.getTargetLevel())
             .nextRequiredToken(nextToken)
             .remainingAttempts(rule.getMaxRetriesPerToken())
             .acceptedTokens(acceptedTokens)
@@ -205,6 +217,16 @@ public class AuthEngine {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    private SessionResponse.SessionResponseBuilder baseResponse(IvrSession session) {
+        return SessionResponse.builder()
+            .sessionId(session.getSessionId())
+            .phase(session.getPhase())
+            .currentLevel(session.getCurrentLevel())
+            .targetLevel(session.getTargetLevel())
+            .matchedPartyId(session.getMatchedParty() != null
+                ? session.getMatchedParty().getPartyId() : null);
+    }
 
     /**
      * If the submitted token type matches a backup token for a required token
@@ -244,11 +266,8 @@ public class AuthEngine {
         if (remaining > 0) {
             sessionRepo.save(session);
             String prompt = promptResolver.resolvePrompt(tokenType, null, remaining);
-            return SessionResponse.builder()
-                .sessionId(session.getSessionId())
+            return baseResponse(session)
                 .status(SessionStatus.COLLECTING)
-                .currentLevel(session.getCurrentLevel())
-                .targetLevel(session.getTargetLevel())
                 .nextRequiredToken(tokenType)
                 .remainingAttempts(remaining)
                 .prompt(prompt)
@@ -280,13 +299,10 @@ public class AuthEngine {
                 return evaluateProgress(session, config);
             }
 
-            List<TokenType> acceptedTokens = buildAcceptedTokens(nextPath, nextToken);
+            List<TokenType> acceptedTokens = buildAcceptedTokens(session, nextPath, nextToken);
             String prompt = promptResolver.resolvePrompt(nextToken, nextPath, rule.getMaxRetriesPerToken());
-            return SessionResponse.builder()
-                .sessionId(session.getSessionId())
+            return baseResponse(session)
                 .status(SessionStatus.COLLECTING)
-                .currentLevel(session.getCurrentLevel())
-                .targetLevel(session.getTargetLevel())
                 .nextRequiredToken(nextToken)
                 .remainingAttempts(rule.getMaxRetriesPerToken())
                 .acceptedTokens(acceptedTokens)
@@ -298,11 +314,8 @@ public class AuthEngine {
         session.setStatus(SessionStatus.LOCKED);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
-        return SessionResponse.builder()
-            .sessionId(session.getSessionId())
+        return baseResponse(session)
             .status(SessionStatus.LOCKED)
-            .currentLevel(session.getCurrentLevel())
-            .targetLevel(session.getTargetLevel())
             .lockedUntil(session.getLockedUntil())
             .prompt("Authentication failed. All retry attempts exhausted.")
             .build();
@@ -321,18 +334,62 @@ public class AuthEngine {
 
     /**
      * Build the list of accepted token types for the next step.
-     * Includes the required token plus any backup alternatives.
+     * Includes the required token plus any unblocked backup alternatives.
      */
-    private List<TokenType> buildAcceptedTokens(TokenPath activePath, TokenType nextToken) {
+    private List<TokenType> buildAcceptedTokens(IvrSession session, TokenPath activePath, TokenType nextToken) {
         List<TokenType> accepted = new ArrayList<>();
         accepted.add(nextToken);
         if (activePath.getBackupTokens() != null) {
             List<TokenType> backups = activePath.getBackupTokens().get(nextToken);
             if (backups != null) {
-                accepted.addAll(backups);
+                for (TokenType backup : backups) {
+                    if (!isBlocked(session, backup)) {
+                        accepted.add(backup);
+                    }
+                }
             }
         }
         return accepted;
+    }
+
+    private boolean isBlocked(IvrSession session, TokenType tokenType) {
+        if (session.getCustomerPreferences() == null) return false;
+        Set<TokenType> blocked = session.getCustomerPreferences().getBlockedTokens();
+        return blocked != null && blocked.contains(tokenType);
+    }
+
+    private TokenType findAlternativeToken(IvrSession session, TokenPath path, TokenType blockedToken) {
+        if (path.getBackupTokens() == null) return null;
+        List<TokenType> backups = path.getBackupTokens().get(blockedToken);
+        if (backups == null) return null;
+        for (TokenType backup : backups) {
+            if (!isBlocked(session, backup)) {
+                return backup;
+            }
+        }
+        return null;
+    }
+
+    private SessionResponse advanceToNextPathOrFail(IvrSession session, BrandAuthConfig config,
+                                                      LevelRule rule, int currentPathIdx) {
+        Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
+        int nextPathIdx = currentPathIdx + 1;
+
+        if (nextPathIdx < rule.getPaths().size()) {
+            pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
+            session.getAttemptCounts().clear();
+            TokenPath nextPath = rule.getPaths().get(nextPathIdx);
+            pruneTokensNotInPath(session, nextPath);
+            sessionRepo.save(session);
+            return evaluateProgress(session, config);
+        }
+
+        session.setStatus(SessionStatus.FAILED);
+        sessionRepo.save(session);
+        return baseResponse(session)
+            .status(SessionStatus.FAILED)
+            .prompt("Authentication failed. No available authentication methods for your account.")
+            .build();
     }
 
     private boolean validateExternally(IvrSession session,

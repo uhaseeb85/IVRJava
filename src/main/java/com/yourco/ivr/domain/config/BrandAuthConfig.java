@@ -9,4 +9,12 @@ import java.util.Map;
 public class BrandAuthConfig {
     private String brandId;
     private Map<AuthLevel, LevelRule> levelRules;
+    private DisambiguationConfig disambiguation;
+
+    public DisambiguationConfig getDisambiguation() {
+        if (disambiguation == null) {
+            disambiguation = new DisambiguationConfig();
+        }
+        return disambiguation;
+    }
 }

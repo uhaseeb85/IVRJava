@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 1.3 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 1.4 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -19,7 +19,9 @@
 11. [Key Sequence Flows](#11-key-sequence-flows)
 12. [Exception Handling](#12-exception-handling)
 13. [Package Structure](#13-package-structure)
-14. [Implementation Checklist](#14-implementation-checklist)
+14. [Party Disambiguation](#14-party-disambiguation)
+15. [Customer Preferences](#15-customer-preferences)
+16. [Implementation Checklist](#16-implementation-checklist)
 
 ---
 
@@ -1284,7 +1286,270 @@ com.yourco.ivr
 
 ---
 
-## 14. Implementation Checklist
+## 14. Party Disambiguation
+
+Party disambiguation is always-on. Every session start triggers `PartyLookupProvider.lookupByAni()` to identify the caller's party. The caller's ANI (phone number) may map to multiple customer records; the engine resolves ambiguity before authentication proceeds.
+
+### 14.1 Party Domain Model
+
+```java
+// Party.java
+@Data
+public class Party {
+    private String partyId;          // unique identifier
+    private String accountNumber;    // maps to ACCOUNT_NUMBER token
+    private String dateOfBirth;      // maps to DATE_OF_BIRTH token
+    private String ssnLast4;         // maps to SSN_LAST4 token
+    private String cardLast4;        // maps to CARD_LAST4 token
+    private String zipCode;          // additional disambiguation field
+    private boolean active;          // active customer
+    private boolean primaryAni;      // this ANI is the primary contact
+    private Map<String, String> additionalAttributes; // extensibility
+}
+```
+
+### 14.2 PartyLookupProvider (Interface)
+
+```java
+public interface PartyLookupProvider {
+    List<Party> lookupByAni(String callerId);
+}
+```
+
+A stub implementation (`StubPartyLookupProvider`) returns an empty list by default. Replace with a real implementation that queries your CRM/account system.
+
+### 14.3 DisambiguationRule (Interface)
+
+```java
+public interface DisambiguationRule {
+    List<Party> apply(List<Party> parties);
+}
+```
+
+**Built-in rules:**
+
+| Rule Type | Class | Behavior |
+|-----------|-------|----------|
+| `EXCLUDE_INACTIVE` | `ExcludeInactiveRule` | Removes parties where `active == false` |
+| `PREFER_PRIMARY_ANI` | `PrimaryAniRule` | Keeps only parties where `primaryAni == true`; if none, keeps all |
+
+Rules are configured per-brand in the brand JSON. The `disambiguation` block is optional; defaults apply if absent:
+
+```json
+{
+  "disambiguation": {
+    "maxDisambiguationTokens": 3,
+    "rules": [
+      { "type": "EXCLUDE_INACTIVE" },
+      { "type": "PREFER_PRIMARY_ANI" }
+    ]
+  }
+}
+```
+
+### 14.4 DisambiguationEngine
+
+```java
+@Service
+public class DisambiguationEngine {
+
+    // Maps TokenType to Party field extractors for matching
+    private static final Map<TokenType, Function<Party, String>> TOKEN_FIELD_MAP;
+
+    static {
+        // ACCOUNT_NUMBER → Party::getAccountNumber
+        // DATE_OF_BIRTH → Party::getDateOfBirth
+        // SSN_LAST4 → Party::getSsnLast4
+        // CARD_LAST4 → Party::getCardLast4
+    }
+
+    /** Called on session start to initialize disambiguation. */
+    SessionResponse start(IvrSession session, DisambiguationConfig config);
+
+    /** Called when a token is submitted during disambiguation phase. */
+    SessionResponse handleToken(IvrSession session, TokenType tokenType,
+                                 String tokenValue, DisambiguationConfig config);
+
+    /** Selects the token that best differentiates remaining parties. */
+    TokenType selectDisambiguationToken(List<Party> parties);
+
+    /** Applies configured filtering rules. */
+    List<Party> applyRules(List<Party> parties, DisambiguationConfig config);
+}
+```
+
+### 14.5 Disambiguation Flow
+
+```
+Session Start with ANI
+       │
+       ▼
+PartyLookupProvider.lookupByAni(ANI)
+       │
+  ┌────┼────┐
+  ▼    ▼    ▼
+  0    1    N parties
+  │    │    │
+  ▼    │    ▼
+ 400   │   ┌──────────────────┐
+Error  │   │ Apply rules       │── EXCLUDE_INACTIVE
+       │   │                   │── PREFER_PRIMARY_ANI
+       │   └──────────────────┘
+       │    │
+       │    ├── 1 party → matchedParty set
+       │    │
+       │    └── N parties → selectDisambiguationToken()
+       │         │
+       │         ▼
+       │   Return prompt: "Please provide your {token}"
+       │         │
+       │         ▼
+       │   Customer submits token
+       │         │
+       │         ▼
+       │   Match against party attributes
+       │         │
+       │    ┌────┴─────┐
+       │    1          N          0
+       │    │          │          │
+       │    └──────────┼──────────┘
+       │               ▼
+       │        matchedParty set
+       │               │
+       └───────────────┘
+               ▼
+      CustomerPreferenceProvider.getPreferences(partyId)
+               │
+               ▼
+      Phase → AUTHENTICATING
+      AuthEngine.evaluateProgress()
+```
+
+### 14.6 Token Selection Strategy
+
+The engine evaluates each mappable `TokenType` (ACCOUNT_NUMBER, DATE_OF_BIRTH, SSN_LAST4, CARD_LAST4) against the remaining parties. It groups parties by the token's value and returns the token with the smallest largest group (maximum discrimination).
+
+Example: 3 parties, SSN_LAST4 values: {1234, 5678, 9012} → groups of size 1 each → selected.  
+If all parties have identical SSN_LAST4 → group size 3 → not selected if a better token exists.
+
+**Max rounds:** Capped at `maxDisambiguationTokens` (default 3). After exhausting, the session is marked FAILED.
+
+### 14.7 Session Phase Model
+
+```java
+// SessionPhase.java
+public enum SessionPhase {
+    DISAMBIGUATION,   // resolving multiple parties to one
+    AUTHENTICATING    // standard auth flow (may include preference filtering)
+}
+```
+
+Sessions start in `DISAMBIGUATION` when >1 parties found. Phase transitions to `AUTHENTICATING` once `matchedParty` is set.
+
+- 0 parties → `UnknownCallerException` (HTTP 400)
+- 1 party → immediate transition to `AUTHENTICATING`, preferences loaded
+- N parties → disambiguation tokens requested until resolved or max rounds exceeded
+
+---
+
+## 15. Customer Preferences
+
+Once a single party is identified (either immediately or via disambiguation), customer-specific preferences are loaded to personalize the authentication experience.
+
+### 15.1 CustomerPreference Domain Model
+
+```java
+// CustomerPreference.java
+@Data
+public class CustomerPreference {
+    private Set<TokenType> blockedTokens;   // tokens to NEVER ask for
+    private AuthLevel maxAllowedLevel;      // cap auth level for this customer
+}
+```
+
+### 15.2 CustomerPreferenceProvider (Interface)
+
+```java
+public interface CustomerPreferenceProvider {
+    CustomerPreference getPreferences(String partyId, String brandId);
+}
+```
+
+A stub implementation (`StubCustomerPreferenceProvider`) returns an empty `CustomerPreference` (no blocks). Replace with a real implementation.
+
+### 15.3 AuthEngine Preference Filtering
+
+When `CustomerPreference` is present and `blockedTokens` is non-empty, the engine applies filtering in `evaluateProgress()`:
+
+1. After determining `nextToken` from the active path, check `isBlocked(session, nextToken)`
+2. If blocked → try `findAlternativeToken()` (unblocked backups)
+3. If all alternatives blocked → `advanceToNextPathOrFail()`
+4. `buildAcceptedTokens()` excludes blocked tokens from the accepted list
+
+```java
+// AuthEngine helper methods
+private boolean isBlocked(IvrSession session, TokenType tokenType) {
+    CustomerPreference prefs = session.getCustomerPreferences();
+    return prefs != null && prefs.getBlockedTokens() != null
+        && prefs.getBlockedTokens().contains(tokenType);
+}
+
+private TokenType findAlternativeToken(IvrSession session,
+                                        TokenPath path, TokenType blocked) {
+    // Returns first unblocked backup, or null if all blocked
+}
+```
+
+**Example:** Customer has PIN blocked.
+- Path 0 requires [ACCOUNT_NUMBER, PIN] with backup {PIN: [SSN_LAST4, DATE_OF_BIRTH]}
+- After ACCOUNT_NUMBER validated, nextToken = PIN
+- `isBlocked(PIN)` → true
+- `findAlternativeToken()` → SSN_LAST4 (if unblocked)
+- Prompt asks for SSN_LAST4 instead of PIN
+
+**Example:** Customer has PIN, SSN_LAST4, and DATE_OF_BIRTH all blocked.
+- All options on path 0 blocked → advance to path 1 (OTP)
+- Path 1 requires [ACCOUNT_NUMBER, OTP] — ACCOUNT_NUMBER already validated → prompt for OTP
+
+### 15.4 Preference Loading Trigger
+
+Preferences are loaded by `DisambiguationEngine.resolveParty()` immediately after a single party is identified:
+
+```java
+private SessionResponse resolveParty(IvrSession session, Party party) {
+    session.setMatchedParty(party);
+    session.setPhase(SessionPhase.AUTHENTICATING);
+    CustomerPreference prefs = preferenceProvider.getPreferences(
+        party.getPartyId(), session.getBrandId());
+    session.setCustomerPreferences(prefs);
+    sessionRepo.save(session);
+    return buildResponse(session, "Identity verified. Proceeding with authentication.", null);
+}
+```
+
+### 15.5 Data Flow
+
+```
+Party Resolved
+     │
+     ▼
+CustomerPreferenceProvider.getPreferences(partyId, brandId)
+     │
+     ▼
+session.setCustomerPreferences(prefs)
+     │
+     ▼
+AuthEngine.evaluateProgress() checks:
+  → isBlocked(nextToken)? try backups → try next path → fail
+  → buildAcceptedTokens() excludes blocked
+     │
+     ▼
+Customer asked only for allowed tokens
+```
+
+---
+
+## 16. Implementation Checklist
 
 ### Phase 1 — Core Foundation
 1. Define `AuthLevel` and `TokenType` enums
@@ -1338,6 +1603,23 @@ com.yourco.ivr
 8. Wire token filtering and level capping in `SessionService.transfer()`
 9. Create default `config/transfers/transfer-policies.json` with sample policies
 10. Integration-test: happy path, token filtering, level capping, unknown source, disabled source
+
+### Phase 8 — Party Disambiguation & Customer Preferences
+1. Implement `Party`, `SessionPhase`, `CustomerPreference` domain models
+2. Implement `DisambiguationConfig` config model
+3. Implement `PartyLookupProvider` interface and `StubPartyLookupProvider`
+4. Implement `DisambiguationRule` interface, `ExcludeInactiveRule`, `PrimaryAniRule`
+5. Implement `DisambiguationEngine` — rule application, token selection, party matching
+6. Implement `CustomerPreferenceProvider` interface and `StubCustomerPreferenceProvider`
+7. Add `phase`, `candidateParties`, `matchedParty`, `customerPreferences`, `disambiguationAttemptCount` to `IvrSession`
+8. Update DB schema and `SqliteSessionRepository` for new fields
+9. Add `DisambiguationConfig` to `BrandAuthConfig` and brand JSON files
+10. Wire party lookup and disambiguation into `SessionService.start()`
+11. Route `DISAMBIGUATION` phase in `AuthEngine.submitToken()` to `DisambiguationEngine`
+12. Add preference filtering in `AuthEngine.evaluateProgress()` and `buildAcceptedTokens()`
+13. Add `phase` and `matchedPartyId` to `SessionResponse`
+14. Implement `UnknownCallerException` and wire into `IvrExceptionHandler`
+15. Integration-test: single party, multi-party, rules narrowing, zero parties, max rounds, disabled config, preference filtering
 
 > ⚠️ **Security Note — Token Values**
 > Never log raw token values (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.
