@@ -38,7 +38,7 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 | Disambiguation Engine | Plain Java | Applies rules, selects differentiating tokens, resolves to single party |
 | Customer Preference Provider | Pluggable interface | Loads customer preferences (blocked tokens, max level); stub returns empty |
 | Brand Config API | Spring MVC + File I/O | CRUD endpoints for managing brand JSON files |
-| Brand Editor UI | React SPA (in-browser Babel) | Visual editor for brand configurations at `http://localhost:8081/` |
+| Brand Editor UI | React + Vite + Tailwind CSS (shadcn-style) | Visual editor for brand configurations at `http://localhost:8081/` |
 | API Docs | Springdoc OpenAPI 1.7 | Auto-generates Swagger UI at `http://localhost:8081/swagger-ui.html` |
 
 ---
@@ -381,6 +381,19 @@ src/test/java/com/yourco/ivr/
 ```bash
 mvn test
 ```
+
+### UI Development
+
+The brand config editor is a standalone Vite + React + TypeScript + Tailwind CSS project at `src/main/ui/`.
+
+```bash
+cd src/main/ui
+npm install
+npm run dev          # starts Vite dev server on :5173, proxies API to :8081
+npm run build        # builds static files into src/main/resources/static/
+```
+
+The dev server proxies `/api/*` and `/ivr/*` to `http://localhost:8081`. Run `mvn spring-boot:run` in a separate terminal first.
 
 ---
 
