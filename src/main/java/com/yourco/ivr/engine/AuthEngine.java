@@ -73,9 +73,8 @@ public class AuthEngine {
         // Store the collected token value
         session.getCollectedTokens().put(tokenType, tokenValue);
 
-        // 1. Check cross-brand token shortcut before calling external API
-        boolean valid = crossBrandEvaluator.isAccepted(session, tokenType)
-            || validateExternally(session, tokenType, tokenValue);
+        // 1. Validate externally
+        boolean valid = validateExternally(session, tokenType, tokenValue);
 
         if (!valid) {
             return handleFailure(session, config, tokenType);

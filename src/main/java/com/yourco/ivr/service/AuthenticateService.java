@@ -61,10 +61,6 @@ public class AuthenticateService {
         session.setCreatedAt(Instant.now());
         session.setLastActivityAt(Instant.now());
 
-        if (req.getCrossBrandTokens() != null) {
-            session.getCrossBrandTokens().putAll(req.getCrossBrandTokens());
-        }
-
         // Party lookup and disambiguation (always-on)
         List<Party> parties = partyLookup.lookupByAni(req.getCallerId());
 

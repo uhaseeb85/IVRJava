@@ -1,7 +1,6 @@
 package com.yourco.ivr.api.dto;
 
 import com.yourco.ivr.domain.AuthLevel;
-import com.yourco.ivr.domain.CrossBrandTokenRecord;
 import com.yourco.ivr.domain.TokenType;
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
@@ -24,9 +23,6 @@ public class StartAuthenticateRequest {
     @Schema(description = "Target authentication level to reach", example = "STANDARD")
     @NotNull
     private AuthLevel targetLevel;
-
-    @Schema(description = "Optional pre-validated tokens from another brand context")
-    private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
 
     @Schema(description = "Optional pre-collected token values submitted at session start (e.g. caller already entered account number before session began)")
     private Map<TokenType, String> initialTokens;

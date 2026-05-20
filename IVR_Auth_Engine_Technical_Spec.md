@@ -11,7 +11,7 @@
 3. [Brand Configuration (JSON)](#3-brand-configuration-json)
 4. [Auth Engine — Core Logic](#4-auth-engine--core-logic)
 5. [Token Validator Layer](#5-token-validator-layer)
-6. [Cross-Brand Token Sharing](#6-cross-brand-token-sharing)
+6. [Token Provenance Tracking](#6-token-provenance-tracking)
 7. [Call Transfer](#7-call-transfer)
 8. [REST API Specification](#8-rest-api-specification)
 9. [Session Service](#9-session-service)
@@ -27,13 +27,13 @@
 
 ## 1. System Overview
 
-This document specifies the design and implementation of a multi-brand IVR Token Authentication Engine built on Java 8 and Spring Boot 2.7.x. The system allows multiple brands to define independent authentication rule sets, share token validators, and optionally share validated tokens across sessions. Callers can target a specific auth level, upgrade mid-session, and reuse previously validated tokens.
+This document specifies the design and implementation of a multi-brand IVR Token Authentication Engine built on Java 8 and Spring Boot 2.7.x. The system allows multiple brands to define independent authentication rule sets, share token validators, and track token provenance for call transfer. Callers can target a specific auth level, upgrade mid-session, and reuse previously validated tokens within the same session.
 
 ### 1.1 Core Capabilities
 
 - **Multi-brand rule isolation** — each brand carries its own level definitions, token paths, retry limits, and lockout policies
 - **Shared token validators** — a global registry of validators (OTP, PIN, account number, voice, etc.) any brand can reference
-- **Token sharing policies** — a brand can declare that tokens validated in another brand's context are reusable within the same session
+- **Token provenance tracking** — tokens validated in a session are recorded with source brand and timestamp for audit and call transfer support
 - **Progressive authentication** — a session starts at `NONE`, reaches targeted levels step by step, and can escalate further without restarting
 - **Declarative rules** — all behaviour is driven by JSON config; no logic changes require code deployments
 - **Call transfer support** — external IVR systems can transfer callers mid-authentication with pre-validated tokens; per-source policies control which tokens and auth levels are honored
@@ -81,7 +81,6 @@ public enum AuthLevel {
 public class BrandAuthConfig {
     private String brandId;                         // e.g. "BRAND_A"
     private Map<AuthLevel, LevelRule> levelRules;   // one rule per level
-    private TokenSharingPolicy sharingPolicy;       // cross-brand token reuse
 }
 
 // LevelRule.java
@@ -107,25 +106,7 @@ public class TokenPath {
 }
 ```
 
-### 2.3 Token Sharing Policy
-
-```java
-// TokenSharingPolicy.java
-@Data
-public class TokenSharingPolicy {
-    // Tokens that are universally trusted across any brand context
-    private Set<TokenType> globallySharedTokens;
-
-    // Tokens accepted only when validated in specific other brands
-    // Key: TokenType, Value: set of brandIds whose validation is trusted
-    private Map<TokenType, Set<String>> conditionallySharedFrom;
-
-    // Optional: max age in seconds for a cross-brand token to still be trusted
-    private int crossBrandTokenMaxAgeSeconds;  // 0 = no TTL
-}
-```
-
-### 2.4 Session State
+### 2.3 Session State
 
 ```java
 // IvrSession.java
@@ -227,14 +208,6 @@ Each brand's rule set lives in its own JSON file loaded at startup from the clas
       "maxRetriesPerToken": 2,
       "lockoutSeconds": 600
     }
-  },
-  "sharingPolicy": {
-    "globallySharedTokens": ["ACCOUNT_NUMBER"],
-    "conditionallySharedFrom": {
-      "OTP": ["BRAND_B", "BRAND_C"],
-      "PIN": ["BRAND_B"]
-    },
-    "crossBrandTokenMaxAgeSeconds": 1800
   }
 }
 ```
@@ -269,11 +242,6 @@ Each brand's rule set lives in its own JSON file loaded at startup from the clas
       "maxRetriesPerToken": 2,
       "lockoutSeconds": 300
     }
-  },
-  "sharingPolicy": {
-    "globallySharedTokens": ["ACCOUNT_NUMBER"],
-    "conditionallySharedFrom": {},
-    "crossBrandTokenMaxAgeSeconds": 0
   }
 }
 ```
@@ -306,13 +274,12 @@ public class AuthEngine {
         // 1. Lockout guard
         if (isLocked(session)) return buildLockedResponse(session);
 
-        // 2. Check cross-brand token shortcut before calling external API
-        boolean valid = crossBrandEvaluator.isAccepted(session, config, tokenType, tokenValue)
-            || validateExternally(session, tokenType, tokenValue);
+        // 2. Validate externally
+        boolean valid = validateExternally(session, tokenType, tokenValue);
 
         if (!valid) return handleFailure(session, config, tokenType);
 
-        // 3. Mark validated and record cross-brand provenance
+        // 3. Mark validated and record provenance
         session.getValidatedTokens().add(tokenType);
         session.getAttemptCounts().remove(tokenType);  // reset on success
         crossBrandEvaluator.recordValidated(session, tokenType);
@@ -533,57 +500,23 @@ public class TokenValidatorRegistry {
 
 ---
 
-## 6. Cross-Brand Token Sharing
+## 6. Token Provenance Tracking
 
-The sharing policy allows a brand to trust tokens validated in another brand's context within the same session. This is resolved before making any external API call — avoiding duplicate validation round-trips.
+Tokens validated within a session are recorded with provenance metadata (source brand, timestamp) to support call transfer. Tokens are never automatically reusable across brands — each brand validates tokens independently.
 
 ### 6.1 CrossBrandTokenEvaluator.java
 
 ```java
 @Component
-@RequiredArgsConstructor
 public class CrossBrandTokenEvaluator {
 
-    public boolean isAccepted(IvrSession session,
-                              BrandAuthConfig config,
-                              TokenType tokenType,
-                              String tokenValue) {
-        TokenSharingPolicy policy = config.getSharingPolicy();
-        if (policy == null) return false;
-
-        // 1. Globally shared — trusted from any brand
-        if (policy.getGloballySharedTokens().contains(tokenType)) {
-            return session.getValidatedTokens().contains(tokenType);
-        }
-
-        // 2. Conditionally shared — trust only from listed brands
-        Set<String> trustedBrands = policy.getConditionallySharedFrom()
-            .getOrDefault(tokenType, Set.of());
-
-        CrossBrandTokenRecord record = session.getCrossBrandTokens().get(tokenType);
-        if (record == null) return false;
-        if (!trustedBrands.contains(record.getSourceBrandId())) return false;
-
-        // 3. TTL check
-        int maxAge = policy.getCrossBrandTokenMaxAgeSeconds();
-        if (maxAge > 0) {
-            Instant expiry = record.getValidatedAt().plusSeconds(maxAge);
-            if (Instant.now().isAfter(expiry)) return false;
-        }
-
-        return true;
-    }
-
-    /** Record a token validated in this session for potential reuse by other brands. */
+    /** Record a token validated in this session for provenance tracking. */
     public void recordValidated(IvrSession session, TokenType type) {
         session.getCrossBrandTokens().put(type,
             new CrossBrandTokenRecord(session.getBrandId(), Instant.now()));
     }
 }
 ```
-
-> **Design Note — Token Value vs Token Presence**
-> Cross-brand sharing checks presence in `validatedTokens`, not the raw value. If a different value is submitted for an already-validated globally-shared token, it is re-validated externally. This prevents a caller from submitting a wrong value and still getting credit via the sharing shortcut.
 
 ---
 
@@ -701,7 +634,7 @@ External System (LEGACY_IVR)    TransferController     TransferPoliciesRegistry 
 1. Unknown or disabled `sourceSystemId` → **403 FORBIDDEN**
 2. `validatedTokens` filtered to only those in the policy's `honoredTokens`
 3. `currentLevel` capped at the policy's `maxHonoredLevel`
-4. Filtered tokens added to both `validatedTokens` and `crossBrandTokens` (with source = `sourceSystemId`)
+4. Filtered tokens added to both `validatedTokens` and `crossBrandTokens` (with source = `sourceSystemId`) for provenance
 5. Session created with `transferredFrom` set, attempt counts reset to zero
 6. `evaluateProgress()` runs immediately — returns next prompt or `AUTHENTICATED`
 
@@ -843,7 +776,7 @@ public class AuthenticateService {
 
         sessionRepo.save(session);
 
-        // Evaluate immediately — cross-brand tokens may already satisfy some levels
+        // Evaluate immediately
         return engine.evaluateProgress(session, config);
     }
 
@@ -1080,24 +1013,7 @@ Engine logic:
 Caller enters OTP → validated → status = AUTHENTICATED, currentLevel = ELEVATED
 ```
 
-### 11.4 Cross-Brand Token Reuse
-
-```
-Brand A session already validated OTP.
-crossBrandTokens records: { OTP → { sourceBrandId: "BRAND_A", validatedAt: T } }
-
-New session starts for Brand B, passes crossBrandTokens in the start request.
-
-Brand B sharingPolicy does NOT list OTP as conditionallySharedFrom Brand A:
-  → CrossBrandTokenEvaluator returns false
-  → OTP validator called externally as normal
-
-Brand C sharingPolicy lists OTP as conditionallySharedFrom: [BRAND_A], TTL = 1800s:
-  → CrossBrandTokenEvaluator checks TTL, returns true
-  → OTP marked validated — no external API call made
-```
-
-### 11.5 Call Transfer Flow
+### 11.4 Call Transfer Flow
 
 ```
 External System (LEGACY_IVR)   AuthenticateController   TransferPoliciesRegistry   AuthEngine
@@ -1137,7 +1053,7 @@ State after transfer:
   targetLevel = STANDARD
   status = COLLECTING
   validatedTokens = {ACCOUNT_NUMBER}  (only tokens honored by policy)
-  crossBrandTokens = {ACCOUNT_NUMBER -> {sourceBrandId: "LEGACY_IVR", validatedAt: T}}
+  crossBrandTokens = {ACCOUNT_NUMBER -> {sourceBrandId: "LEGACY_IVR", validatedAt: T}}  (provenance tracking)
   transferredFrom = "LEGACY_IVR"
   attemptCounts = {}  (fresh start, always reset)
 ```
@@ -1535,7 +1451,7 @@ Customer asked only for allowed tokens
 1. Implement `TokenValidator` interface and `ValidationResult`
 2. Implement stub validators for each `TokenType` (return configurable mock responses)
 3. Wire `TokenValidatorRegistry` with Spring auto-discovery of `@Component` validators
-4. Implement `CrossBrandTokenEvaluator` — global share, conditional share, TTL checks
+4. Implement `CrossBrandTokenEvaluator` — provenance tracking (recordValidated)
 5. Replace stubs with real external API clients one validator at a time
 
 ### Phase 4 — API Layer
@@ -1548,8 +1464,8 @@ Customer asked only for allowed tokens
 ### Phase 5 — Multi-Brand
 1. Create JSON configs for each brand under `resources/brands/`
 2. Test that unknown `brandId` returns 400 with `UNKNOWN_BRAND` error code
-3. Test cross-brand token sharing: globally shared, conditionally shared, TTL expiry
-4. Test that a brand with no sharing policy never accepts cross-brand tokens
+3. Test compatibility with different brand configs
+4. Test that tokens are always validated through the validator layer
 
 ### Phase 6 — Hardening
 1. Encrypt token values at rest in SQLite (AES-GCM, per-session key)
@@ -1564,7 +1480,7 @@ Customer asked only for allowed tokens
 3. Implement `CallTransferRequest` DTO with `@Valid` constraints
 4. Implement `TransferNotAllowedException` and wire into `IvrExceptionHandler` (HTTP 403)
 5. Add `transferredFrom` field to `IvrSession`, DB schema, and repository
-6. Implement `AuthEngine.transferSession()` — populate validated/cross-brand tokens from transfer
+6. Implement `AuthEngine.transferSession()` — populate validated/token provenance from transfer
 7. Implement `POST /ivr/authenticate/transfer` endpoint in `AuthenticateController`
 8. Wire token filtering and level capping in `AuthenticateService.transfer()`
 9. Create default `config/transfers/transfer-policies.json` with sample policies

@@ -3,7 +3,7 @@
 > **Multi-Brand | Progressive Auth Levels | Rule-Driven**  
 > Java 8 · Spring Boot 2.7.x · SQLite · OpenAPI 3.0
 
-A production-ready engine for IVR systems that need **multi-brand authentication with progressive security levels**, **backup token alternatives**, **party disambiguation via ANI**, **customer-specific preference filtering**, and **declarative JSON-driven rules** — all without code changes.
+A production-ready engine for IVR systems that need **multi-brand authentication with progressive security levels**, **backup token alternatives**, **party disambiguation via ANI**, **customer-specific preference filtering**, and **declarative JSON-driven rules**.
 
 ---
 
@@ -13,7 +13,6 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Progressive authentication** — Sessions start at `NONE` and step up to the target level; mid-session escalation is supported
 - **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path before failing
 - **Backup token alternatives** — Each required token can declare alternative token types that the client may submit instead (e.g. accept `SSN_LAST4` or `DATE_OF_BIRTH` in place of `PIN`)
-- **Automatic cross-brand token sharing** — Any token validated in one brand's session is automatically reusable in another brand's session — no per-brand policy configuration needed
 - **Party Disambiguation** — When an ANI maps to multiple parties (customers), the engine applies configurable disambiguation rules and requests differentiating tokens to resolve to a single party
 - **Customer Preference Filtering** — Once a party is identified, customer-specific preferences (e.g., blocked token types) are loaded and used to filter which tokens are offered — blocked tokens are automatically skipped and backup alternatives or fallback paths are used instead
 - **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored

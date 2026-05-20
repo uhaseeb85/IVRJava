@@ -48,7 +48,6 @@ public class AuthenticateController {
             start.setBrandId(req.getBrandId());
             start.setCallerId(req.getCallerId());
             start.setTargetLevel(req.getTargetLevel());
-            start.setCrossBrandTokens(req.getCrossBrandTokens());
             start.setInitialTokens(req.getInitialTokens());
             return ResponseEntity.ok(authenticateService.start(start));
         }
