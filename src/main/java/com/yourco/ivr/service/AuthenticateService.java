@@ -5,6 +5,7 @@ import com.yourco.ivr.api.dto.CallTransferRequest;
 import com.yourco.ivr.api.dto.StartAuthenticateRequest;
 import com.yourco.ivr.domain.*;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.domain.config.TransferPolicy;
 import com.yourco.ivr.engine.AuthEngine;
 import com.yourco.ivr.engine.DisambiguationEngine;
 import com.yourco.ivr.exception.TransferNotAllowedException;
@@ -107,12 +108,12 @@ public class AuthenticateService {
     }
 
     public AuthenticateResponse transfer(CallTransferRequest req) {
-        // 1. Verify source system is known and enabled
-        if (transferRegistry.get(req.getSourceSystemId()) == null) {
+        TransferPolicy policy = transferRegistry.get(req.getSourceSystemId());
+        if (policy == null) {
             throw new TransferNotAllowedException(
                 "Source system not configured: " + req.getSourceSystemId());
         }
-        if (!transferRegistry.get(req.getSourceSystemId()).isEnabled()) {
+        if (!policy.isEnabled()) {
             throw new TransferNotAllowedException(
                 "Source system is disabled: " + req.getSourceSystemId());
         }
@@ -155,6 +156,11 @@ public class AuthenticateService {
 
     public AuthenticateResponse submitToken(String sessionId, TokenType tokenType, String tokenValue) {
         return engine.submitToken(sessionId, tokenType, tokenValue);
+    }
+
+    public AuthenticateResponse submitTokenWithCaller(String sessionId, TokenType tokenType,
+                                                       String tokenValue, String callerId) {
+        return engine.submitTokenWithCaller(sessionId, tokenType, tokenValue, callerId);
     }
 
     public AuthenticateResponse escalate(String sessionId, AuthLevel targetLevel) {

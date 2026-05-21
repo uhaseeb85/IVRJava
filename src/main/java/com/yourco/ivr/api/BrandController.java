@@ -1,5 +1,6 @@
 package com.yourco.ivr.api;
 
+import com.yourco.ivr.domain.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.service.BrandService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -35,7 +36,7 @@ public class BrandController {
     @PostMapping
     @Operation(summary = "Create a new brand config", description = "Creates a new brand configuration JSON file")
     public ResponseEntity<BrandAuthConfig> create(@RequestBody BrandAuthConfig config) {
-        BrandService.ValidationResult validation = brandService.validate(config);
+        ValidationResult validation = brandService.validate(config);
         if (!validation.isValid()) {
             return ResponseEntity.badRequest().body(null);
         }
@@ -45,7 +46,7 @@ public class BrandController {
     @PutMapping("/{brandId}")
     @Operation(summary = "Update a brand config", description = "Updates an existing brand configuration JSON file")
     public ResponseEntity<BrandAuthConfig> update(@PathVariable String brandId, @RequestBody BrandAuthConfig config) {
-        BrandService.ValidationResult validation = brandService.validate(config);
+        ValidationResult validation = brandService.validate(config);
         if (!validation.isValid()) {
             return ResponseEntity.badRequest().body(null);
         }
@@ -61,7 +62,7 @@ public class BrandController {
 
     @PostMapping("/validate")
     @Operation(summary = "Validate a brand config", description = "Validates a brand configuration without saving")
-    public ResponseEntity<BrandService.ValidationResult> validate(@RequestBody BrandAuthConfig config) {
+    public ResponseEntity<ValidationResult> validate(@RequestBody BrandAuthConfig config) {
         return ResponseEntity.ok(brandService.validate(config));
     }
 }

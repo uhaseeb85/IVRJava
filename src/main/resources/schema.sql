@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     matched_party           TEXT,
     customer_preferences    TEXT,
     disambiguation_attempt  INTEGER DEFAULT 0,
+    version                 INTEGER NOT NULL DEFAULT 0,
     transferred_from        TEXT,
     locked_until            TEXT,
     created_at              TEXT NOT NULL,
@@ -33,3 +34,4 @@ ALTER TABLE ivr_session ADD COLUMN candidate_parties TEXT;
 ALTER TABLE ivr_session ADD COLUMN matched_party TEXT;
 ALTER TABLE ivr_session ADD COLUMN customer_preferences TEXT;
 ALTER TABLE ivr_session ADD COLUMN disambiguation_attempt INTEGER DEFAULT 0;
+ALTER TABLE ivr_session ADD COLUMN version INTEGER NOT NULL DEFAULT 0;

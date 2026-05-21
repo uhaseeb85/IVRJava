@@ -1,12 +1,17 @@
 package com.yourco.ivr.api;
 
 import com.yourco.ivr.api.dto.ErrorResponse;
+import com.yourco.ivr.exception.BrandConfigException;
+import com.yourco.ivr.exception.SessionConflictException;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
+import com.yourco.ivr.exception.SessionSerializationException;
 import com.yourco.ivr.exception.TransferNotAllowedException;
 import com.yourco.ivr.exception.UnknownBrandException;
 import com.yourco.ivr.exception.UnknownCallerException;
 import com.yourco.ivr.exception.UnsupportedTokenTypeException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -16,6 +21,8 @@ import java.util.stream.Collectors;
 
 @RestControllerAdvice
 public class IvrExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(IvrExceptionHandler.class);
 
     @ExceptionHandler(SessionNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(SessionNotFoundException e) {
@@ -66,5 +73,33 @@ public class IvrExceptionHandler {
             .collect(Collectors.joining(", "));
         return ResponseEntity.status(400)
             .body(new ErrorResponse("VALIDATION_ERROR", message));
+    }
+
+    @ExceptionHandler(SessionSerializationException.class)
+    public ResponseEntity<ErrorResponse> handleSerialization(SessionSerializationException e) {
+        log.error("Session serialization failure", e);
+        return ResponseEntity.status(500)
+            .body(new ErrorResponse("INTERNAL_ERROR", "An internal error occurred"));
+    }
+
+    @ExceptionHandler(SessionConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(SessionConflictException e) {
+        log.warn("Session conflict: {}", e.getMessage());
+        return ResponseEntity.status(409)
+            .body(new ErrorResponse("SESSION_CONFLICT", e.getMessage()));
+    }
+
+    @ExceptionHandler(BrandConfigException.class)
+    public ResponseEntity<ErrorResponse> handleBrandConfig(BrandConfigException e) {
+        log.error("Brand config error", e);
+        return ResponseEntity.status(500)
+            .body(new ErrorResponse("BRAND_CONFIG_ERROR", e.getMessage()));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleUnexpected(Exception e) {
+        log.error("Unexpected error", e);
+        return ResponseEntity.status(500)
+            .body(new ErrorResponse("INTERNAL_ERROR", "An unexpected error occurred"));
     }
 }

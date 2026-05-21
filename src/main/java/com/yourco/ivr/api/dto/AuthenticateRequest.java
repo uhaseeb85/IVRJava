@@ -17,7 +17,7 @@ public class AuthenticateRequest {
     @Schema(description = "Brand identifier (required for start/transfer)", example = "BRAND_A")
     private String brandId;
 
-    @Schema(description = "Caller phone number or identifier (required for start/transfer)", example = "5551234567")
+    @Schema(description = "Caller phone number or identifier (required for start/transfer, optional for token/escalate for session ownership validation)", example = "5551234567")
     private String callerId;
 
     @Schema(description = "Target authentication level (required for start/transfer/escalate)", example = "STANDARD")

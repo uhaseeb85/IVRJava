@@ -12,11 +12,15 @@ import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
+import com.yourco.ivr.exception.SessionLockedException;
+import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.repository.SessionRepository;
 import com.yourco.ivr.validator.TokenValidationContext;
 import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.TokenValidatorRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
@@ -28,6 +32,8 @@ import java.util.Set;
 
 @Service
 public class AuthEngine {
+
+    private static final Logger log = LoggerFactory.getLogger(AuthEngine.class);
 
     private final BrandRulesRegistry rulesRegistry;
     private final TokenValidatorRegistry validatorRegistry;
@@ -56,7 +62,39 @@ public class AuthEngine {
     public AuthenticateResponse submitToken(String sessionId,
                                         TokenType tokenType,
                                         String tokenValue) {
+        return submitTokenWithCaller(sessionId, tokenType, tokenValue, null);
+    }
+
+    /**
+     * Called when the IVR platform submits a token value with optional callerId
+     * for session ownership validation.
+     */
+    public AuthenticateResponse submitTokenWithCaller(String sessionId,
+                                        TokenType tokenType,
+                                        String tokenValue,
+                                        String callerId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
+
+        // Locked session guard
+        if (session.getStatus() == SessionStatus.LOCKED) {
+            if (session.getLockedUntil() != null
+                    && Instant.now().isAfter(session.getLockedUntil())) {
+                session.setStatus(SessionStatus.COLLECTING);
+                session.getAttemptCounts().clear();
+                session.setLockedUntil(null);
+                sessionRepo.save(session);
+            } else {
+                throw new SessionLockedException(sessionId, session.getLockedUntil());
+            }
+        }
+
+        // Optional session ownership validation
+        if (callerId != null && !callerId.equals(session.getCallerId())) {
+            log.warn("CallerId mismatch for session {}: expected {}, got {}",
+                sessionId, session.getCallerId(), callerId);
+            throw new SessionNotFoundException(sessionId);
+        }
+
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
 
         // Route to disambiguation if session is still resolving parties
@@ -65,6 +103,9 @@ public class AuthEngine {
             AuthenticateResponse disResp = disambiguationEngine.handleToken(
                 session, tokenType, tokenValue, disConfig);
             if (session.getPhase() == SessionPhase.AUTHENTICATING) {
+                log.info("AUTH [{}] brand={} caller={} disambiguation resolved party={}",
+                    sessionId, session.getBrandId(), session.getCallerId(),
+                    session.getMatchedParty() != null ? session.getMatchedParty().getPartyId() : "null");
                 return evaluateProgress(session, config);
             }
             return disResp;
@@ -75,6 +116,10 @@ public class AuthEngine {
 
         // 1. Validate externally
         boolean valid = validateExternally(session, tokenType, tokenValue);
+
+        log.info("AUTH [{}] brand={} caller={} token={} result={}",
+            sessionId, session.getBrandId(), session.getCallerId(), tokenType,
+            valid ? "PASS" : "FAIL");
 
         if (!valid) {
             return handleFailure(session, config, tokenType);
@@ -121,6 +166,10 @@ public class AuthEngine {
         if (!newTarget.isHigherThan(current)) {
             throw new IllegalArgumentException("Target must exceed current level");
         }
+
+        log.info("AUTH [{}] brand={} caller={} escalate {} -> {}",
+            sessionId, session.getBrandId(), session.getCallerId(),
+            current, newTarget);
 
         session.setTargetLevel(newTarget);
         sessionRepo.save(session);
@@ -282,7 +331,6 @@ public class AuthEngine {
             pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
             session.getAttemptCounts().clear();
             TokenPath nextPath = rule.getPaths().get(nextPathIdx);
-            pruneTokensNotInPath(session, nextPath);
             sessionRepo.save(session);
 
             TokenType nextToken = null;
@@ -313,6 +361,9 @@ public class AuthEngine {
         session.setStatus(SessionStatus.LOCKED);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
+        log.warn("AUTH [{}] brand={} caller={} LOCKED for {} seconds",
+            session.getSessionId(), session.getBrandId(), session.getCallerId(),
+            rule.getLockoutSeconds());
         return baseResponse(session)
             .status(SessionStatus.LOCKED)
             .lockedUntil(session.getLockedUntil())
@@ -377,8 +428,6 @@ public class AuthEngine {
         if (nextPathIdx < rule.getPaths().size()) {
             pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
             session.getAttemptCounts().clear();
-            TokenPath nextPath = rule.getPaths().get(nextPathIdx);
-            pruneTokensNotInPath(session, nextPath);
             sessionRepo.save(session);
             return evaluateProgress(session, config);
         }

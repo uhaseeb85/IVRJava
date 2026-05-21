@@ -25,6 +25,7 @@ public class IvrSession {
     private Party matchedParty;
     private CustomerPreference customerPreferences;
     private int disambiguationAttemptCount;
+    private int version;
 
     private String transferredFrom;
     private Instant lockedUntil;

@@ -1,12 +1,13 @@
 package com.yourco.ivr.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yourco.ivr.domain.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.exception.BrandConfigException;
 import com.yourco.ivr.exception.UnknownBrandException;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -25,7 +26,6 @@ public class BrandService {
     private final ObjectMapper mapper;
     private final String configDir;
 
-    @Autowired
     public BrandService(BrandRulesRegistry registry, ObjectMapper mapper,
                         @Value("${ivr.brands.config-dir:./config/brands}") String configDir) {
         this.registry = registry;
@@ -43,7 +43,6 @@ public class BrandService {
     }
 
     public List<BrandAuthConfig> listAll() {
-        // Get brands from the registry and from the filesystem
         List<BrandAuthConfig> result = new ArrayList<>();
         File dir = new File(configDir);
         File[] files = dir.listFiles((d, name) -> name.endsWith(".json"));
@@ -61,11 +60,9 @@ public class BrandService {
     }
 
     public BrandAuthConfig get(String brandId) {
-        // Try registry first (fast path), fall back to reading file
         try {
             return registry.get(brandId);
         } catch (UnknownBrandException e) {
-            // Not in registry, try to read from file
             File file = getBrandFile(brandId);
             if (file.exists()) {
                 try {
@@ -73,7 +70,7 @@ public class BrandService {
                     registry.register(config);
                     return config;
                 } catch (IOException ex) {
-                    throw new RuntimeException("Failed to read brand config: " + brandId, ex);
+                    throw new BrandConfigException("Failed to read brand config: " + brandId, ex);
                 }
             }
             throw e;
@@ -93,7 +90,7 @@ public class BrandService {
             log.info("Saved brand config: {}", brandId);
             return config;
         } catch (IOException e) {
-            throw new RuntimeException("Failed to save brand config: " + brandId, e);
+            throw new BrandConfigException("Failed to save brand config: " + brandId, e);
         }
     }
 
@@ -105,15 +102,17 @@ public class BrandService {
     public void delete(String brandId) {
         File file = getBrandFile(brandId);
         if (file.exists()) {
-            file.delete();
+            if (!file.delete()) {
+                log.error("Failed to delete brand config file: {}", file.getAbsolutePath());
+                throw new BrandConfigException(
+                    "Failed to delete brand config file: " + file.getAbsolutePath(), null);
+            }
             log.info("Deleted brand config: {}", brandId);
         }
-        // Reload registry from remaining files to keep in sync
         refreshRegistry();
     }
 
     public ValidationResult validate(BrandAuthConfig config) {
-        // Basic validations
         if (config.getBrandId() == null || config.getBrandId().trim().isEmpty()) {
             return ValidationResult.error("Brand ID is required");
         }
@@ -150,26 +149,5 @@ public class BrandService {
     private File getBrandFile(String brandId) {
         String sanitized = brandId.replaceAll("[^a-zA-Z0-9_-]", "_").toLowerCase();
         return new File(configDir, sanitized + ".json");
-    }
-
-    public static class ValidationResult {
-        private final boolean valid;
-        private final String message;
-
-        private ValidationResult(boolean valid, String message) {
-            this.valid = valid;
-            this.message = message;
-        }
-
-        public static ValidationResult ok() {
-            return new ValidationResult(true, null);
-        }
-
-        public static ValidationResult error(String message) {
-            return new ValidationResult(false, message);
-        }
-
-        public boolean isValid() { return valid; }
-        public String getMessage() { return message; }
     }
 }

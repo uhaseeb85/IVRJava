@@ -5,7 +5,6 @@ import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.service.BrandService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
@@ -17,7 +16,6 @@ public class BrandRulesLoader {
 
     private final BrandService brandService;
 
-    @Autowired
     public BrandRulesLoader(BrandService brandService) {
         this.brandService = brandService;
     }

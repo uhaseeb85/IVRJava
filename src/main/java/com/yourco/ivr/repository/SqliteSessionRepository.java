@@ -1,7 +1,6 @@
 package com.yourco.ivr.repository;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.CrossBrandTokenRecord;
@@ -11,11 +10,11 @@ import com.yourco.ivr.domain.Party;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
+import com.yourco.ivr.exception.SessionConflictException;
 import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.exception.SessionSerializationException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,8 +43,8 @@ public class SqliteSessionRepository implements SessionRepository {
     private final Duration sessionTtl;
 
     public SqliteSessionRepository(JdbcTemplate jdbc,
-                                        ObjectMapper mapper,
-                                        @Value("${ivr.session.ttl-minutes:30}") int ttlMinutes) {
+                                    ObjectMapper mapper,
+                                    @Value("${ivr.session.ttl-minutes:30}") int ttlMinutes) {
         this.jdbc = jdbc;
         this.mapper = mapper;
         this.sessionTtl = Duration.ofMinutes(ttlMinutes);
@@ -54,12 +53,22 @@ public class SqliteSessionRepository implements SessionRepository {
     @Override
     public void save(IvrSession session) {
         session.setLastActivityAt(Instant.now());
-        String sql = "INSERT OR REPLACE INTO ivr_session " +
+        if (session.getVersion() == 0) {
+            insert(session);
+        } else {
+            update(session);
+        }
+    }
+
+    private void insert(IvrSession session) {
+        int version = 1;
+        session.setVersion(version);
+        String sql = "INSERT INTO ivr_session " +
             "(session_id, brand_id, caller_id, current_level, target_level, status, " +
             "phase, collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
             "cross_brand_tokens, candidate_parties, matched_party, customer_preferences, " +
-            "disambiguation_attempt, transferred_from, locked_until, created_at, last_activity_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "disambiguation_attempt, version, transferred_from, locked_until, created_at, last_activity_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         jdbc.update(sql,
             session.getSessionId(),
             session.getBrandId(),
@@ -77,6 +86,7 @@ public class SqliteSessionRepository implements SessionRepository {
             toJson(session.getMatchedParty()),
             toJson(session.getCustomerPreferences()),
             session.getDisambiguationAttemptCount(),
+            version,
             session.getTransferredFrom(),
             toIso(session.getLockedUntil()),
             toIso(session.getCreatedAt()),
@@ -84,13 +94,55 @@ public class SqliteSessionRepository implements SessionRepository {
         );
     }
 
+    private void update(IvrSession session) {
+        int expectedVersion = session.getVersion();
+        int newVersion = expectedVersion + 1;
+        session.setVersion(newVersion);
+        String sql = "UPDATE ivr_session SET " +
+            "brand_id = ?, caller_id = ?, current_level = ?, target_level = ?, status = ?, " +
+            "phase = ?, collected_tokens = ?, validated_tokens = ?, attempt_counts = ?, " +
+            "active_path_index = ?, cross_brand_tokens = ?, candidate_parties = ?, " +
+            "matched_party = ?, customer_preferences = ?, disambiguation_attempt = ?, " +
+            "version = ?, transferred_from = ?, locked_until = ?, last_activity_at = ? " +
+            "WHERE session_id = ? AND version = ?";
+        int rows = jdbc.update(sql,
+            session.getBrandId(),
+            session.getCallerId(),
+            session.getCurrentLevel().name(),
+            session.getTargetLevel().name(),
+            session.getStatus().name(),
+            session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name(),
+            toJson(session.getCollectedTokens()),
+            toJson(session.getValidatedTokens()),
+            toJson(session.getAttemptCounts()),
+            toJson(session.getActivePathIndexByLevel()),
+            toJson(session.getCrossBrandTokens()),
+            toJson(session.getCandidateParties()),
+            toJson(session.getMatchedParty()),
+            toJson(session.getCustomerPreferences()),
+            session.getDisambiguationAttemptCount(),
+            newVersion,
+            session.getTransferredFrom(),
+            toIso(session.getLockedUntil()),
+            toIso(session.getLastActivityAt()),
+            session.getSessionId(),
+            expectedVersion
+        );
+        if (rows == 0) {
+            throw new SessionConflictException(session.getSessionId());
+        }
+    }
+
     @Override
     public IvrSession getOrThrow(String sessionId) {
-        checkExpired(sessionId);
-
         String sql = "SELECT * FROM ivr_session WHERE session_id = ?";
         try {
-            return jdbc.queryForObject(sql, this::mapRow, sessionId);
+            IvrSession session = jdbc.queryForObject(sql, this::mapRow, sessionId);
+            if (session.getLastActivityAt().plus(sessionTtl).isBefore(Instant.now())) {
+                delete(sessionId);
+                throw new SessionNotFoundException(sessionId);
+            }
+            return session;
         } catch (EmptyResultDataAccessException e) {
             throw new SessionNotFoundException(sessionId);
         }
@@ -107,23 +159,6 @@ public class SqliteSessionRepository implements SessionRepository {
         int deleted = jdbc.update("DELETE FROM ivr_session WHERE last_activity_at < ?", toIso(cutoff));
         if (deleted > 0) {
             log.debug("Cleaned up {} expired session(s)", deleted);
-        }
-    }
-
-    // ── Private helpers ──────────────────────────────────────────────────────
-    private void checkExpired(String sessionId) {
-        String sql = "SELECT last_activity_at FROM ivr_session WHERE session_id = ?";
-        try {
-            String iso = jdbc.queryForObject(sql, String.class, sessionId);
-            if (iso != null) {
-                Instant lastActivity = Instant.parse(iso);
-                if (lastActivity.plus(sessionTtl).isBefore(Instant.now())) {
-                    delete(sessionId);
-                    throw new SessionNotFoundException(sessionId);
-                }
-            }
-        } catch (EmptyResultDataAccessException e) {
-            throw new SessionNotFoundException(sessionId);
         }
     }
 
@@ -146,6 +181,7 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setMatchedParty(fromJsonSingle(rs.getString("matched_party"), Party.class));
         s.setCustomerPreferences(fromJsonSingle(rs.getString("customer_preferences"), CustomerPreference.class));
         s.setDisambiguationAttemptCount(rs.getInt("disambiguation_attempt"));
+        s.setVersion(rs.getInt("version"));
         s.setTransferredFrom(rs.getString("transferred_from"));
         s.setLockedUntil(fromIso(rs.getString("locked_until")));
         s.setCreatedAt(fromIso(rs.getString("created_at")));

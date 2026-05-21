@@ -7,6 +7,8 @@ import com.yourco.ivr.engine.impl.ExcludeInactiveRule;
 import com.yourco.ivr.engine.impl.PrimaryAniRule;
 import com.yourco.ivr.preference.CustomerPreferenceProvider;
 import com.yourco.ivr.repository.SessionRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -16,14 +18,9 @@ import java.util.stream.Collectors;
 @Service
 public class DisambiguationEngine {
 
-    private static final Map<TokenType, Function<Party, String>> TOKEN_FIELD_MAP = new LinkedHashMap<>();
+    private static final Logger log = LoggerFactory.getLogger(DisambiguationEngine.class);
 
-    static {
-        TOKEN_FIELD_MAP.put(TokenType.ACCOUNT_NUMBER, Party::getAccountNumber);
-        TOKEN_FIELD_MAP.put(TokenType.DATE_OF_BIRTH, Party::getDateOfBirth);
-        TOKEN_FIELD_MAP.put(TokenType.SSN_LAST4, Party::getSsnLast4);
-        TOKEN_FIELD_MAP.put(TokenType.CARD_LAST4, Party::getCardLast4);
-    }
+    private final Map<TokenType, Function<Party, String>> tokenFieldMap;
 
     private final SessionRepository sessionRepo;
     private final CustomerPreferenceProvider preferenceProvider;
@@ -35,6 +32,16 @@ public class DisambiguationEngine {
         this.sessionRepo = sessionRepo;
         this.preferenceProvider = preferenceProvider;
         this.promptResolver = promptResolver;
+        this.tokenFieldMap = defaultTokenFieldMap();
+    }
+
+    private static Map<TokenType, Function<Party, String>> defaultTokenFieldMap() {
+        Map<TokenType, Function<Party, String>> map = new LinkedHashMap<>();
+        map.put(TokenType.ACCOUNT_NUMBER, Party::getAccountNumber);
+        map.put(TokenType.DATE_OF_BIRTH, Party::getDateOfBirth);
+        map.put(TokenType.SSN_LAST4, Party::getSsnLast4);
+        map.put(TokenType.CARD_LAST4, Party::getCardLast4);
+        return Collections.unmodifiableMap(map);
     }
 
     public AuthenticateResponse start(IvrSession session, DisambiguationConfig config) {
@@ -49,6 +56,8 @@ public class DisambiguationEngine {
         }
 
         if (parties.size() == 1) {
+            log.info("DISAMBIGUATION [{}] resolved to single party={}",
+                session.getSessionId(), parties.get(0).getPartyId());
             return resolveParty(session, parties.get(0));
         }
 
@@ -72,7 +81,7 @@ public class DisambiguationEngine {
     public AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
                                         String tokenValue, DisambiguationConfig config) {
         // 1. Verify token is usable for disambiguation
-        if (!TOKEN_FIELD_MAP.containsKey(tokenType)) {
+        if (!tokenFieldMap.containsKey(tokenType)) {
             return buildResponse(session,
                 "The provided token type cannot be used for disambiguation. Please try another.",
                 selectDisambiguationToken(session.getCandidateParties()));
@@ -87,7 +96,7 @@ public class DisambiguationEngine {
 
         // 3. Match token value against remaining parties
         List<Party> remaining = session.getCandidateParties();
-        Function<Party, String> extractor = TOKEN_FIELD_MAP.get(tokenType);
+        Function<Party, String> extractor = tokenFieldMap.get(tokenType);
 
         List<Party> matching = remaining.stream()
             .filter(p -> tokenValue.equals(extractor.apply(p)))
@@ -100,6 +109,8 @@ public class DisambiguationEngine {
         }
 
         if (matching.size() == 1) {
+            log.info("DISAMBIGUATION [{}] token match resolved to party={}",
+                session.getSessionId(), matching.get(0).getPartyId());
             return resolveParty(session, matching.get(0));
         }
 
@@ -130,7 +141,7 @@ public class DisambiguationEngine {
         TokenType bestToken = null;
         int bestMaxGroupSize = Integer.MAX_VALUE;
 
-        for (Map.Entry<TokenType, Function<Party, String>> entry : TOKEN_FIELD_MAP.entrySet()) {
+        for (Map.Entry<TokenType, Function<Party, String>> entry : tokenFieldMap.entrySet()) {
             TokenType tokenType = entry.getKey();
             Function<Party, String> extractor = entry.getValue();
 

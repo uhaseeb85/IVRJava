@@ -13,6 +13,8 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import javax.validation.Valid;
+
 @RestController
 @RequestMapping("/ivr/authenticate")
 @Tag(name = "IVR Authentication", description = "Unified endpoint for IVR authentication sessions")
@@ -32,7 +34,7 @@ public class AuthenticateController {
         @ApiResponse(responseCode = "404", description = "Session not found")
     })
     @PostMapping
-    public ResponseEntity<AuthenticateResponse> handle(@RequestBody AuthenticateRequest req) {
+    public ResponseEntity<AuthenticateResponse> handle(@Valid @RequestBody AuthenticateRequest req) {
         if (req.getSessionId() == null) {
             if (req.getSourceSystemId() != null) {
                 CallTransferRequest transfer = new CallTransferRequest();
@@ -53,7 +55,8 @@ public class AuthenticateController {
         }
         if (req.getTokenType() != null) {
             return ResponseEntity.ok(
-                authenticateService.submitToken(req.getSessionId(), req.getTokenType(), req.getTokenValue())
+                authenticateService.submitTokenWithCaller(
+                    req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId())
             );
         }
         return ResponseEntity.ok(
