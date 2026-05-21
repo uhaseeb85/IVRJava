@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 1.4 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 1.5 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -118,6 +118,7 @@ public class IvrSession {
     private AuthLevel currentLevel;            // highest confirmed level
     private AuthLevel targetLevel;             // what caller is trying to reach
     private SessionStatus status;
+    private SessionPhase phase;                // DISAMBIGUATION or AUTHENTICATING
 
     // Tokens collected this session (raw values — encrypt at rest)
     private Map<TokenType, String> collectedTokens;
@@ -134,8 +135,17 @@ public class IvrSession {
     // Cross-brand token provenance: token → (brandId, validatedAt timestamp)
     private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
 
+    // Party disambiguation fields
+    private List<Party> candidateParties;
+    private Party matchedParty;
+    private CustomerPreference customerPreferences;
+    private int disambiguationAttemptCount;
+
     // Source system that transferred this call (null if session started locally)
     private String transferredFrom;
+
+    // Optimistic locking for concurrent update safety
+    private int version;
 
     private Instant lockedUntil;
     private Instant createdAt;
@@ -144,6 +154,10 @@ public class IvrSession {
 
 public enum SessionStatus {
     COLLECTING, VALIDATING, AUTHENTICATED, LOCKED, EXPIRED, FAILED
+}
+
+public enum SessionPhase {
+    DISAMBIGUATION, AUTHENTICATING
 }
 
 @Data @AllArgsConstructor
@@ -269,22 +283,48 @@ public class AuthEngine {
                                        TokenType tokenType,
                                        String tokenValue) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
+
+        // Locked session guard — reject submissions while locked,
+        // auto-unlock if the lockout duration has passed
+        if (session.getStatus() == SessionStatus.LOCKED) {
+            if (session.getLockedUntil() != null
+                    && Instant.now().isAfter(session.getLockedUntil())) {
+                session.setStatus(SessionStatus.COLLECTING);
+                session.getAttemptCounts().clear();
+                session.setLockedUntil(null);
+            } else {
+                throw new SessionLockedException(sessionId, session.getLockedUntil());
+            }
+        }
+
+        // Optional session ownership validation via callerId
+        if (callerId != null && !callerId.equals(session.getCallerId())) {
+            throw new SessionNotFoundException(sessionId);
+        }
+
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
 
-        // 1. Lockout guard
-        if (isLocked(session)) return buildLockedResponse(session);
+        // Route to disambiguation if session is still resolving parties
+        if (session.getPhase() == SessionPhase.DISAMBIGUATION) { ... }
 
-        // 2. Validate externally
+        // Store the collected token value
+        session.getCollectedTokens().put(tokenType, tokenValue);
+
+        // 1. Validate externally (no cross-brand shortcut)
         boolean valid = validateExternally(session, tokenType, tokenValue);
+
+        log.info("AUTH [{}] brand={} caller={} token={} result={}",
+            sessionId, session.getBrandId(), session.getCallerId(), tokenType,
+            valid ? "PASS" : "FAIL");
 
         if (!valid) return handleFailure(session, config, tokenType);
 
-        // 3. Mark validated and record provenance
+        // 2. Mark validated and record provenance
         session.getValidatedTokens().add(tokenType);
-        session.getAttemptCounts().remove(tokenType);  // reset on success
+        session.getAttemptCounts().remove(tokenType);
         crossBrandEvaluator.recordValidated(session, tokenType);
 
-        // 4. Evaluate progress toward targetLevel
+        // 3. Evaluate progress toward targetLevel
         return evaluateProgress(session, config);
     }
 
@@ -296,10 +336,12 @@ public class AuthEngine {
         if (!newTarget.isHigherThan(current))
             throw new IllegalArgumentException("Target must exceed current level");
 
+        log.info("AUTH [{}] brand={} caller={} escalate {} -> {}",
+            sessionId, session.getBrandId(), session.getCallerId(),
+            current, newTarget);
+
         session.setTargetLevel(newTarget);
         sessionRepo.save(session);
-
-        // Re-evaluate immediately — existing tokens may already satisfy the new level
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
         return evaluateProgress(session, config);
     }
@@ -354,32 +396,24 @@ public class AuthEngine {
         if (nextPathIdx < rule.getPaths().size()) {
             session.getActivePathIndexByLevel().put(session.getTargetLevel(), nextPathIdx);
             session.getAttemptCounts().clear();
-            pruneTokensNotInPath(session, rule.getPaths().get(nextPathIdx));
+            TokenPath nextPath = rule.getPaths().get(nextPathIdx);
             sessionRepo.save(session);
 
-            TokenType nextToken = rule.getPaths().get(nextPathIdx)
+            TokenType nextToken = nextPath
                 .getRequiredTokens().stream()
                 .filter(t -> !session.getValidatedTokens().contains(t))
                 .findFirst().orElseThrow();
             return AuthenticateResponse.fallback(session, nextToken);
         }
 
-        // All paths exhausted → lock
+        // All paths exhausted — lockout
         session.setStatus(SessionStatus.LOCKED);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
+        log.warn("AUTH [{}] brand={} caller={} LOCKED for {} seconds",
+            session.getSessionId(), session.getBrandId(), session.getCallerId(),
+            rule.getLockoutSeconds());
         return AuthenticateResponse.locked(session);
-    }
-
-    private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {
-        Set<TokenType> keep = new HashSet<>(newPath.getRequiredTokens());
-        session.getValidatedTokens().retainAll(keep);
-    }
-
-    private boolean isLocked(IvrSession session) {
-        return session.getStatus() == SessionStatus.LOCKED
-            && session.getLockedUntil() != null
-            && Instant.now().isBefore(session.getLockedUntil());
     }
 
     private boolean validateExternally(IvrSession session,
@@ -713,15 +747,30 @@ public class AuthenticateController {
 public class AuthenticateRequest {
     private String sessionId;
     private String brandId;
-    private String callerId;
+    private String callerId;    // optional for token/escalate — enables session ownership validation
     private AuthLevel targetLevel;
     private String sourceSystemId;
     private AuthLevel currentLevel;
     private List<TokenType> validatedTokens;
     private TokenType tokenType;
     private String tokenValue;
-    private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
     private Map<TokenType, String> initialTokens;
+}
+
+// AuthenticateResponse.java
+@Data @Builder
+public class AuthenticateResponse {
+    private String sessionId;
+    private SessionStatus status;
+    private AuthLevel currentLevel;
+    private AuthLevel targetLevel;
+    private TokenType nextRequiredToken;
+    private Integer remainingAttempts;
+    private String prompt;
+    private Instant lockedUntil;
+    private List<TokenType> acceptedTokens;
+    private SessionPhase phase;              // DISAMBIGUATION or AUTHENTICATING
+    private String matchedPartyId;           // set once party disambiguation resolves
 }
 
 // AuthenticateResponse.java
@@ -803,7 +852,7 @@ public class AuthenticateService {
 
 ## 10. Session Storage (SQLite)
 
-Sessions are stored in a SQLite database accessed via `JdbcTemplate`. The `IvrSession` object is serialized to JSON for complex fields (maps, sets, nested objects) using Jackson. A `@Scheduled` cleanup job removes expired sessions.
+Sessions are stored in a SQLite database accessed via `JdbcTemplate`. The `IvrSession` object is serialized to JSON for complex fields (maps, sets, nested objects) using Jackson. A `@Scheduled` cleanup job removes expired sessions. **Optimistic locking** via a `version` column prevents lost updates from concurrent requests on the same session.
 
 ### 10.1 Database Schema
 
@@ -815,12 +864,18 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     current_level           TEXT NOT NULL DEFAULT 'NONE',
     target_level            TEXT NOT NULL,
     status                  TEXT NOT NULL DEFAULT 'COLLECTING',
+    phase                   TEXT NOT NULL DEFAULT 'AUTHENTICATING',
     collected_tokens        TEXT,       -- JSON: Map<TokenType, String>
     validated_tokens        TEXT,       -- JSON: Set<TokenType>
     attempt_counts          TEXT,       -- JSON: Map<TokenType, Integer>
     active_path_index       TEXT,       -- JSON: Map<AuthLevel, Integer>
     cross_brand_tokens      TEXT,       -- JSON: Map<TokenType, CrossBrandTokenRecord>
-    transferred_from        TEXT,       -- Source system ID if call was transferred
+    candidate_parties       TEXT,       -- JSON: List<Party>
+    matched_party           TEXT,       -- JSON: Party
+    customer_preferences    TEXT,       -- JSON: CustomerPreference
+    disambiguation_attempt  INTEGER DEFAULT 0,
+    version                 INTEGER NOT NULL DEFAULT 0,  -- optimistic locking
+    transferred_from        TEXT,
     locked_until            TEXT,       -- ISO-8601 timestamp
     created_at              TEXT NOT NULL,
     last_activity_at        TEXT NOT NULL
@@ -828,6 +883,12 @@ CREATE TABLE IF NOT EXISTS ivr_session (
 ```
 
 ### 10.2 SqliteSessionRepository
+
+Key implementation details:
+
+- **save()**: New sessions (`version == 0`) use `INSERT` with version set to 1. Existing sessions use `UPDATE ... WHERE session_id = ? AND version = ?`. If the update affects 0 rows, a `SessionConflictException` (HTTP 409) is thrown — the caller must re-read and retry.
+- **getOrThrow()**: Single query — fetches the full row and checks TTL in Java. Previously this was two separate queries (`checkExpired` + `SELECT *`).
+- **mapRow()**: Reads all columns including `phase`, `candidate_parties`, `matched_party`, `customer_preferences`, `disambiguation_attempt`, and `version`.
 
 ```java
 @Repository
@@ -1078,6 +1139,12 @@ public class IvrExceptionHandler {
             .body(new ErrorResponse("SESSION_LOCKED", e.getMessage()));
     }
 
+    @ExceptionHandler(SessionConflictException.class)
+    public ResponseEntity<ErrorResponse> handleConflict(SessionConflictException e) {
+        return ResponseEntity.status(409)
+            .body(new ErrorResponse("SESSION_CONFLICT", e.getMessage()));
+    }
+
     @ExceptionHandler(TransferNotAllowedException.class)
     public ResponseEntity<ErrorResponse> handleTransferNotAllowed(TransferNotAllowedException e) {
         return ResponseEntity.status(403)
@@ -1090,16 +1157,31 @@ public class IvrExceptionHandler {
             .body(new ErrorResponse("UNKNOWN_BRAND", e.getMessage()));
     }
 
-    @ExceptionHandler(UnsupportedTokenTypeException.class)
-    public ResponseEntity<ErrorResponse> handleToken(UnsupportedTokenTypeException e) {
+    @ExceptionHandler(UnknownCallerException.class)
+    public ResponseEntity<ErrorResponse> handleUnknownCaller(UnknownCallerException e) {
         return ResponseEntity.status(400)
-            .body(new ErrorResponse("UNSUPPORTED_TOKEN", e.getMessage()));
+            .body(new ErrorResponse("UNKNOWN_CALLER", e.getMessage()));
     }
 
-    @ExceptionHandler(IllegalArgumentException.class)
-    public ResponseEntity<ErrorResponse> handleIllegal(IllegalArgumentException e) {
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("INVALID_REQUEST", e.getMessage()));
+    @ExceptionHandler(SessionSerializationException.class)
+    public ResponseEntity<ErrorResponse> handleSerialization(SessionSerializationException e) {
+        log.error("Session serialization failure", e);
+        return ResponseEntity.status(500)
+            .body(new ErrorResponse("INTERNAL_ERROR", "An internal error occurred"));
+    }
+
+    @ExceptionHandler(BrandConfigException.class)
+    public ResponseEntity<ErrorResponse> handleBrandConfig(BrandConfigException e) {
+        log.error("Brand config error", e);
+        return ResponseEntity.status(500)
+            .body(new ErrorResponse("BRAND_CONFIG_ERROR", e.getMessage()));
+    }
+
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<ErrorResponse> handleUnexpected(Exception e) {
+        log.error("Unexpected error", e);
+        return ResponseEntity.status(500)
+            .body(new ErrorResponse("INTERNAL_ERROR", "An unexpected error occurred"));
     }
 }
 ```
@@ -1112,29 +1194,48 @@ public class IvrExceptionHandler {
 com.yourco.ivr
 ├── api
 │   ├── AuthenticateController.java
+│   ├── BrandController.java
+│   ├── IvrExceptionHandler.java
 │   └── dto/
+│       ├── AuthenticateRequest.java
+│       ├── AuthenticateResponse.java
 │       ├── CallTransferRequest.java
 │       ├── StartAuthenticateRequest.java
 │       ├── TokenSubmitRequest.java
 │       ├── EscalateRequest.java
-│       └── AuthenticateResponse.java
+│       └── ErrorResponse.java
 ├── domain
 │   ├── AuthLevel.java
 │   ├── TokenType.java
 │   ├── IvrSession.java
 │   ├── SessionStatus.java
+│   ├── SessionPhase.java
+│   ├── Party.java
+│   ├── CustomerPreference.java
+│   ├── ValidationResult.java
 │   ├── CrossBrandTokenRecord.java
 │   └── config/
 │       ├── BrandAuthConfig.java
 │       ├── LevelRule.java
 │       ├── TokenPath.java
-│       ├── TokenSharingPolicy.java
+│       ├── DisambiguationConfig.java
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine
 │   ├── AuthEngine.java
 │   ├── CrossBrandTokenEvaluator.java
-│   └── PromptResolver.java
+│   ├── DisambiguationEngine.java
+│   ├── DisambiguationRule.java
+│   ├── PromptResolver.java
+│   └── impl/
+│       ├── ExcludeInactiveRule.java
+│       └── PrimaryAniRule.java
+├── partylookup/
+│   ├── PartyLookupProvider.java
+│   └── StubPartyLookupProvider.java
+├── preference/
+│   ├── CustomerPreferenceProvider.java
+│   └── StubCustomerPreferenceProvider.java
 ├── service
 │   ├── AuthenticateService.java
 │   └── BrandService.java
@@ -1160,10 +1261,13 @@ com.yourco.ivr
 └── exception/
     ├── SessionNotFoundException.java
     ├── SessionLockedException.java
+    ├── SessionConflictException.java
     ├── SessionSerializationException.java
     ├── TransferNotAllowedException.java
     ├── UnknownBrandException.java
-    └── UnsupportedTokenTypeException.java
+    ├── UnknownCallerException.java
+    ├── UnsupportedTokenTypeException.java
+    └── BrandConfigException.java
 ```
 
 ---

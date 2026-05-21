@@ -16,6 +16,8 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Party Disambiguation** — When an ANI maps to multiple parties (customers), the engine applies configurable disambiguation rules and requests differentiating tokens to resolve to a single party
 - **Customer Preference Filtering** — Once a party is identified, customer-specific preferences (e.g., blocked token types) are loaded and used to filter which tokens are offered — blocked tokens are automatically skipped and backup alternatives or fallback paths are used instead
 - **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored
+- **Optimistic locking** — Version-based concurrency control on session updates prevents lost writes under concurrent requests
+- **Structured audit logging** — Auth events (token pass/fail, escalation, lockout) logged by session with caller and brand context
 - **Initial tokens at session start** — Clients can submit pre-collected tokens when creating a session
 - **Declarative JSON config** — All brand rules live in `./config/brands/*.json`; no code changes needed to add or modify brands
 - **Brand Config Editor UI** — Web-based editor at `http://localhost:8081/` to create, view, update, and delete brand configs
@@ -33,7 +35,7 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 | Rules Registry | Jackson + external JSON | Loads and caches `BrandAuthConfig` objects from `./config/brands/` |
 | Transfer Policies Registry | Jackson + external JSON | Loads per-source `TransferPolicy` objects from `./config/transfers/` |
 | Validator Registry | Spring Bean Discovery | Maps `TokenType` → `TokenValidator` implementations |
-| Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level/party/preference state as JSON columns |
+| Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level/party/preference state as JSON columns; optimistic locking via version column |
 | Party Lookup | Pluggable interface | Looks up parties by ANI; stub returns a single generic party |
 | Disambiguation Engine | Plain Java | Applies rules, selects differentiating tokens, resolves to single party |
 | Customer Preference Provider | Pluggable interface | Loads customer preferences (blocked tokens, max level); stub returns empty |
@@ -304,10 +306,11 @@ src/main/java/com/yourco/ivr/
 │   ├── AuthLevel.java              # Auth level enum with rank
 │   ├── TokenType.java              # 7 token types
 │   ├── SessionPhase.java           # DISAMBIGUATION / AUTHENTICATING
-│   ├── IvrSession.java             # Full session state
+│   ├── IvrSession.java             # Full session state (versioned)
 │   ├── SessionStatus.java          # Session lifecycle states
 │   ├── Party.java                  # Customer party record
 │   ├── CustomerPreference.java     # Blocked tokens, max level caps
+│   ├── ValidationResult.java       # Generic validation result
 │   ├── CrossBrandTokenRecord.java
 │   └── config/                     # Brand config model + transfer policy
 │       ├── BrandAuthConfig.java
@@ -317,7 +320,7 @@ src/main/java/com/yourco/ivr/
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine/                 # Auth state machine
-│   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering)
+│   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering + audit logging)
 │   ├── CrossBrandTokenEvaluator.java
 │   ├── DisambiguationEngine.java   # Party resolution + token matching
 │   ├── DisambiguationRule.java     # Rule interface
@@ -332,7 +335,7 @@ src/main/java/com/yourco/ivr/
 │   ├── CustomerPreferenceProvider.java
 │   └── StubCustomerPreferenceProvider.java
 ├── service/
-│   ├── AuthenticateService.java     # Session orchestrator
+│   ├── AuthenticateService.java    # Session orchestrator
 │   └── BrandService.java           # Brand file CRUD orchestrator
 ├── validator/
 │   ├── TokenValidator.java         # Interface
@@ -345,14 +348,16 @@ src/main/java/com/yourco/ivr/
 ├── repository/
 │   ├── DatabaseConfig.java         # DB schema initializer
 │   ├── SessionRepository.java      # Interface
-│   └── SqliteSessionRepository.java # SQLite + JdbcTemplate
+│   └── SqliteSessionRepository.java # SQLite + JdbcTemplate + optimistic locking
 ├── exception/              # Custom exceptions
 │   ├── SessionNotFoundException.java
 │   ├── SessionLockedException.java
+│   ├── SessionConflictException.java
 │   ├── SessionSerializationException.java
 │   ├── TransferNotAllowedException.java
 │   ├── UnknownBrandException.java
 │   ├── UnknownCallerException.java
+│   ├── BrandConfigException.java
 │   └── UnsupportedTokenTypeException.java
 ├── IvrAuthEngineApplication.java
 └── OpenApiConfig.java
