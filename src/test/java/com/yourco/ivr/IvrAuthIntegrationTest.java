@@ -243,6 +243,40 @@ class IvrAuthIntegrationTest {
     }
 
     /**
+     * Verifies that submitting a completely wrong token type (not in acceptedTokens for
+     * the current step) counts as a failed attempt against the required slot so the
+     * retry counter decrements normally. Without this guard, off-path submissions bypass
+     * the validator and leave the retry count unchanged.
+     */
+    @Test
+    void testWrongTokenTypeDecrementsRetryCount() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5551230001");
+        start.setTargetLevel(AuthLevel.STANDARD);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        // Advance past ACCOUNT_NUMBER
+        AuthenticateRequest token = req();
+        token.setSessionId(sessionId);
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        ResponseEntity<AuthenticateResponse> resp = post(token);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(3);
+
+        // Submit OTP — not in acceptedTokens [PIN, SSN_LAST4, DATE_OF_BIRTH] for this step
+        token.setTokenType(TokenType.OTP);
+        token.setTokenValue("123456");
+        resp = post(token);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+    }
+
+    /**
      * Verifies that retry limits are tracked against the required-token slot, not the
      * individual submitted backup type. Failing PIN once, SSN_LAST4 once (a backup for
      * PIN), and DATE_OF_BIRTH once (another backup for PIN) should exhaust the 3-attempt

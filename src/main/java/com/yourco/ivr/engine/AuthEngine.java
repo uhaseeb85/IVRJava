@@ -153,6 +153,29 @@ public class AuthEngine {
         // ── Store collected token (value never logged) ──────────────────────
         session.getCollectedTokens().put(tokenType, tokenValue);
 
+        // Guard: reject token types not accepted at the current step.
+        // An off-path submission (e.g. OTP when PIN/SSN_LAST4 are expected) counts as a
+        // failure against the required slot so the retry counter always decrements.
+        if (activePathCtx != null) {
+            TokenType nextRequired = null;
+            for (TokenType req : activePathCtx.getRequiredTokens()) {
+                if (!validatedSoFar.contains(req)) {
+                    nextRequired = req;
+                    break;
+                }
+            }
+            if (nextRequired != null) {
+                List<TokenType> acceptedNow = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
+                if (!acceptedNow.contains(tokenType)) {
+                    addEntry(procLog, "WARN",
+                        "WRONG_TYPE: submitted " + tokenType + " but expected one of " + acceptedNow);
+                    AuthenticateResponse wrongTypeResp = handleFailure(session, config, nextRequired, procLog);
+                    wrongTypeResp.setProcessingLog(procLog);
+                    return wrongTypeResp;
+                }
+            }
+        }
+
         // 1. Validate externally
         boolean valid = validateExternally(session, tokenType, tokenValue);
 
