@@ -299,40 +299,26 @@ export default function Dashboard() {
   const inputCls = 'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition disabled:opacity-50 disabled:cursor-not-allowed'
 
   const responseSummary = response ? (
-    <div className="space-y-2">
-      {['status', 'currentLevel', 'targetLevel', 'nextRequiredToken', 'prompt', 'phase', 'matchedPartyId', 'remainingAttempts'].map(k => {
+    <div className="space-y-1.5">
+      {['status', 'currentLevel', 'targetLevel', 'nextRequiredToken', 'prompt', 'phase', 'matchedPartyId', 'remainingAttempts', 'acceptedTokens'].map(k => {
         const v = response[k]
-        if (v == null || v === '') return null
+        if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return null
         return (
           <div key={k} className="flex items-baseline gap-2 text-xs">
-            <span className="text-slate-500 font-mono shrink-0">{k}</span>
-            <span className="text-slate-300">→</span>
-            <span className={cn(
-              'font-medium',
-              k === 'status' && currentStatus === 'AUTHENTICATED' && 'text-emerald-400',
-              k === 'status' && (currentStatus === 'FAILED' || currentStatus === 'LOCKED') && 'text-red-400',
-              k === 'status' && currentStatus === 'COLLECTING' && 'text-amber-400',
-              k === 'nextRequiredToken' && 'text-indigo-400 font-bold',
-              k === 'prompt' && 'italic text-slate-400',
-              k === 'matchedPartyId' && v && 'text-emerald-400',
-              k !== 'status' && k !== 'nextRequiredToken' && k !== 'matchedPartyId' && k !== 'prompt' && 'text-slate-300',
-            )}>
-              {String(v)}
-            </span>
+            <span className="text-slate-400 font-mono shrink-0 w-36">{k}</span>
+            <span className="text-slate-300 shrink-0">→</span>
+            {Array.isArray(v) ? (
+              <div className="flex flex-wrap gap-1">
+                {(v as string[]).map(t => (
+                  <span key={t} className="bg-slate-200 text-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono">{t}</span>
+                ))}
+              </div>
+            ) : (
+              <span className="text-slate-800 font-mono">{String(v)}</span>
+            )}
           </div>
         )
       })}
-      {(response.acceptedTokens as unknown[])?.length > 0 && (
-        <div className="flex items-baseline gap-2 text-xs">
-          <span className="text-slate-500 font-mono shrink-0">acceptedTokens</span>
-          <span className="text-slate-300">→</span>
-          <div className="flex flex-wrap gap-1">
-            {(response.acceptedTokens as string[]).map(t => (
-              <span key={t} className="bg-indigo-900/50 text-indigo-300 rounded-md px-1.5 py-0.5 text-[10px] font-bold">{t}</span>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   ) : null
 
@@ -697,11 +683,11 @@ export default function Dashboard() {
                     </div>
                   </div>
                   {showRaw ? (
-                    <pre className="bg-slate-900 text-slate-200 rounded-lg p-4 text-xs font-mono overflow-auto max-h-72 leading-relaxed">
+                    <pre className="bg-slate-50 text-slate-700 border border-slate-100 rounded-lg p-4 text-xs font-mono overflow-auto max-h-72 leading-relaxed">
                       {JSON.stringify(response, null, 2)}
                     </pre>
                   ) : (
-                    <div className="bg-slate-900 rounded-lg p-4 overflow-auto max-h-72">
+                    <div className="bg-slate-50 border border-slate-100 rounded-lg p-4 overflow-auto max-h-72">
                       {responseSummary}
                     </div>
                   )}

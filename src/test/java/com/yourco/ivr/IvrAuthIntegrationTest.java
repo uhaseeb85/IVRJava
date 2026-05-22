@@ -243,10 +243,8 @@ class IvrAuthIntegrationTest {
     }
 
     /**
-     * Verifies that submitting a completely wrong token type (not in acceptedTokens for
-     * the current step) counts as a failed attempt against the required slot so the
-     * retry counter decrements normally. Without this guard, off-path submissions bypass
-     * the validator and leave the retry count unchanged.
+     * Verifies that submitting a wrong token type counts as a failed attempt:
+     * scenario A — a later-path token (OTP) submitted when PIN is expected (mid-path).
      */
     @Test
     void testWrongTokenTypeDecrementsRetryCount() {
@@ -274,6 +272,58 @@ class IvrAuthIntegrationTest {
         assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
         assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
         assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+    }
+
+    /**
+     * Verifies that submitting a wrong token type counts as a failed attempt:
+     * scenario B — a same-path token (PIN) submitted when ACCOUNT_NUMBER is expected
+     * (first step, no prior tokens validated). Without the wrong-type guard, PIN would
+     * pass the PinValidator and silently get added to validatedTokens, causing the system
+     * to keep asking for ACCOUNT_NUMBER with remainingAttempts always at 3.
+     */
+    @Test
+    void testWrongTokenTypeFirstStepDecrementsRetryCount() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5551230002");
+        start.setTargetLevel(AuthLevel.STANDARD);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        // First step expects ACCOUNT_NUMBER — submit PIN instead
+        AuthenticateRequest token = req();
+        token.setSessionId(sessionId);
+        token.setTokenType(TokenType.PIN);
+        token.setTokenValue("1234");  // valid PIN value — would pass the validator if not caught
+        ResponseEntity<AuthenticateResponse> resp = post(token);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        // Must still ask for ACCOUNT_NUMBER, not PIN
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        // Must decrement: 3 - 1 = 2 remaining
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        // Must not have added PIN to validatedTokens (verify by checking accepted list)
+        assertThat(resp.getBody().getAcceptedTokens()).containsExactly(TokenType.ACCOUNT_NUMBER);
+
+        // Second wrong-type submission: count must continue decrementing
+        resp = post(token);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(1);
+
+        // Third: exhausts retries for ACCOUNT_NUMBER slot on path0 → switches to path1.
+        // path1 = [ACCOUNT_NUMBER, OTP], and ACCOUNT_NUMBER was never validated, so the
+        // system correctly asks for ACCOUNT_NUMBER again — but now on the new path with a
+        // fresh attempt count.
+        resp = post(token);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(3);
+
+        // Confirm we're on path1: submit valid ACCOUNT_NUMBER → next should be OTP, not PIN
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        resp = post(token);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
     }
 
     /**
