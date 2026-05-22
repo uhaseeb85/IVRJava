@@ -3,7 +3,10 @@
     "allow": [
       "Bash(npm run *)",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\uhase\\\\IVRJava\\\\src\\\\main\\\\java\" -Recurse -Include \"*.java\")",
-      "Bash(Select-Object FullName)"
+      "Bash(Select-Object FullName)",
+      "Bash(cd /mnt/c/Users/uhase/IVRJava/src/main/ui && npm run build 2>&1)",
+      "Bash(mvn clean *)",
+      "Bash(mvn test *)"
     ]
   }
 }

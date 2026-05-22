@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { cn } from '../lib/utils'
 import {
   Play, Send, ArrowUpRight, Loader2, XCircle, Copy, Check, RotateCcw,
-  ChevronDown, ChevronUp, Clock, Eye, EyeOff, Layers
+  ChevronDown, ChevronUp, Clock, Eye, EyeOff, Layers, Activity
 } from 'lucide-react'
 import { type SessionRecord, type SessionStep, upsertSession, loadSessions } from '../lib/sessions'
 
@@ -81,13 +81,16 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
   const [copiedId, setCopiedId] = useState(false)
-  const [showRaw, setShowRaw] = useState(true)
+  const [showRaw, setShowRaw] = useState(false)
   const [showRequest, setShowRequest] = useState(false)
   const [lastRequest, setLastRequest] = useState<Record<string, unknown> | null>(null)
   const [lastTiming, setLastTiming] = useState<number | null>(null)
+  // Ref so steps always capture their own timing (useState update is async/stale in closures)
+  const timingRef = useRef<number>(0)
   const [stats, setStats] = useState({ today: 0, total: 0, brands: [] as { brandId: string }[] })
   const [recentSessions, setRecentSessions] = useState<SessionRecord[]>([])
   const [showRecent, setShowRecent] = useState(false)
+  const [showProcLog, setShowProcLog] = useState(true)
 
   useEffect(() => {
     const all = loadSessions()
@@ -115,6 +118,7 @@ export default function Dashboard() {
       })
       const elapsed = performance.now() - start
       setLastTiming(elapsed)
+      timingRef.current = elapsed   // synchronous — available immediately after await post()
       const data = await res.json()
       if (!res.ok) {
         setError(data.message || res.statusText)
@@ -160,7 +164,7 @@ export default function Dashboard() {
       label: `Session started → ${payload.targetLevel}${override?.isTransfer ? ' (transfer)' : ''}`,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
-      timing: lastTiming ?? undefined,
+      timing: timingRef.current || undefined,
     }
     const rec: SessionRecord = {
       id: String(data.sessionId ?? `local-${Date.now()}`),
@@ -196,16 +200,40 @@ export default function Dashboard() {
       tokenType: form.tokenType || 'PIN',
       tokenValue: form.tokenValue || '',
     }
+
+    // Snapshot the current nextRequiredToken *before* the request so we can tell
+    // whether the server kept asking for the same token (= rejection) or advanced.
+    const prevStep = session.steps[session.steps.length - 1]
+    const prevRequired = prevStep?.response?.nextRequiredToken as string | undefined
+
     const data = await post(payload)
     if (!data) return
     setResponse(data)
+    if (data.processingLog) setShowProcLog(true)   // auto-expand log for every token response
+
+    const currRequired = data.nextRequiredToken as string | undefined
+    const remaining = data.remainingAttempts as number | undefined
+
+    // Rejection: the server is still asking for the same required token
+    const wasFailure = data.status === 'COLLECTING'
+      && currRequired != null
+      && currRequired === prevRequired
+
+    const label = wasFailure
+      ? `${payload.tokenType} rejected${remaining != null
+          ? ` — ${remaining} attempt${remaining === 1 ? '' : 's'} left`
+          : ''}`
+      : `Submitted ${payload.tokenType}`
+
     appendStep({
       at: new Date().toISOString(),
       type: 'token',
-      label: `Submitted ${payload.tokenType}`,
+      label,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
-      timing: lastTiming ?? undefined,
+      timing: timingRef.current || undefined,
+      failed: wasFailure || undefined,
+      remainingAttempts: wasFailure ? remaining : undefined,
     }, data)
   }
 
@@ -221,7 +249,7 @@ export default function Dashboard() {
       label: `Escalated → ${level}`,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
-      timing: lastTiming ?? undefined,
+      timing: timingRef.current || undefined,
     }, data)
   }
 
@@ -504,6 +532,33 @@ export default function Dashboard() {
                   </button>
                 </div>
               </div>
+
+              {/* Remaining Attempts counter — visible whenever the session is collecting retries */}
+              {sessionActive && response?.remainingAttempts != null && (
+                <div className={cn(
+                  'rounded-xl border p-4 flex items-center justify-between transition-colors',
+                  (response.remainingAttempts as number) <= 1
+                    ? 'bg-red-50 border-red-200'
+                    : 'bg-amber-50 border-amber-200'
+                )}>
+                  <div>
+                    <p className={cn(
+                      'text-[10px] font-bold uppercase tracking-widest',
+                      (response.remainingAttempts as number) <= 1 ? 'text-red-500' : 'text-amber-600'
+                    )}>Remaining Attempts</p>
+                    <p className={cn(
+                      'text-xs mt-0.5',
+                      (response.remainingAttempts as number) <= 1 ? 'text-red-400' : 'text-amber-500'
+                    )}>for {String(response.nextRequiredToken ?? 'current token')}</p>
+                  </div>
+                  <span className={cn(
+                    'text-4xl font-black tabular-nums leading-none',
+                    (response.remainingAttempts as number) <= 1 ? 'text-red-600' : 'text-amber-600'
+                  )}>
+                    {response.remainingAttempts as number}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* ── Right: Flow + Response (3 of 5) ── */}
@@ -521,19 +576,35 @@ export default function Dashboard() {
                       return (
                         <div key={i} className={cn(
                           'flex items-center gap-3 rounded-lg px-3 py-2.5 border',
-                          isAuth ? 'bg-emerald-50 border-emerald-100' :
-                          isBad  ? 'bg-red-50 border-red-100' :
-                                   'bg-slate-50 border-slate-100'
+                          isAuth      ? 'bg-emerald-50 border-emerald-100' :
+                          isBad       ? 'bg-red-50 border-red-100' :
+                          step.failed ? 'bg-amber-50 border-amber-100' :
+                                        'bg-slate-50 border-slate-100'
                         )}>
                           <div className={cn(
                             'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0',
-                            isAuth ? 'bg-emerald-200 text-emerald-800' :
-                            isBad  ? 'bg-red-200 text-red-700' :
-                                     'bg-slate-200 text-slate-600'
+                            isAuth      ? 'bg-emerald-200 text-emerald-800' :
+                            isBad       ? 'bg-red-200 text-red-700' :
+                            step.failed ? 'bg-amber-200 text-amber-800' :
+                                          'bg-slate-200 text-slate-600'
                           )}>
-                            {isAuth ? '✓' : isBad ? '✗' : i + 1}
+                            {isAuth ? '✓' : isBad ? '✗' : step.failed ? '✗' : i + 1}
                           </div>
-                          <span className="flex-1 text-sm text-slate-700 font-semibold">{step.label}</span>
+                          <span className={cn(
+                            'flex-1 text-sm font-semibold',
+                            step.failed ? 'text-amber-800' : 'text-slate-700'
+                          )}>{step.label}</span>
+                          {/* "N left" pill — shown for rejected token steps */}
+                          {step.failed && step.remainingAttempts != null && (
+                            <span className={cn(
+                              'shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-black tabular-nums',
+                              step.remainingAttempts <= 1
+                                ? 'bg-red-100 border-red-200 text-red-700'
+                                : 'bg-amber-100 border-amber-200 text-amber-700'
+                            )}>
+                              {step.remainingAttempts} left
+                            </span>
+                          )}
                           <StatusBadge status={s} />
                           {step.timing != null && (
                             <span className="flex items-center gap-1 text-[10px] text-slate-400 font-mono">
@@ -636,6 +707,58 @@ export default function Dashboard() {
                   )}
                 </div>
               )}
+
+              {/* ── Processing Log ── */}
+              {(() => {
+                const procLog = response?.processingLog as Array<{ level: string; message: string }> | undefined
+                if (!procLog || procLog.length === 0) return null
+                const levelStyle = (level: string) => {
+                  const l = level.toUpperCase()
+                  if (l === 'PASS') return { badge: 'bg-emerald-100 text-emerald-700', text: 'text-emerald-800' }
+                  if (l === 'FAIL') return { badge: 'bg-red-100 text-red-600',     text: 'text-red-700' }
+                  if (l === 'WARN') return { badge: 'bg-amber-100 text-amber-700', text: 'text-amber-800' }
+                  return              { badge: 'bg-slate-100 text-slate-500',  text: 'text-slate-600' }
+                }
+                return (
+                  <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                    <button
+                      onClick={() => setShowProcLog(v => !v)}
+                      className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors"
+                    >
+                      <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
+                        <Activity size={13} className="text-indigo-500" />
+                        Processing Log
+                        <span className="text-[10px] font-normal text-slate-400 ml-1">
+                          ({procLog.length} event{procLog.length !== 1 ? 's' : ''})
+                        </span>
+                      </div>
+                      {showProcLog
+                        ? <ChevronUp size={14} className="text-slate-400" />
+                        : <ChevronDown size={14} className="text-slate-400" />}
+                    </button>
+                    {showProcLog && (
+                      <div className="border-t border-slate-100 divide-y divide-slate-50">
+                        {procLog.map((entry, i) => {
+                          const st = levelStyle(entry.level)
+                          return (
+                            <div key={i} className="flex items-start gap-3 px-4 py-2.5">
+                              <span className={cn(
+                                'shrink-0 rounded px-1.5 py-0.5 text-[10px] font-black w-9 text-center mt-0.5',
+                                st.badge
+                              )}>
+                                {entry.level.toUpperCase()}
+                              </span>
+                              <span className={cn('text-xs leading-relaxed font-mono', st.text)}>
+                                {entry.message}
+                              </span>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )
+              })()}
             </div>
           </div>
 

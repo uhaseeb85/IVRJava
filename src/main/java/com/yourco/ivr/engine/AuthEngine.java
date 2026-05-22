@@ -1,6 +1,7 @@
 package com.yourco.ivr.engine;
 
 import com.yourco.ivr.api.dto.AuthenticateResponse;
+import com.yourco.ivr.api.dto.ProcessingEvent;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.SessionPhase;
@@ -111,22 +112,73 @@ public class AuthEngine {
             return disResp;
         }
 
-        // Store the collected token value
+        // ── Build per-request processing log ────────────────────────────────
+        List<ProcessingEvent> procLog = new ArrayList<>();
+
+        LevelRule ruleCtx = config.getLevelRules().get(session.getTargetLevel());
+        int pathIdxCtx = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
+        TokenPath activePathCtx = (ruleCtx != null && pathIdxCtx < ruleCtx.getPaths().size())
+            ? ruleCtx.getPaths().get(pathIdxCtx) : null;
+
+        addEntry(procLog, "INFO",
+            "Brand: " + session.getBrandId()
+            + " | Target: " + session.getTargetLevel()
+            + " | Phase: AUTHENTICATING");
+
+        if (activePathCtx != null) {
+            addEntry(procLog, "INFO",
+                "Active path: path" + pathIdxCtx + " → " + activePathCtx.getRequiredTokens());
+        }
+
+        Set<TokenType> validatedSoFar = session.getValidatedTokens();
+        addEntry(procLog, "INFO",
+            "Validated tokens: " + (validatedSoFar.isEmpty() ? "[none]" : validatedSoFar));
+
+        // Find the current required slot and its accepted alternatives
+        if (activePathCtx != null) {
+            TokenType currentSlot = null;
+            for (TokenType req : activePathCtx.getRequiredTokens()) {
+                if (!validatedSoFar.contains(req)) {
+                    currentSlot = req;
+                    break;
+                }
+            }
+            if (currentSlot != null) {
+                List<TokenType> acceptedForSlot = buildAcceptedTokens(session, activePathCtx, currentSlot, currentSlot);
+                addEntry(procLog, "INFO",
+                    "Collecting: " + currentSlot + " | Accepted alternatives: " + acceptedForSlot);
+            }
+        }
+
+        // ── Store collected token (value never logged) ──────────────────────
         session.getCollectedTokens().put(tokenType, tokenValue);
 
         // 1. Validate externally
         boolean valid = validateExternally(session, tokenType, tokenValue);
+
+        addEntry(procLog, valid ? "PASS" : "FAIL",
+            "External validation: " + tokenType + " → " + (valid ? "PASS" : "FAIL"));
 
         log.info("AUTH [{}] brand={} caller={} token={} result={}",
             sessionId, session.getBrandId(), session.getCallerId(), tokenType,
             valid ? "PASS" : "FAIL");
 
         if (!valid) {
-            return handleFailure(session, config, tokenType);
+            AuthenticateResponse failResp = handleFailure(session, config, tokenType, procLog);
+            failResp.setProcessingLog(procLog);
+            return failResp;
         }
 
         // 2. Map backup token to the required token if applicable
         TokenType resolvedToken = resolveBackupToken(session, config, tokenType);
+        if (resolvedToken != tokenType) {
+            addEntry(procLog, "INFO",
+                "Backup resolution: " + tokenType + " satisfies required slot " + resolvedToken);
+        } else {
+            addEntry(procLog, "INFO",
+                tokenType + " is a direct required token (no backup mapping)");
+        }
+
         session.getValidatedTokens().add(resolvedToken);
         session.getAttemptCounts().remove(tokenType);
         // Bug 5 fix: also clear the required-slot count so stale failure counts from
@@ -136,8 +188,24 @@ public class AuthEngine {
         }
         crossBrandEvaluator.recordValidated(session, tokenType);
 
+        addEntry(procLog, "INFO",
+            "Validated tokens now: " + session.getValidatedTokens());
+
         // 3. Evaluate progress toward targetLevel
-        return evaluateProgress(session, config);
+        AuthenticateResponse evalResp = evaluateProgress(session, config);
+        if (evalResp.getStatus() == SessionStatus.AUTHENTICATED) {
+            addEntry(procLog, "PASS",
+                "Path complete → " + session.getTargetLevel() + " achieved");
+        } else if (evalResp.getNextRequiredToken() != null) {
+            addEntry(procLog, "INFO",
+                "Next required: " + evalResp.getNextRequiredToken());
+            if (evalResp.getAcceptedTokens() != null && !evalResp.getAcceptedTokens().isEmpty()) {
+                addEntry(procLog, "INFO",
+                    "Accepted for next slot: " + evalResp.getAcceptedTokens());
+            }
+        }
+        evalResp.setProcessingLog(procLog);
+        return evalResp;
     }
 
     /**
@@ -344,7 +412,8 @@ public class AuthEngine {
 
     private AuthenticateResponse handleFailure(IvrSession session,
                                            BrandAuthConfig config,
-                                           TokenType tokenType) {
+                                           TokenType tokenType,
+                                           List<ProcessingEvent> procLog) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
         Map<TokenType, Integer> counts = session.getAttemptCounts();
 
@@ -359,7 +428,15 @@ public class AuthEngine {
         counts.put(requiredToken, attempts);
         int remaining = rule.getMaxRetriesPerToken() - attempts;
 
+        addEntry(procLog, "WARN",
+            "Attempt " + attempts + " of " + rule.getMaxRetriesPerToken()
+            + " for " + requiredToken + " slot");
+
         if (remaining > 0) {
+            addEntry(procLog, "WARN",
+                remaining + " attempt" + (remaining == 1 ? "" : "s")
+                + " remaining — still collecting " + requiredToken);
+
             int activePathIdx = session.getActivePathIndexByLevel()
                 .getOrDefault(session.getTargetLevel(), 0);
             TokenPath activePath = rule.getPaths().get(activePathIdx);
@@ -380,21 +457,51 @@ public class AuthEngine {
         }
 
         // Retry limit exhausted — try advancing to the next fallback path
+        addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
+
         Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
         int currentPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
         int nextPathIdx = currentPathIdx + 1;
 
         if (nextPathIdx < rule.getPaths().size()) {
+            TokenPath newPath = rule.getPaths().get(nextPathIdx);
+
+            // List tokens in the new path already validated so the log shows what carries over
+            List<TokenType> alreadyValid = new ArrayList<>();
+            for (TokenType t : newPath.getRequiredTokens()) {
+                if (session.getValidatedTokens().contains(t)) {
+                    alreadyValid.add(t);
+                }
+            }
+            addEntry(procLog, "WARN",
+                "Switching to fallback: path" + nextPathIdx + " → " + newPath.getRequiredTokens());
+            if (!alreadyValid.isEmpty()) {
+                addEntry(procLog, "INFO",
+                    "Pre-validated tokens retained in new path: " + alreadyValid);
+            }
+
             pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
             session.getAttemptCounts().clear();
             sessionRepo.save(session);
             // Bug 4 fix: delegate to evaluateProgress() so the isBlocked /
             // findAlternativeToken checks are applied correctly on the new path,
             // instead of duplicating that logic here without the blocked-token guard.
-            return evaluateProgress(session, config);
+            AuthenticateResponse switchResp = evaluateProgress(session, config);
+            if (switchResp.getNextRequiredToken() != null) {
+                addEntry(procLog, "INFO",
+                    "Next required: " + switchResp.getNextRequiredToken());
+                if (switchResp.getAcceptedTokens() != null && !switchResp.getAcceptedTokens().isEmpty()) {
+                    addEntry(procLog, "INFO",
+                        "Accepted for next slot: " + switchResp.getAcceptedTokens());
+                }
+            }
+            return switchResp;
         }
 
         // All paths exhausted — lock the session
+        addEntry(procLog, "FAIL", "All authentication paths exhausted");
+        addEntry(procLog, "FAIL", "Session LOCKED for " + rule.getLockoutSeconds() + " seconds");
+
         session.setStatus(SessionStatus.LOCKED);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
@@ -406,6 +513,11 @@ public class AuthEngine {
             .lockedUntil(session.getLockedUntil())
             .prompt("Authentication failed. All retry attempts exhausted.")
             .build();
+    }
+
+    /** Appends a structured entry to the per-request processing log. */
+    private static void addEntry(List<ProcessingEvent> procLog, String level, String message) {
+        procLog.add(ProcessingEvent.builder().level(level).message(message).build());
     }
 
     private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {

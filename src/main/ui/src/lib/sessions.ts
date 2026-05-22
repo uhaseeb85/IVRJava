@@ -5,6 +5,10 @@ export interface SessionStep {
   response: Record<string, unknown>
   status: string
   timing?: number
+  /** true when the submitted token was rejected and the session stayed on the same required token */
+  failed?: boolean
+  /** remaining attempts as of this step (only set when failed=true) */
+  remainingAttempts?: number
 }
 
 export interface SessionRecord {

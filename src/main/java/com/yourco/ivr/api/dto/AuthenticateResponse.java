@@ -53,6 +53,11 @@ public class AuthenticateResponse {
     @Schema(description = "ID of the matched party once disambiguation resolves (null otherwise)")
     private String matchedPartyId;
 
+    @Schema(description = "Step-by-step processing log (only present on token-submission requests). "
+        + "Shows validation outcome, backup resolution, attempt counts, and path transitions. "
+        + "Token values are never included.")
+    private List<ProcessingEvent> processingLog;
+
     public static AuthenticateResponse fromSession(IvrSession session) {
         return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
