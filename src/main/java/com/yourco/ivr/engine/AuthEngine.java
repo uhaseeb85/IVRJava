@@ -245,6 +245,11 @@ public class AuthEngine {
                 .build();
         }
 
+        // Remember the original required token before preference filtering replaces it.
+        // buildAcceptedTokens uses this to show ALL unblocked alternatives of the
+        // original, not just the replacement's own (non-existent) backups.
+        TokenType originalRequired = nextToken;
+
         // Apply customer preference filtering: if nextToken is blocked, try backups
         if (isBlocked(session, nextToken)) {
             nextToken = findAlternativeToken(session, activePath, nextToken);
@@ -257,7 +262,7 @@ public class AuthEngine {
         sessionRepo.save(session);
 
         // Determine accepted tokens for this step (required token + any backups)
-        List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, nextToken);
+        List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, nextToken, originalRequired);
 
         String prompt = promptResolver.resolvePrompt(nextToken, activePath, rule.getMaxRetriesPerToken());
         return baseResponse(session)
@@ -362,7 +367,7 @@ public class AuthEngine {
             // Bug 2 fix: return the required-token slot (PIN) as nextRequiredToken,
             //   not the submitted backup type (SSN_LAST4).
             // Bug 3 fix: include acceptedTokens so the caller knows all valid alternatives.
-            List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, requiredToken);
+            List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, requiredToken, requiredToken);
             String prompt = promptResolver.resolvePrompt(requiredToken, activePath, remaining);
             sessionRepo.save(session);
             return baseResponse(session)
@@ -417,15 +422,19 @@ public class AuthEngine {
     /**
      * Build the list of accepted token types for the next step.
      * Includes the required token plus any unblocked backup alternatives.
+     *
+     * @param originalRequiredToken the original required-token slot (used to look up
+     *        backup alternatives even when nextToken was replaced by a preference-filtered alternative)
      */
-    private List<TokenType> buildAcceptedTokens(IvrSession session, TokenPath activePath, TokenType nextToken) {
+    private List<TokenType> buildAcceptedTokens(IvrSession session, TokenPath activePath,
+                                                 TokenType nextToken, TokenType originalRequiredToken) {
         List<TokenType> accepted = new ArrayList<>();
         accepted.add(nextToken);
         if (activePath.getBackupTokens() != null) {
-            List<TokenType> backups = activePath.getBackupTokens().get(nextToken);
+            List<TokenType> backups = activePath.getBackupTokens().get(originalRequiredToken);
             if (backups != null) {
                 for (TokenType backup : backups) {
-                    if (!isBlocked(session, backup)) {
+                    if (!accepted.contains(backup) && !isBlocked(session, backup)) {
                         accepted.add(backup);
                     }
                 }
