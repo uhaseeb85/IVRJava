@@ -4,6 +4,7 @@ export interface SessionStep {
   label: string
   response: Record<string, unknown>
   status: string
+  timing?: number
 }
 
 export interface SessionRecord {

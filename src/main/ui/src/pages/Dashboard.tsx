@@ -1,12 +1,40 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { cn } from '../lib/utils'
 import {
-  Play, Send, ArrowUpRight, Loader2, XCircle, Copy, Check, RotateCcw
+  Play, Send, ArrowUpRight, Loader2, XCircle, Copy, Check, RotateCcw,
+  ChevronDown, ChevronUp, Clock, Eye, EyeOff, Layers
 } from 'lucide-react'
 import { type SessionRecord, type SessionStep, upsertSession, loadSessions } from '../lib/sessions'
 
 const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
 const TOKENS = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
+
+const TOKEN_DEFAULTS: Record<string, string> = {
+  ACCOUNT_NUMBER: '123456789',
+  PIN: '1234',
+  OTP: '123456',
+  SSN_LAST4: '1234',
+  DATE_OF_BIRTH: '1985-03-15',
+  CARD_LAST4: '4242',
+  VOICE_PRINT: '',
+}
+
+interface Scenario {
+  id: string
+  label: string
+  brandId: string
+  callerId: string
+  targetLevel: string
+  isTransfer?: boolean
+}
+
+const SCENARIOS: Scenario[] = [
+  { id: 'basic', label: 'Basic Auth', brandId: 'BRAND_A', callerId: '5551112222', targetLevel: 'BASIC' },
+  { id: 'standard', label: 'Standard Auth', brandId: 'BRAND_A', callerId: '5551234567', targetLevel: 'STANDARD' },
+  { id: 'backup', label: 'Backup Token', brandId: 'BRAND_A', callerId: '5557654321', targetLevel: 'STANDARD' },
+  { id: 'fallback', label: 'Fallback Test', brandId: 'BRAND_A', callerId: '5551112222', targetLevel: 'STANDARD' },
+  { id: 'transfer', label: 'Transfer', brandId: 'BRAND_A', callerId: '5551234567', targetLevel: 'STANDARD', isTransfer: true },
+]
 
 function statusStyle(status: string) {
   const s = status.toUpperCase()
@@ -39,37 +67,60 @@ function StepIndicator({ n, done, bad, active }: { n: number; done: boolean; bad
   )
 }
 
+function msToText(ms: number) {
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionRecord | null>(null)
   const [response, setResponse] = useState<Record<string, unknown> | null>(null)
   const [error, setError] = useState('')
+  const [errorBody, setErrorBody] = useState('')
   const [form, setForm] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
   const [copiedId, setCopiedId] = useState(false)
-  const [stats, setStats] = useState({ today: 0, total: 0, brands: null as number | null })
+  const [showRaw, setShowRaw] = useState(true)
+  const [showRequest, setShowRequest] = useState(false)
+  const [lastRequest, setLastRequest] = useState<Record<string, unknown> | null>(null)
+  const [lastTiming, setLastTiming] = useState<number | null>(null)
+  const [stats, setStats] = useState({ today: 0, total: 0, brands: [] as { brandId: string }[] })
+  const [recentSessions, setRecentSessions] = useState<SessionRecord[]>([])
+  const [showRecent, setShowRecent] = useState(false)
 
   useEffect(() => {
     const all = loadSessions()
     const today = all.filter(s => new Date(s.startedAt).toDateString() === new Date().toDateString()).length
+    setRecentSessions(all.slice(0, 5))
     setStats(s => ({ ...s, today, total: all.length }))
     fetch('/api/brands')
       .then(r => r.json())
-      .then(d => setStats(s => ({ ...s, brands: Array.isArray(d) ? d.length : null })))
+      .then(d => setStats(s => ({ ...s, brands: Array.isArray(d) ? d : [] })))
       .catch(() => {})
   }, [])
 
-  const post = async (body: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
+  const post = useCallback(async (body: Record<string, unknown>): Promise<Record<string, unknown> | null> => {
     setError('')
+    setErrorBody('')
     setLoading(true)
+    setLastRequest(body)
+    setShowRequest(false)
+    const start = performance.now()
     try {
       const res = await fetch('/ivr/authenticate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      const elapsed = performance.now() - start
+      setLastTiming(elapsed)
       const data = await res.json()
-      if (!res.ok) { setError(data.message || res.statusText); return null }
+      if (!res.ok) {
+        setError(data.message || res.statusText)
+        setErrorBody(JSON.stringify(data, null, 2))
+        return null
+      }
       return data as Record<string, unknown>
     } catch {
       setError('Network error — is the backend running?')
@@ -77,14 +128,28 @@ export default function Dashboard() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [])
 
-  const startSession = async () => {
-    if (session) return
-    const payload = {
-      brandId: form.brandId || 'BRAND_A',
-      callerId: form.callerId || '5551234567',
-      targetLevel: form.targetLevel || 'STANDARD',
+  const startSession = async (override?: Partial<{ brandId: string; callerId: string; targetLevel: string; isTransfer: boolean }>) => {
+    if (session && !override) return
+    const payload: Record<string, unknown> = {
+      brandId: override?.brandId || form.brandId || 'BRAND_A',
+      callerId: override?.callerId || form.callerId || '5551234567',
+      targetLevel: override?.targetLevel || form.targetLevel || 'STANDARD',
+    }
+    if (override?.isTransfer) {
+      payload.sourceSystemId = 'LEGACY_IVR'
+      payload.currentLevel = 'NONE'
+      payload.validatedTokens = ['ACCOUNT_NUMBER']
+    }
+    // Pre-populate form fields if set from scenario
+    if (override) {
+      setForm(f => ({
+        ...f,
+        brandId: override.brandId ?? f.brandId,
+        callerId: override.callerId ?? f.callerId,
+        targetLevel: override.targetLevel ?? f.targetLevel,
+      }))
     }
     const data = await post(payload)
     if (!data) return
@@ -92,21 +157,23 @@ export default function Dashboard() {
     const step: SessionStep = {
       at: new Date().toISOString(),
       type: 'start',
-      label: `Session started → ${payload.targetLevel}`,
+      label: `Session started → ${payload.targetLevel}${override?.isTransfer ? ' (transfer)' : ''}`,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
+      timing: lastTiming ?? undefined,
     }
     const rec: SessionRecord = {
       id: String(data.sessionId ?? `local-${Date.now()}`),
-      brandId: payload.brandId,
-      callerId: payload.callerId,
-      targetLevel: payload.targetLevel,
+      brandId: String(payload.brandId),
+      callerId: String(payload.callerId),
+      targetLevel: String(payload.targetLevel),
       startedAt: new Date().toISOString(),
       finalStatus: String(data.status ?? 'COLLECTING'),
       steps: [step],
     }
     setSession(rec)
     upsertSession(rec)
+    setRecentSessions(loadSessions().slice(0, 5))
     setStats(s => ({ ...s, today: s.today + 1, total: s.total + 1 }))
   }
 
@@ -119,6 +186,7 @@ export default function Dashboard() {
     }
     setSession(updated)
     upsertSession(updated)
+    setRecentSessions(loadSessions().slice(0, 5))
   }
 
   const submitToken = async () => {
@@ -137,6 +205,7 @@ export default function Dashboard() {
       label: `Submitted ${payload.tokenType}`,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
+      timing: lastTiming ?? undefined,
     }, data)
   }
 
@@ -152,10 +221,19 @@ export default function Dashboard() {
       label: `Escalated → ${level}`,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
+      timing: lastTiming ?? undefined,
     }, data)
   }
 
-  const reset = () => { setSession(null); setResponse(null); setError('') }
+  const reset = () => { setSession(null); setResponse(null); setError(''); setErrorBody(''); setLastRequest(null); setLastTiming(null) }
+
+  const restoreSession = (rec: SessionRecord) => {
+    reset()
+    setSession(rec)
+    if (rec.steps.length > 0) {
+      setResponse(rec.steps[rec.steps.length - 1].response)
+    }
+  }
 
   const copyJSON = () => {
     navigator.clipboard.writeText(JSON.stringify(response, null, 2))
@@ -170,6 +248,18 @@ export default function Dashboard() {
     setTimeout(() => setCopiedId(false), 2000)
   }
 
+  // Ctrl+Enter shortcut
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && sessionActive) {
+        e.preventDefault()
+        submitToken()
+      }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  })
+
   const currentStatus = session?.finalStatus?.toUpperCase() ?? 'IDLE'
   const isDone = ['AUTHENTICATED', 'FAILED', 'LOCKED'].includes(currentStatus)
   const sessionActive = !!session && !isDone
@@ -179,6 +269,44 @@ export default function Dashboard() {
   const step2Bad = isDone && currentStatus !== 'AUTHENTICATED'
 
   const inputCls = 'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition disabled:opacity-50 disabled:cursor-not-allowed'
+
+  const responseSummary = response ? (
+    <div className="space-y-2">
+      {['status', 'currentLevel', 'targetLevel', 'nextRequiredToken', 'prompt', 'phase', 'matchedPartyId', 'remainingAttempts'].map(k => {
+        const v = response[k]
+        if (v == null || v === '') return null
+        return (
+          <div key={k} className="flex items-baseline gap-2 text-xs">
+            <span className="text-slate-500 font-mono shrink-0">{k}</span>
+            <span className="text-slate-300">→</span>
+            <span className={cn(
+              'font-medium',
+              k === 'status' && currentStatus === 'AUTHENTICATED' && 'text-emerald-400',
+              k === 'status' && (currentStatus === 'FAILED' || currentStatus === 'LOCKED') && 'text-red-400',
+              k === 'status' && currentStatus === 'COLLECTING' && 'text-amber-400',
+              k === 'nextRequiredToken' && 'text-indigo-400 font-bold',
+              k === 'prompt' && 'italic text-slate-400',
+              k === 'matchedPartyId' && v && 'text-emerald-400',
+              k !== 'status' && k !== 'nextRequiredToken' && k !== 'matchedPartyId' && k !== 'prompt' && 'text-slate-300',
+            )}>
+              {String(v)}
+            </span>
+          </div>
+        )
+      })}
+      {(response.acceptedTokens as unknown[])?.length > 0 && (
+        <div className="flex items-baseline gap-2 text-xs">
+          <span className="text-slate-500 font-mono shrink-0">acceptedTokens</span>
+          <span className="text-slate-300">→</span>
+          <div className="flex flex-wrap gap-1">
+            {(response.acceptedTokens as string[]).map(t => (
+              <span key={t} className="bg-indigo-900/50 text-indigo-300 rounded-md px-1.5 py-0.5 text-[10px] font-bold">{t}</span>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null
 
   return (
     <div className="flex flex-col min-h-full">
@@ -191,11 +319,9 @@ export default function Dashboard() {
 
         {/* Stats chips */}
         <div className="hidden md:flex items-center gap-2">
-          {stats.brands !== null && (
-            <span className="bg-slate-100 text-slate-600 rounded-full px-2.5 py-1 text-xs font-semibold">
-              {stats.brands} brand{stats.brands !== 1 ? 's' : ''}
-            </span>
-          )}
+          <span className="bg-slate-100 text-slate-600 rounded-full px-2.5 py-1 text-xs font-semibold">
+            {stats.brands.length} brand{stats.brands.length !== 1 ? 's' : ''}
+          </span>
           <span className="bg-slate-100 text-slate-600 rounded-full px-2.5 py-1 text-xs font-semibold">
             {stats.today} today
           </span>
@@ -225,6 +351,23 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* Scenario pills */}
+      {!session && (
+        <div className="bg-white border-b border-slate-100 px-8 py-3 flex items-center gap-2 overflow-x-auto shrink-0">
+          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mr-1 shrink-0">Scenarios</span>
+          {SCENARIOS.map(s => (
+            <button
+              key={s.id}
+              onClick={() => startSession({ brandId: s.brandId, callerId: s.callerId, targetLevel: s.targetLevel, isTransfer: s.isTransfer })}
+              disabled={loading}
+              className="shrink-0 rounded-full border border-slate-200 bg-white px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700 hover:bg-indigo-50 transition-colors disabled:opacity-50"
+            >
+              {s.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Content */}
       <div className="flex-1 p-8 overflow-auto">
         <div className="max-w-5xl mx-auto">
@@ -244,13 +387,27 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 mb-1">Brand ID</label>
-                  <input
-                    className={inputCls}
-                    placeholder="BRAND_A"
-                    disabled={!!session}
-                    value={form.brandId || ''}
-                    onChange={e => setForm({ ...form, brandId: e.target.value })}
-                  />
+                  {stats.brands.length > 0 ? (
+                    <select
+                      className={inputCls}
+                      disabled={!!session}
+                      value={form.brandId || ''}
+                      onChange={e => setForm({ ...form, brandId: e.target.value })}
+                    >
+                      <option value="">Select brand…</option>
+                      {stats.brands.map(b => (
+                        <option key={b.brandId} value={b.brandId}>{b.brandId}</option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      className={inputCls}
+                      placeholder="BRAND_A"
+                      disabled={!!session}
+                      value={form.brandId || ''}
+                      onChange={e => setForm({ ...form, brandId: e.target.value })}
+                    />
+                  )}
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 mb-1">Caller ID</label>
@@ -275,7 +432,7 @@ export default function Dashboard() {
                   </select>
                 </div>
                 <button
-                  onClick={startSession}
+                  onClick={() => startSession()}
                   disabled={loading || !!session}
                   className="w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 shadow-sm"
                 >
@@ -298,7 +455,10 @@ export default function Dashboard() {
                   <select
                     className={inputCls}
                     value={form.tokenType || ''}
-                    onChange={e => setForm({ ...form, tokenType: e.target.value })}
+                    onChange={e => {
+                      const tt = e.target.value
+                      setForm({ ...form, tokenType: tt, tokenValue: TOKEN_DEFAULTS[tt] ?? '' })
+                    }}
                   >
                     <option value="">Select type…</option>
                     {TOKENS.map(t => <option key={t} value={t}>{t}</option>)}
@@ -308,12 +468,12 @@ export default function Dashboard() {
                   <label className="block text-xs font-semibold text-slate-500 mb-1">Token Value</label>
                   <input
                     className={inputCls}
-                    placeholder="Enter value…"
+                    placeholder={`e.g. ${TOKEN_DEFAULTS[form.tokenType || 'PIN']}`}
                     value={form.tokenValue || ''}
                     onChange={e => setForm({ ...form, tokenValue: e.target.value })}
                     onKeyDown={e => e.key === 'Enter' && submitToken()}
                   />
-                  <p className="text-[10px] text-slate-400 mt-1">Press Enter to submit quickly</p>
+                  <p className="text-[10px] text-slate-400 mt-1">Press Enter · Ctrl+Enter from anywhere</p>
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 mb-1">Escalate To</label>
@@ -375,6 +535,11 @@ export default function Dashboard() {
                           </div>
                           <span className="flex-1 text-sm text-slate-700 font-semibold">{step.label}</span>
                           <StatusBadge status={s} />
+                          {step.timing != null && (
+                            <span className="flex items-center gap-1 text-[10px] text-slate-400 font-mono">
+                              <Clock size={10} />{msToText(step.timing)}
+                            </span>
+                          )}
                           <span className="text-[10px] text-slate-400 font-mono tabular-nums">
                             {new Date(step.at).toLocaleTimeString()}
                           </span>
@@ -389,34 +554,125 @@ export default function Dashboard() {
                     <Play size={18} className="text-slate-400" />
                   </div>
                   <p className="text-sm font-semibold text-slate-500">No active session</p>
-                  <p className="text-xs text-slate-400 mt-1">Start a session on the left to begin testing</p>
+                  <p className="text-xs text-slate-400 mt-1">Start a session or pick a scenario above</p>
                 </div>
               )}
 
-              {/* Latest Response */}
+              {/* Request preview */}
+              {lastRequest && (
+                <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                  <button
+                    onClick={() => setShowRequest(r => !r)}
+                    className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors"
+                  >
+                    <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
+                      <Eye size={13} />
+                      Request sent
+                      {lastTiming != null && (
+                        <span className="text-[10px] font-normal text-slate-400 ml-1">({msToText(lastTiming)})</span>
+                      )}
+                    </div>
+                    {showRequest ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
+                  </button>
+                  {showRequest && (
+                    <pre className="bg-slate-50 border-t border-slate-100 text-slate-700 p-4 text-xs font-mono overflow-auto max-h-44 leading-relaxed">
+                      {JSON.stringify(lastRequest, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
+
+              {/* Error with expander */}
+              {error && (
+                <div className="bg-white rounded-xl border border-red-200 shadow-sm overflow-hidden">
+                  <button
+                    onClick={() => errorBody ? setErrorBody('') : setErrorBody('(no details)')}
+                    className="w-full p-4 flex items-center gap-2 text-sm text-red-600 hover:bg-red-50 transition-colors text-left"
+                  >
+                    <XCircle size={15} className="shrink-0" />
+                    <span className="flex-1 font-medium">{error}</span>
+                    {errorBody && (
+                      errorBody === '(no details)' ? <ChevronUp size={14} /> : <ChevronDown size={14} />
+                    )}
+                  </button>
+                  {errorBody && errorBody !== '(no details)' && (
+                    <pre className="bg-red-50 border-t border-red-100 text-red-800 p-4 text-xs font-mono overflow-auto max-h-44 leading-relaxed">
+                      {errorBody}
+                    </pre>
+                  )}
+                </div>
+              )}
+
+              {/* Response */}
               {response && (
                 <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
                   <div className="flex items-center justify-between mb-3">
-                    <h2 className="text-sm font-bold text-slate-700">Latest Response</h2>
-                    <button
-                      onClick={copyJSON}
-                      className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-900 transition-colors font-semibold"
-                    >
-                      {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
-                      {copied ? 'Copied!' : 'Copy JSON'}
-                    </button>
+                    <h2 className="text-sm font-bold text-slate-700">Response</h2>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setShowRaw(r => !r)}
+                        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-900 transition-colors font-semibold"
+                      >
+                        {showRaw ? <EyeOff size={12} /> : <Layers size={12} />}
+                        {showRaw ? 'Raw JSON' : 'Summary'}
+                      </button>
+                      <button
+                        onClick={copyJSON}
+                        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-900 transition-colors font-semibold"
+                      >
+                        {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
+                        {copied ? 'Copied!' : 'Copy JSON'}
+                      </button>
+                    </div>
                   </div>
-                  <pre className="bg-slate-900 text-slate-200 rounded-lg p-4 text-xs font-mono overflow-auto max-h-72 leading-relaxed">
-                    {JSON.stringify(response, null, 2)}
-                  </pre>
+                  {showRaw ? (
+                    <pre className="bg-slate-900 text-slate-200 rounded-lg p-4 text-xs font-mono overflow-auto max-h-72 leading-relaxed">
+                      {JSON.stringify(response, null, 2)}
+                    </pre>
+                  ) : (
+                    <div className="bg-slate-900 rounded-lg p-4 overflow-auto max-h-72">
+                      {responseSummary}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           </div>
 
-          {error && (
-            <div className="mt-4 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-600 flex items-center gap-2">
-              <XCircle size={15} className="shrink-0" />{error}
+          {/* Inline recent sessions */}
+          {recentSessions.length > 0 && (
+            <div className="mt-6">
+              <button
+                onClick={() => setShowRecent(r => !r)}
+                className="flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-slate-900 transition-colors mb-3"
+              >
+                <Clock size={13} />
+                Recent Sessions ({recentSessions.length})
+                {showRecent ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+              {showRecent && (
+                <div className="space-y-2">
+                  {recentSessions.map(rec => (
+                    <div
+                      key={rec.id}
+                      onClick={() => restoreSession(rec)}
+                      className="bg-white rounded-lg border border-slate-200 px-4 py-3 flex items-center gap-4 cursor-pointer hover:border-indigo-200 hover:bg-indigo-50/30 transition-colors"
+                    >
+                      <div className="flex-1 min-w-0 flex items-center gap-3">
+                        <span className="text-sm font-bold text-slate-900 shrink-0">{rec.brandId}</span>
+                        <span className="text-slate-300">›</span>
+                        <span className="text-sm text-slate-500 font-medium">{rec.targetLevel}</span>
+                        <StatusBadge status={rec.finalStatus} />
+                      </div>
+                      <div className="text-xs text-slate-400 flex items-center gap-2">
+                        <span>{rec.steps.length} step{rec.steps.length !== 1 ? 's' : ''}</span>
+                        <span>·</span>
+                        <span>{new Date(rec.startedAt).toLocaleTimeString()}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

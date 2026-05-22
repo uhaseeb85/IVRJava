@@ -242,6 +242,92 @@ class IvrAuthIntegrationTest {
         assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
     }
 
+    /**
+     * Verifies that retry limits are tracked against the required-token slot, not the
+     * individual submitted backup type. Failing PIN once, SSN_LAST4 once (a backup for
+     * PIN), and DATE_OF_BIRTH once (another backup for PIN) should exhaust the 3-attempt
+     * limit and trigger a path switch to the OTP path — even though no single token type
+     * was failed 3 times individually.
+     */
+    @Test
+    void testRetryLimitCountsAcrossBackupTokens() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5559991111");
+        start.setTargetLevel(AuthLevel.STANDARD);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        AuthenticateRequest token = req();
+        token.setSessionId(sessionId);
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        post(token); // valid — advances past ACCOUNT_NUMBER
+
+        // Failure 1: PIN "12" is too short (fails PinValidator) → 1 failure on PIN slot
+        token.setTokenType(TokenType.PIN);
+        token.setTokenValue("12");
+        ResponseEntity<AuthenticateResponse> resp = post(token);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+
+        // Failure 2: SSN_LAST4 "12" is too short (fails SsnLast4Validator)
+        // → 2 failures on PIN slot (SSN_LAST4 is a backup for PIN)
+        token.setTokenType(TokenType.SSN_LAST4);
+        token.setTokenValue("12");
+        resp = post(token);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(1);
+
+        // Failure 3: DATE_OF_BIRTH "bad-date" fails format validation
+        // → 3 failures on PIN slot (DATE_OF_BIRTH is also a backup for PIN)
+        // → retry limit exhausted → path switch to path1 → next token should be OTP
+        token.setTokenType(TokenType.DATE_OF_BIRTH);
+        token.setTokenValue("bad-date");
+        resp = post(token);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
+    }
+
+    /**
+     * Verifies that a failed backup-token submission returns the required-token type
+     * (PIN) as nextRequiredToken — not the submitted backup type (SSN_LAST4). The
+     * acceptedTokens list must also include the backup alternatives so the caller
+     * always knows the full set of acceptable token types.
+     */
+    @Test
+    void testBackupTokenFailureReturnsRequiredToken() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5558882222");
+        start.setTargetLevel(AuthLevel.STANDARD);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        AuthenticateRequest token = req();
+        token.setSessionId(sessionId);
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        post(token); // valid — advances past ACCOUNT_NUMBER
+
+        // Submit SSN_LAST4 "12" — too short, fails SsnLast4Validator.
+        // SSN_LAST4 is a backup for PIN on path0, so this is a failure against the PIN slot.
+        token.setTokenType(TokenType.SSN_LAST4);
+        token.setTokenValue("12");
+        ResponseEntity<AuthenticateResponse> resp = post(token);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        // Must ask for PIN (the required slot), not SSN_LAST4 (the submitted backup)
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        // Must expose backup alternatives so the caller can offer them to the customer
+        assertThat(resp.getBody().getAcceptedTokens()).contains(TokenType.SSN_LAST4);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+    }
+
     @Test
     void testTransferUnknownSource() {
         AuthenticateRequest req = req();

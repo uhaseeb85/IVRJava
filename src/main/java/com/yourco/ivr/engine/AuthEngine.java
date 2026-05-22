@@ -129,6 +129,11 @@ public class AuthEngine {
         TokenType resolvedToken = resolveBackupToken(session, config, tokenType);
         session.getValidatedTokens().add(resolvedToken);
         session.getAttemptCounts().remove(tokenType);
+        // Bug 5 fix: also clear the required-slot count so stale failure counts from
+        // the primary token don't persist after a successful backup submission
+        if (resolvedToken != tokenType) {
+            session.getAttemptCounts().remove(resolvedToken);
+        }
         crossBrandEvaluator.recordValidated(session, tokenType);
 
         // 3. Evaluate progress toward targetLevel
@@ -300,29 +305,76 @@ public class AuthEngine {
         return submittedType;
     }
 
+    /**
+     * Given a submitted token type, return the required-token slot it belongs to on
+     * the active path. If the submitted token is itself a required token, it is
+     * returned unchanged. If it is a backup alternative for a required slot, the
+     * required-slot token type is returned instead.
+     * <p>
+     * This is used by {@link #handleFailure} to ensure failure counts are always
+     * accumulated at the required-token level so the retry limit cannot be bypassed
+     * by cycling across backup token types (e.g., failing PIN, then SSN_LAST4, then
+     * DATE_OF_BIRTH each counts against the same PIN slot).
+     */
+    private TokenType findRequiredTokenForSlot(IvrSession session,
+                                               BrandAuthConfig config,
+                                               TokenType submittedType) {
+        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        if (rule == null) return submittedType;
+
+        int activePathIdx = session.getActivePathIndexByLevel()
+            .getOrDefault(session.getTargetLevel(), 0);
+        if (activePathIdx >= rule.getPaths().size()) return submittedType;
+
+        TokenPath activePath = rule.getPaths().get(activePathIdx);
+        if (activePath.getBackupTokens() != null) {
+            for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
+                if (entry.getValue().contains(submittedType)) {
+                    return entry.getKey();   // return the required slot, not the backup
+                }
+            }
+        }
+        return submittedType;
+    }
+
     private AuthenticateResponse handleFailure(IvrSession session,
                                            BrandAuthConfig config,
                                            TokenType tokenType) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
         Map<TokenType, Integer> counts = session.getAttemptCounts();
-        int attempts = counts.containsKey(tokenType)
-            ? counts.get(tokenType) + 1
+
+        // Bug 1 fix: track attempts against the required-token slot, not the submitted
+        // backup type. This prevents bypassing retry limits by cycling across backup types
+        // (e.g., failing PIN once + SSN_LAST4 once + DATE_OF_BIRTH once = 3 total failures
+        // that should trigger a path switch, not three independent 1-failure counters).
+        TokenType requiredToken = findRequiredTokenForSlot(session, config, tokenType);
+        int attempts = counts.containsKey(requiredToken)
+            ? counts.get(requiredToken) + 1
             : 1;
-        counts.put(tokenType, attempts);
+        counts.put(requiredToken, attempts);
         int remaining = rule.getMaxRetriesPerToken() - attempts;
 
         if (remaining > 0) {
+            int activePathIdx = session.getActivePathIndexByLevel()
+                .getOrDefault(session.getTargetLevel(), 0);
+            TokenPath activePath = rule.getPaths().get(activePathIdx);
+
+            // Bug 2 fix: return the required-token slot (PIN) as nextRequiredToken,
+            //   not the submitted backup type (SSN_LAST4).
+            // Bug 3 fix: include acceptedTokens so the caller knows all valid alternatives.
+            List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, requiredToken);
+            String prompt = promptResolver.resolvePrompt(requiredToken, activePath, remaining);
             sessionRepo.save(session);
-            String prompt = promptResolver.resolvePrompt(tokenType, null, remaining);
             return baseResponse(session)
                 .status(SessionStatus.COLLECTING)
-                .nextRequiredToken(tokenType)
+                .nextRequiredToken(requiredToken)
                 .remainingAttempts(remaining)
+                .acceptedTokens(acceptedTokens)
                 .prompt(prompt)
                 .build();
         }
 
-        // Try advancing to next fallback path
+        // Retry limit exhausted — try advancing to the next fallback path
         Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
         int currentPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
         int nextPathIdx = currentPathIdx + 1;
@@ -330,34 +382,14 @@ public class AuthEngine {
         if (nextPathIdx < rule.getPaths().size()) {
             pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
             session.getAttemptCounts().clear();
-            TokenPath nextPath = rule.getPaths().get(nextPathIdx);
             sessionRepo.save(session);
-
-            TokenType nextToken = null;
-            for (TokenType required : nextPath.getRequiredTokens()) {
-                if (!session.getValidatedTokens().contains(required)) {
-                    nextToken = required;
-                    break;
-                }
-            }
-
-            if (nextToken == null) {
-                // All tokens in fallback path already validated — re-evaluate
-                return evaluateProgress(session, config);
-            }
-
-            List<TokenType> acceptedTokens = buildAcceptedTokens(session, nextPath, nextToken);
-            String prompt = promptResolver.resolvePrompt(nextToken, nextPath, rule.getMaxRetriesPerToken());
-            return baseResponse(session)
-                .status(SessionStatus.COLLECTING)
-                .nextRequiredToken(nextToken)
-                .remainingAttempts(rule.getMaxRetriesPerToken())
-                .acceptedTokens(acceptedTokens)
-                .prompt("Fallback: " + prompt)
-                .build();
+            // Bug 4 fix: delegate to evaluateProgress() so the isBlocked /
+            // findAlternativeToken checks are applied correctly on the new path,
+            // instead of duplicating that logic here without the blocked-token guard.
+            return evaluateProgress(session, config);
         }
 
-        // All paths exhausted — lockout
+        // All paths exhausted — lock the session
         session.setStatus(SessionStatus.LOCKED);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
