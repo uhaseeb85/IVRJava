@@ -310,20 +310,10 @@ class IvrAuthIntegrationTest {
         resp = post(token);
         assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(1);
 
-        // Third: exhausts retries for ACCOUNT_NUMBER slot on path0 → switches to path1.
-        // path1 = [ACCOUNT_NUMBER, OTP], and ACCOUNT_NUMBER was never validated, so the
-        // system correctly asks for ACCOUNT_NUMBER again — but now on the new path with a
-        // fresh attempt count.
+        // Third wrong-type exhausts retries → session LOCKED immediately (no path switch).
+        // Wrong-type submissions do not earn a fresh retry budget on an alternative path.
         resp = post(token);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(3);
-
-        // Confirm we're on path1: submit valid ACCOUNT_NUMBER → next should be OTP, not PIN
-        token.setTokenType(TokenType.ACCOUNT_NUMBER);
-        token.setTokenValue("123456789");
-        resp = post(token);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.LOCKED);
     }
 
     /**
@@ -425,5 +415,44 @@ class IvrAuthIntegrationTest {
         ResponseEntity<String> resp = rest.postForEntity(
             "/ivr/authenticate", req, String.class);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+    }
+
+    // Repeated backup-token failures must count against the required slot and
+    // eventually exhaust retries (not give infinite attempts).
+    @Test
+    void testBackupTokenRepeatedFailureExhaustsRetries() {
+        // STANDARD path0 = [ACCOUNT_NUMBER, PIN], PIN backed by SSN_LAST4 / DATE_OF_BIRTH
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5550000099");
+        start.setTargetLevel(AuthLevel.STANDARD);
+        String sid = post(start).getBody().getSessionId();
+
+        // Advance past ACCOUNT_NUMBER slot
+        AuthenticateRequest token = req();
+        token.setSessionId(sid);
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        post(token);
+
+        // Fail SSN_LAST4 (backup for PIN) three times
+        token.setTokenType(TokenType.SSN_LAST4);
+        token.setTokenValue("12"); // too short, always fails
+
+        ResponseEntity<AuthenticateResponse> r1 = post(token);
+        assertThat(r1.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(r1.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(r1.getBody().getRemainingAttempts()).isEqualTo(2);
+
+        ResponseEntity<AuthenticateResponse> r2 = post(token);
+        assertThat(r2.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(r2.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(r2.getBody().getRemainingAttempts()).isEqualTo(1);
+
+        // Third failure exhausts path0 PIN slot -> switch to path1 = [ACCOUNT_NUMBER, OTP]
+        // ACCOUNT_NUMBER is already validated so path1 advances immediately to OTP
+        ResponseEntity<AuthenticateResponse> r3 = post(token);
+        assertThat(r3.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
+        assertThat(r3.getBody().getRemainingAttempts()).isEqualTo(3);
     }
 }

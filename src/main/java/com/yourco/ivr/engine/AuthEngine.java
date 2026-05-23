@@ -169,7 +169,11 @@ public class AuthEngine {
                 if (!acceptedNow.contains(tokenType)) {
                     addEntry(procLog, "WARN",
                         "WRONG_TYPE: submitted " + tokenType + " but expected one of " + acceptedNow);
-                    AuthenticateResponse wrongTypeResp = handleFailure(session, config, nextRequired, procLog);
+                    // Wrong-type submissions count against the required slot's retry budget but
+                    // do NOT trigger a path switch — path switching is reserved for genuine
+                    // validation failures (correct type, wrong value).  If the caller exhausts
+                    // retries on wrong-type submissions, the session is locked immediately.
+                    AuthenticateResponse wrongTypeResp = handleFailure(session, config, nextRequired, procLog, false);
                     wrongTypeResp.setProcessingLog(procLog);
                     return wrongTypeResp;
                 }
@@ -187,7 +191,8 @@ public class AuthEngine {
             valid ? "PASS" : "FAIL");
 
         if (!valid) {
-            AuthenticateResponse failResp = handleFailure(session, config, tokenType, procLog);
+            // Genuine validation failure (correct type, wrong value) — path switch allowed.
+            AuthenticateResponse failResp = handleFailure(session, config, tokenType, procLog, true);
             failResp.setProcessingLog(procLog);
             return failResp;
         }
@@ -433,10 +438,20 @@ public class AuthEngine {
         return submittedType;
     }
 
+    /**
+     * Handle a token submission failure.
+     *
+     * @param allowPathSwitch when {@code true} (genuine validation failure — correct type, wrong
+     *        value) the engine may switch to the next fallback path when retries are exhausted.
+     *        When {@code false} (wrong token type submitted) the session is locked immediately
+     *        on retry exhaustion — path switching is NOT offered, because presenting a fresh
+     *        retry budget for an alternative credential method rewards the wrong behaviour.
+     */
     private AuthenticateResponse handleFailure(IvrSession session,
                                            BrandAuthConfig config,
                                            TokenType tokenType,
-                                           List<ProcessingEvent> procLog) {
+                                           List<ProcessingEvent> procLog,
+                                           boolean allowPathSwitch) {
         LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
         Map<TokenType, Integer> counts = session.getAttemptCounts();
 
@@ -479,50 +494,55 @@ public class AuthEngine {
                 .build();
         }
 
-        // Retry limit exhausted — try advancing to the next fallback path
+        // Retry limit exhausted
         addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
 
-        Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
-        int currentPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
-        int nextPathIdx = currentPathIdx + 1;
+        if (allowPathSwitch) {
+            // Genuine validation failure — try advancing to the next fallback path
+            Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
+            int currentPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
+            int nextPathIdx = currentPathIdx + 1;
 
-        if (nextPathIdx < rule.getPaths().size()) {
-            TokenPath newPath = rule.getPaths().get(nextPathIdx);
+            if (nextPathIdx < rule.getPaths().size()) {
+                TokenPath newPath = rule.getPaths().get(nextPathIdx);
 
-            // List tokens in the new path already validated so the log shows what carries over
-            List<TokenType> alreadyValid = new ArrayList<>();
-            for (TokenType t : newPath.getRequiredTokens()) {
-                if (session.getValidatedTokens().contains(t)) {
-                    alreadyValid.add(t);
+                // List tokens in the new path already validated so the log shows what carries over
+                List<TokenType> alreadyValid = new ArrayList<>();
+                for (TokenType t : newPath.getRequiredTokens()) {
+                    if (session.getValidatedTokens().contains(t)) {
+                        alreadyValid.add(t);
+                    }
                 }
-            }
-            addEntry(procLog, "WARN",
-                "Switching to fallback: path" + nextPathIdx + " → " + newPath.getRequiredTokens());
-            if (!alreadyValid.isEmpty()) {
-                addEntry(procLog, "INFO",
-                    "Pre-validated tokens retained in new path: " + alreadyValid);
-            }
-
-            pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
-            session.getAttemptCounts().clear();
-            sessionRepo.save(session);
-            // Bug 4 fix: delegate to evaluateProgress() so the isBlocked /
-            // findAlternativeToken checks are applied correctly on the new path,
-            // instead of duplicating that logic here without the blocked-token guard.
-            AuthenticateResponse switchResp = evaluateProgress(session, config);
-            if (switchResp.getNextRequiredToken() != null) {
-                addEntry(procLog, "INFO",
-                    "Next required: " + switchResp.getNextRequiredToken());
-                if (switchResp.getAcceptedTokens() != null && !switchResp.getAcceptedTokens().isEmpty()) {
+                addEntry(procLog, "WARN",
+                    "Switching to fallback: path" + nextPathIdx + " → " + newPath.getRequiredTokens());
+                if (!alreadyValid.isEmpty()) {
                     addEntry(procLog, "INFO",
-                        "Accepted for next slot: " + switchResp.getAcceptedTokens());
+                        "Pre-validated tokens retained in new path: " + alreadyValid);
                 }
+
+                pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
+                session.getAttemptCounts().clear();
+                sessionRepo.save(session);
+                // Bug 4 fix: delegate to evaluateProgress() so the isBlocked /
+                // findAlternativeToken checks are applied correctly on the new path,
+                // instead of duplicating that logic here without the blocked-token guard.
+                AuthenticateResponse switchResp = evaluateProgress(session, config);
+                if (switchResp.getNextRequiredToken() != null) {
+                    addEntry(procLog, "INFO",
+                        "Next required: " + switchResp.getNextRequiredToken());
+                    if (switchResp.getAcceptedTokens() != null && !switchResp.getAcceptedTokens().isEmpty()) {
+                        addEntry(procLog, "INFO",
+                            "Accepted for next slot: " + switchResp.getAcceptedTokens());
+                    }
+                }
+                return switchResp;
             }
-            return switchResp;
+        } else {
+            addEntry(procLog, "FAIL",
+                "Wrong token type exhausted retries — session locked (no path switch)");
         }
 
-        // All paths exhausted — lock the session
-        addEntry(procLog, "FAIL", "All authentication paths exhausted");
+        // All paths exhausted (or wrong-type exhaustion) — lock the session
         addEntry(procLog, "FAIL", "Session LOCKED for " + rule.getLockoutSeconds() + " seconds");
 
         session.setStatus(SessionStatus.LOCKED);
