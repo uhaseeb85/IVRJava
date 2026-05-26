@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 1.5 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 1.6 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -21,7 +21,8 @@
 13. [Package Structure](#13-package-structure)
 14. [Party Disambiguation](#14-party-disambiguation)
 15. [Customer Preferences](#15-customer-preferences)
-16. [Implementation Checklist](#16-implementation-checklist)
+16. [Phone Risk Integration](#16-phone-risk-integration)
+17. [Implementation Checklist](#17-implementation-checklist)
 
 ---
 
@@ -71,6 +72,16 @@ public enum AuthLevel {
     public int getRank() { return rank; }
     public boolean isHigherThan(AuthLevel other) { return this.rank > other.rank; }
 }
+
+// RiskLevel.java  — caller risk tier assessed by PhoneRiskProvider
+public enum RiskLevel { LOW, MEDIUM, HIGH, CRITICAL }
+
+// RiskAssessment.java  — result produced by PhoneRiskProvider at session start
+@Data
+public class RiskAssessment {
+    private RiskLevel level;
+    private List<String> flags;   // e.g. "RECENTLY_PORTED", "SPOOFED_ANI"
+}
 ```
 
 ### 2.2 Brand Configuration Model
@@ -79,8 +90,17 @@ public enum AuthLevel {
 // BrandAuthConfig.java
 @Data
 public class BrandAuthConfig {
-    private String brandId;                         // e.g. "BRAND_A"
-    private Map<AuthLevel, LevelRule> levelRules;   // one rule per level
+    private String brandId;                           // e.g. "BRAND_A"
+    private Map<AuthLevel, LevelRule> levelRules;     // one rule per level
+    private Map<RiskLevel, RiskPolicy> riskPolicies;  // optional; omit for unrestricted
+}
+
+// RiskPolicy.java  — action to take when caller's risk level matches
+@Data
+public class RiskPolicy {
+    private boolean reject;                 // true → HTTP 403, no session created
+    private AuthLevel minimumTargetLevel;   // upgrade targetLevel if below this
+    private List<TokenType> blockedTokens;  // merged with CustomerPreference.blockedTokens
 }
 
 // LevelRule.java
@@ -143,6 +163,9 @@ public class IvrSession {
 
     // Source system that transferred this call (null if session started locally)
     private String transferredFrom;
+
+    // Risk assessment produced by PhoneRiskProvider at session start
+    private RiskAssessment riskAssessment;
 
     // Optimistic locking for concurrent update safety
     private int version;
@@ -760,22 +783,6 @@ public class AuthenticateRequest {
 // AuthenticateResponse.java
 @Data @Builder
 public class AuthenticateResponse {
-    private String sessionId;
-    private SessionStatus status;
-    private AuthLevel currentLevel;
-    private AuthLevel targetLevel;
-    private TokenType nextRequiredToken;
-    private Integer remainingAttempts;
-    private String prompt;
-    private Instant lockedUntil;
-    private List<TokenType> acceptedTokens;
-    private SessionPhase phase;              // DISAMBIGUATION or AUTHENTICATING
-    private String matchedPartyId;           // set once party disambiguation resolves
-}
-
-// AuthenticateResponse.java
-@Data @Builder
-public class AuthenticateResponse {
     private String          sessionId;
     private SessionStatus   status;
     private AuthLevel       currentLevel;
@@ -785,6 +792,10 @@ public class AuthenticateResponse {
     private String          prompt;             // human-readable IVR prompt text
     private Instant         lockedUntil;        // set when status=LOCKED
     private List<TokenType> acceptedTokens;     // tokens the client may submit at this step
+    private SessionPhase    phase;              // DISAMBIGUATION or AUTHENTICATING
+    private String          matchedPartyId;     // set once party disambiguation resolves
+    private RiskLevel       riskLevel;          // caller's risk tier; always present, null if no assessment
+    private List<ProcessingEvent> processingLog; // per-token audit events (token submissions only)
 }
 ```
 
@@ -878,7 +889,8 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     transferred_from        TEXT,
     locked_until            TEXT,       -- ISO-8601 timestamp
     created_at              TEXT NOT NULL,
-    last_activity_at        TEXT NOT NULL
+    last_activity_at        TEXT NOT NULL,
+    risk_assessment         TEXT        -- JSON: RiskAssessment (level + flags)
 );
 ```
 
@@ -888,7 +900,7 @@ Key implementation details:
 
 - **save()**: New sessions (`version == 0`) use `INSERT` with version set to 1. Existing sessions use `UPDATE ... WHERE session_id = ? AND version = ?`. If the update affects 0 rows, a `SessionConflictException` (HTTP 409) is thrown — the caller must re-read and retry.
 - **getOrThrow()**: Single query — fetches the full row and checks TTL in Java. Previously this was two separate queries (`checkExpired` + `SELECT *`).
-- **mapRow()**: Reads all columns including `phase`, `candidate_parties`, `matched_party`, `customer_preferences`, `disambiguation_attempt`, and `version`.
+- **mapRow()**: Reads all columns including `phase`, `candidate_parties`, `matched_party`, `customer_preferences`, `disambiguation_attempt`, `version`, and `risk_assessment`.
 
 ```java
 @Repository
@@ -1151,6 +1163,13 @@ public class IvrExceptionHandler {
             .body(new ErrorResponse("TRANSFER_NOT_ALLOWED", e.getMessage()));
     }
 
+    @ExceptionHandler(HighRiskCallerException.class)
+    public ResponseEntity<ErrorResponse> handleHighRisk(HighRiskCallerException e) {
+        log.warn("High-risk caller rejected [{}]: {}", e.getRiskLevel(), e.getMessage());
+        return ResponseEntity.status(403)
+            .body(new ErrorResponse("HIGH_RISK_CALLER", e.getMessage()));
+    }
+
     @ExceptionHandler(UnknownBrandException.class)
     public ResponseEntity<ErrorResponse> handleBrand(UnknownBrandException e) {
         return ResponseEntity.status(400)
@@ -1212,11 +1231,14 @@ com.yourco.ivr
 │   ├── SessionPhase.java
 │   ├── Party.java
 │   ├── CustomerPreference.java
+│   ├── RiskLevel.java
+│   ├── RiskAssessment.java
 │   ├── ValidationResult.java
 │   ├── CrossBrandTokenRecord.java
 │   └── config/
 │       ├── BrandAuthConfig.java
 │       ├── LevelRule.java
+│       ├── RiskPolicy.java
 │       ├── TokenPath.java
 │       ├── DisambiguationConfig.java
 │       ├── TransferPolicy.java
@@ -1233,6 +1255,9 @@ com.yourco.ivr
 ├── partylookup/
 │   ├── PartyLookupProvider.java
 │   └── StubPartyLookupProvider.java
+├── partyrisk/
+│   ├── PhoneRiskProvider.java
+│   └── StubPhoneRiskProvider.java
 ├── preference/
 │   ├── CustomerPreferenceProvider.java
 │   └── StubCustomerPreferenceProvider.java
@@ -1267,6 +1292,7 @@ com.yourco.ivr
     ├── UnknownBrandException.java
     ├── UnknownCallerException.java
     ├── UnsupportedTokenTypeException.java
+    ├── HighRiskCallerException.java
     └── BrandConfigException.java
 ```
 
@@ -1535,7 +1561,116 @@ Customer asked only for allowed tokens
 
 ---
 
-## 16. Implementation Checklist
+## 16. Phone Risk Integration
+
+Phone risk integration lets each brand gate or modify sessions based on the caller's ANI risk score, without any code change after the `PhoneRiskProvider` is deployed.
+
+### 16.1 PhoneRiskProvider (SPI Interface)
+
+```java
+// PhoneRiskProvider.java
+public interface PhoneRiskProvider {
+    /**
+     * Assess the risk of a caller for a given brand.
+     * Called at session start (and on call transfer) before any session state is written.
+     * Implementations must never throw — return RiskLevel.LOW if the upstream is unavailable.
+     *
+     * @param callerId ANI of the caller
+     * @param brandId  brand receiving the call (allows brand-specific risk thresholds at the API layer)
+     * @return non-null RiskAssessment
+     */
+    RiskAssessment assess(String callerId, String brandId);
+}
+```
+
+A `StubPhoneRiskProvider` (`@Component`) returns `RiskLevel.LOW` for all callers. Replace it with a real implementation that calls a carrier fraud API or internal phone reputation service.
+
+### 16.2 Session Start Flow with Risk Assessment
+
+```
+POST /ivr/authenticate  (start — no sessionId)
+        │
+        ▼
+PhoneRiskProvider.assess(callerId, brandId)
+        │
+        ▼
+Look up RiskPolicy = config.getRiskPolicies().get(riskLevel)
+        │
+  ┌─────┴─────┐
+  │           │
+ reject=true   reject=false (or no policy)
+  │           │
+  ▼           ▼
+HTTP 403      Apply minimumTargetLevel override (if effectiveTarget < policy.minimumTargetLevel)
+HIGH_RISK_CALLER        │
+No session written      ▼
+              Create IvrSession (riskAssessment set)
+                        │
+                        ▼
+              PartyLookupProvider.lookupByAni()
+                        │
+                        ▼
+              Merge riskPolicy.blockedTokens into CustomerPreference.blockedTokens
+                        │
+                        ▼
+              AuthEngine.evaluateProgress()
+              (preference filtering skips merged blocked tokens)
+                        │
+                        ▼
+              AuthenticateResponse (riskLevel always included)
+```
+
+### 16.3 Policy Application Details
+
+**Rejection (CRITICAL):**  
+`PhoneRiskProvider.assess()` is called before `sessionRepo.save()`. A CRITICAL-risk caller with `reject=true` throws `HighRiskCallerException` and the database is never touched.
+
+**Level upgrade (HIGH):**  
+If the requested `targetLevel` is lower than `riskPolicy.minimumTargetLevel`, `effectiveTarget` is silently set to the higher level. This is transparent to the caller — they will need to provide the tokens for the higher level.
+
+**Token blocking:**  
+`riskPolicy.blockedTokens` is merged with the customer's `CustomerPreference.blockedTokens` using a set union. The merged set is stored on `CustomerPreference` and applies to all subsequent `evaluateProgress()` calls for the session. This ensures risk-blocked tokens are excluded from both `nextRequiredToken` and `acceptedTokens` responses.
+
+**Call transfer:**  
+Risk assessment is also applied to transferred sessions. If the source system transfers a CRITICAL-risk caller, the transfer is rejected with HTTP 403 before any session is created in the target brand.
+
+### 16.4 Brand Config Example
+
+```json
+{
+  "brandId": "BRAND_A",
+  "riskPolicies": {
+    "HIGH": {
+      "reject": false,
+      "minimumTargetLevel": "ELEVATED",
+      "blockedTokens": ["DATE_OF_BIRTH"]
+    },
+    "CRITICAL": {
+      "reject": true
+    }
+  },
+  "levelRules": { ... }
+}
+```
+
+Risk levels with no entry (e.g. `LOW`, `MEDIUM`) are unrestricted — no policy is applied.
+
+### 16.5 DB Schema Addition
+
+```sql
+-- Migration: add risk_assessment for phone risk level integration
+ALTER TABLE ivr_session ADD COLUMN risk_assessment TEXT;
+```
+
+The `risk_assessment` column stores the `RiskAssessment` object (level + flags) as JSON. It is written at session creation and never mutated.
+
+### 16.6 Response Field
+
+`riskLevel` is always present in `AuthenticateResponse`. It is `null` only if the brand has no `riskPolicies` block and the provider was not invoked (which cannot happen in the current implementation — the provider is always called). The IVR platform can use this field to route callers to agents or apply additional UI friction without changes to the engine.
+
+---
+
+## 17. Implementation Checklist
 
 ### Phase 1 — Core Foundation
 1. Define `AuthLevel` and `TokenType` enums
@@ -1606,6 +1741,30 @@ Customer asked only for allowed tokens
 13. Add `phase` and `matchedPartyId` to `AuthenticateResponse`
 14. Implement `UnknownCallerException` and wire into `IvrExceptionHandler`
 15. Integration-test: single party, multi-party, rules narrowing, zero parties, max rounds, disabled config, preference filtering
+
+### Phase 9 — Phone Risk Integration
+1. Define `RiskLevel` enum: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`
+2. Implement `RiskAssessment` domain model (`level` + `flags`)
+3. Implement `RiskPolicy` config model (`reject`, `minimumTargetLevel`, `blockedTokens`)
+4. Add `riskPolicies: Map<RiskLevel, RiskPolicy>` to `BrandAuthConfig`
+5. Implement `PhoneRiskProvider` interface in `partyrisk/`
+6. Implement `StubPhoneRiskProvider` returning `LOW` for all callers
+7. Implement `HighRiskCallerException` and wire into `IvrExceptionHandler` (HTTP 403, `HIGH_RISK_CALLER`)
+8. Add `riskAssessment` field to `IvrSession`; add `risk_assessment TEXT` column to `ivr_session` schema
+9. Update `SqliteSessionRepository` INSERT and UPDATE SQL to include `risk_assessment`; add deserialization in `mapRow()`
+10. Wire `PhoneRiskProvider` into `AuthenticateService.start()` and `AuthenticateService.transfer()`:
+    - Call `assess()` before session write
+    - Apply `reject` gate (throw `HighRiskCallerException`)
+    - Apply `minimumTargetLevel` override
+    - Merge `blockedTokens` into `CustomerPreference` via `mergeRiskBlockedTokens()`
+11. Add `riskLevel` to `AuthenticateResponse` DTO
+12. Create `config/brands/risk_test_brand.json` demonstrating HIGH/CRITICAL policies
+13. Write `PhoneRiskTest.java` integration tests using `@MockBean PhoneRiskProvider`:
+    - CRITICAL → HTTP 403
+    - HIGH → targetLevel upgraded to ELEVATED
+    - HIGH with blockedTokens → blocked token not in nextRequiredToken or acceptedTokens
+    - MEDIUM (no policy) → normal flow
+    - LOW → normal flow with riskLevel=LOW in response
 
 > ⚠️ **Security Note — Token Values**
 > Never log raw token values (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.

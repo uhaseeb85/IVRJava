@@ -27,6 +27,8 @@ public class IvrSession {
     private int disambiguationAttemptCount;
     private int version;
 
+    private RiskAssessment riskAssessment;
+
     private String transferredFrom;
     private Instant lockedUntil;
     private Instant createdAt;

@@ -2,6 +2,7 @@ package com.yourco.ivr.api.dto;
 
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.RiskLevel;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
@@ -53,6 +54,10 @@ public class AuthenticateResponse {
     @Schema(description = "ID of the matched party once disambiguation resolves (null otherwise)")
     private String matchedPartyId;
 
+    @Schema(description = "Caller risk level assessed at session start (LOW / MEDIUM / HIGH / CRITICAL). "
+        + "Null if risk assessment was not performed for this session.")
+    private RiskLevel riskLevel;
+
     @Schema(description = "Step-by-step processing log (only present on token-submission requests). "
         + "Shows validation outcome, backup resolution, attempt counts, and path transitions. "
         + "Token values are never included.")
@@ -67,6 +72,8 @@ public class AuthenticateResponse {
             .targetLevel(session.getTargetLevel())
             .matchedPartyId(session.getMatchedParty() != null
                 ? session.getMatchedParty().getPartyId() : null)
+            .riskLevel(session.getRiskAssessment() != null
+                ? session.getRiskAssessment().getLevel() : null)
             .build();
     }
 }

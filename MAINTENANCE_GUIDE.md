@@ -15,9 +15,10 @@ A practical reference for the most common maintenance tasks: adding brands, addi
 7. [Adding a new disambiguation rule](#7-adding-a-new-disambiguation-rule)
 8. [Brand-specific validator overrides](#8-brand-specific-validator-overrides)
 9. [Adding a transfer policy](#9-adding-a-transfer-policy)
-10. [Replacing stubs with real implementations](#10-replacing-stubs-with-real-implementations)
-11. [Testing requirements](#11-testing-requirements)
-12. [Keeping docs in sync](#12-keeping-docs-in-sync)
+10. [Configuring phone risk policies](#10-configuring-phone-risk-policies)
+11. [Replacing stubs with real implementations](#11-replacing-stubs-with-real-implementations)
+12. [Testing requirements](#12-testing-requirements)
+13. [Keeping docs in sync](#13-keeping-docs-in-sync)
 
 ---
 
@@ -27,12 +28,14 @@ A practical reference for the most common maintenance tasks: adding brands, addi
 |---|---|---|
 | Add a new brand | ❌ No | JSON file or UI or API |
 | Change a brand's token paths / retries / lockout | ❌ No | Edit JSON file or use UI |
+| Add a risk policy for a brand | ❌ No | Add `riskPolicies` block to the brand JSON |
 | Add a disambiguation rule type | ✅ Yes | Implement `DisambiguationRule` + register in engine |
 | Add a transfer policy | ❌ No | Edit `config/transfers/transfer-policies.json` |
 | Add a new token type | ✅ Yes | Enum + validator + prompt text |
 | Add a new auth level | ✅ Yes | Enum rank + update brand configs |
 | Brand-specific validation logic | ✅ Yes | `BrandTokenValidatorOverride` Spring bean |
 | Replace stub party lookup / preferences | ✅ Yes | Implement the interface + remove `@Component` from stub |
+| Replace stub phone risk provider | ✅ Yes | Implement `PhoneRiskProvider` + remove `@Component` from stub |
 
 ---
 
@@ -408,9 +411,78 @@ Edit `config/transfers/transfer-policies.json`:
 
 ---
 
-## 10. Replacing stubs with real implementations
+## 10. Configuring phone risk policies
 
-The engine ships with two stub implementations that always return fixed data. Replace them before going to production.
+Risk policies let each brand gate or modify sessions based on the caller's ANI risk score — **no code change required** once the `PhoneRiskProvider` is wired.
+
+### How it works
+
+1. At session start (and on call transfer), `PhoneRiskProvider.assess(callerId, brandId)` is called.
+2. The result's `RiskLevel` (`LOW` / `MEDIUM` / `HIGH` / `CRITICAL`) is looked up in the brand's `riskPolicies` map.
+3. If a matching policy is found, it is applied before any session state is written.
+
+### Policy fields
+
+| Field | Type | Behavior |
+|---|---|---|
+| `reject` | boolean | `true` → return **HTTP 403** (`HIGH_RISK_CALLER`). No session is created. |
+| `minimumTargetLevel` | `AuthLevel` | If the requested `targetLevel` is lower, the engine silently upgrades it. |
+| `blockedTokens` | list of `TokenType` | Merged with the customer's own blocked tokens. These types are never offered or accepted for this session. |
+
+### JSON example
+
+Add a `riskPolicies` block to any brand's JSON file (or via the UI JSON tab):
+
+```json
+{
+  "brandId": "BRAND_A",
+  "riskPolicies": {
+    "HIGH": {
+      "reject": false,
+      "minimumTargetLevel": "ELEVATED",
+      "blockedTokens": ["DATE_OF_BIRTH"]
+    },
+    "CRITICAL": {
+      "reject": true
+    }
+  },
+  "levelRules": { ... }
+}
+```
+
+Risk levels with no entry (e.g. `LOW`, `MEDIUM` above) are unrestricted.
+
+### Interaction with customer preferences
+
+`blockedTokens` from the risk policy are **merged** with the customer's own `blockedTokens` loaded from `CustomerPreferenceProvider`. The union of both sets is applied, so a caller flagged HIGH who also has a customer-level block on `PIN` will have both `DATE_OF_BIRTH` and `PIN` blocked.
+
+### Seeing risk level in responses
+
+`riskLevel` is always present in the `AuthenticateResponse`, even when no risk policy applied. The IVR platform can use this to log, route to an agent, or apply its own UI logic without changing the engine.
+
+### Testing risk policies
+
+Use `@MockBean PhoneRiskProvider` in your integration tests (see `PhoneRiskTest.java` for examples):
+
+```java
+@MockBean
+private PhoneRiskProvider riskProvider;
+
+@Test
+void criticalCallerIsRejected() {
+    when(riskProvider.assess(anyString(), anyString()))
+        .thenReturn(assessment(RiskLevel.CRITICAL));
+    ResponseEntity<ErrorResponse> resp = rest.postForEntity(
+        "/ivr/authenticate", startReq(AuthLevel.STANDARD), ErrorResponse.class);
+    assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+}
+```
+
+---
+
+## 11. Replacing stubs with real implementations
+
+The engine ships with three stub implementations that always return fixed data. Replace them before going to production.
 
 ### PartyLookupProvider — looks up parties by ANI
 
@@ -464,9 +536,51 @@ public class DbCustomerPreferenceProvider implements CustomerPreferenceProvider 
 
 `blockedTokens` — the engine will skip these token types and try backup alternatives or the next fallback path automatically.
 
+### PhoneRiskProvider — scores ANI risk at session start
+
+```java
+package com.yourco.ivr.partyrisk;
+
+import com.yourco.ivr.domain.RiskAssessment;
+import com.yourco.ivr.domain.RiskLevel;
+import org.springframework.context.annotation.Primary;
+import org.springframework.stereotype.Component;
+
+import java.util.List;
+
+@Component
+@Primary   // or remove @Component from StubPhoneRiskProvider
+public class CarrierPhoneRiskProvider implements PhoneRiskProvider {
+
+    private final FraudApiClient fraudApi;
+
+    public CarrierPhoneRiskProvider(FraudApiClient fraudApi) {
+        this.fraudApi = fraudApi;
+    }
+
+    @Override
+    public RiskAssessment assess(String callerId, String brandId) {
+        FraudApiResponse resp = fraudApi.score(callerId);
+        RiskAssessment assessment = new RiskAssessment();
+        assessment.setLevel(mapLevel(resp.getScore()));
+        assessment.setFlags(resp.getFlags()); // e.g. ["RECENTLY_PORTED", "SPOOFED_ANI"]
+        return assessment;
+    }
+
+    private RiskLevel mapLevel(int score) {
+        if (score >= 90) return RiskLevel.CRITICAL;
+        if (score >= 70) return RiskLevel.HIGH;
+        if (score >= 40) return RiskLevel.MEDIUM;
+        return RiskLevel.LOW;
+    }
+}
+```
+
+The assessment result is stored on the session and returned as `riskLevel` in every `AuthenticateResponse`. Brand `riskPolicies` (configured in JSON, see §10) determine what action to take — no code change required for policy adjustments.
+
 ---
 
-## 11. Testing requirements
+## 12. Testing requirements
 
 **Every new feature or engine behavior change requires a new test.** Tests live in `src/test/java/com/yourco/ivr/` and are `@SpringBootTest` integration tests using `TestRestTemplate`.
 
@@ -496,9 +610,19 @@ mvn test -Dtest=AuthEngineTest    # run a specific class
 
 `StubCustomerPreferenceProvider` returns empty preferences (no blocked tokens, no level cap). Override these in tests using `@MockBean` if you need specific scenarios.
 
+`StubPhoneRiskProvider` returns `RiskLevel.LOW` for every caller. Override it with `@MockBean PhoneRiskProvider` in tests that exercise risk policy behaviour (see `PhoneRiskTest.java`).
+
+### What to test for new risk policies
+
+- `CRITICAL` risk → verify HTTP 403 and `HIGH_RISK_CALLER` error code
+- `HIGH` risk with `minimumTargetLevel` → verify `targetLevel` in response is upgraded
+- `HIGH` risk with `blockedTokens` → verify blocked token does not appear in `nextRequiredToken` or `acceptedTokens`
+- Risk level with no policy defined → verify session proceeds normally
+- `riskLevel` field is present in every start response
+
 ---
 
-## 12. Keeping docs in sync
+## 13. Keeping docs in sync
 
 The CLAUDE.md project rules require these two files to be updated alongside any code or config change:
 
@@ -509,5 +633,6 @@ The CLAUDE.md project rules require these two files to be updated alongside any 
 
 This file (`MAINTENANCE_GUIDE.md`) should be updated when:
 - A new `DisambiguationRule` type is added (document it in §7)
-- The stubs are replaced (update §10 to reflect the real implementation)
+- The stubs are replaced (update §11 to reflect the real implementation)
 - A new auth level or token type is shipped (update the tables in §1 and §5/§6)
+- New risk policy behaviour is added (update §10)

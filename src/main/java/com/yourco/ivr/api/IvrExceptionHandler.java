@@ -2,6 +2,7 @@ package com.yourco.ivr.api;
 
 import com.yourco.ivr.api.dto.ErrorResponse;
 import com.yourco.ivr.exception.BrandConfigException;
+import com.yourco.ivr.exception.HighRiskCallerException;
 import com.yourco.ivr.exception.SessionConflictException;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
@@ -58,6 +59,13 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleUnknownCaller(UnknownCallerException e) {
         return ResponseEntity.status(400)
             .body(new ErrorResponse("UNKNOWN_CALLER", e.getMessage()));
+    }
+
+    @ExceptionHandler(HighRiskCallerException.class)
+    public ResponseEntity<ErrorResponse> handleHighRisk(HighRiskCallerException e) {
+        log.warn("High-risk caller rejected [{}]: {}", e.getRiskLevel(), e.getMessage());
+        return ResponseEntity.status(403)
+            .body(new ErrorResponse("HIGH_RISK_CALLER", e.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

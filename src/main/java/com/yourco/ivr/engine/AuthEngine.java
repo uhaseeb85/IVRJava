@@ -17,6 +17,8 @@ import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.repository.SessionRepository;
+import com.yourco.ivr.domain.CustomerPreference;
+import com.yourco.ivr.domain.config.RiskPolicy;
 import com.yourco.ivr.validator.TokenValidationContext;
 import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.TokenValidatorRegistry;
@@ -27,6 +29,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -107,6 +110,10 @@ public class AuthEngine {
                 log.info("AUTH [{}] brand={} caller={} disambiguation resolved party={}",
                     sessionId, session.getBrandId(), session.getCallerId(),
                     session.getMatchedParty() != null ? session.getMatchedParty().getPartyId() : "null");
+                // DisambiguationEngine.resolveParty() sets customer preferences but has no
+                // knowledge of risk policy — apply risk-blocked token merge here.
+                applyRiskBlockedTokens(session, config);
+                sessionRepo.save(session);
                 return evaluateProgress(session, config);
             }
             return disResp;
@@ -364,7 +371,28 @@ public class AuthEngine {
             .currentLevel(session.getCurrentLevel())
             .targetLevel(session.getTargetLevel())
             .matchedPartyId(session.getMatchedParty() != null
-                ? session.getMatchedParty().getPartyId() : null);
+                ? session.getMatchedParty().getPartyId() : null)
+            .riskLevel(session.getRiskAssessment() != null
+                ? session.getRiskAssessment().getLevel() : null);
+    }
+
+    /**
+     * Merges risk-policy blocked tokens into the session's customer preferences.
+     * Called after disambiguation resolves, because {@code DisambiguationEngine}
+     * sets preferences without risk-policy context.
+     */
+    private void applyRiskBlockedTokens(IvrSession session, BrandAuthConfig config) {
+        if (session.getRiskAssessment() == null || config.getRiskPolicies() == null) return;
+        RiskPolicy policy = config.getRiskPolicies().get(session.getRiskAssessment().getLevel());
+        if (policy == null || policy.getBlockedTokens() == null || policy.getBlockedTokens().isEmpty()) return;
+
+        CustomerPreference prefs = session.getCustomerPreferences();
+        if (prefs == null) prefs = new CustomerPreference();
+        Set<TokenType> merged = new HashSet<>();
+        if (prefs.getBlockedTokens() != null) merged.addAll(prefs.getBlockedTokens());
+        merged.addAll(policy.getBlockedTokens());
+        prefs.setBlockedTokens(merged);
+        session.setCustomerPreferences(prefs);
     }
 
     /**

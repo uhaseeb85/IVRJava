@@ -7,6 +7,7 @@ import com.yourco.ivr.domain.CrossBrandTokenRecord;
 import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.Party;
+import com.yourco.ivr.domain.RiskAssessment;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
@@ -67,8 +68,9 @@ public class SqliteSessionRepository implements SessionRepository {
             "(session_id, brand_id, caller_id, current_level, target_level, status, " +
             "phase, collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
             "cross_brand_tokens, candidate_parties, matched_party, customer_preferences, " +
-            "disambiguation_attempt, version, transferred_from, locked_until, created_at, last_activity_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "disambiguation_attempt, version, transferred_from, locked_until, created_at, " +
+            "last_activity_at, risk_assessment) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         jdbc.update(sql,
             session.getSessionId(),
             session.getBrandId(),
@@ -90,7 +92,8 @@ public class SqliteSessionRepository implements SessionRepository {
             session.getTransferredFrom(),
             toIso(session.getLockedUntil()),
             toIso(session.getCreatedAt()),
-            toIso(session.getLastActivityAt())
+            toIso(session.getLastActivityAt()),
+            toJson(session.getRiskAssessment())
         );
     }
 
@@ -103,7 +106,8 @@ public class SqliteSessionRepository implements SessionRepository {
             "phase = ?, collected_tokens = ?, validated_tokens = ?, attempt_counts = ?, " +
             "active_path_index = ?, cross_brand_tokens = ?, candidate_parties = ?, " +
             "matched_party = ?, customer_preferences = ?, disambiguation_attempt = ?, " +
-            "version = ?, transferred_from = ?, locked_until = ?, last_activity_at = ? " +
+            "version = ?, transferred_from = ?, locked_until = ?, last_activity_at = ?, " +
+            "risk_assessment = ? " +
             "WHERE session_id = ? AND version = ?";
         int rows = jdbc.update(sql,
             session.getBrandId(),
@@ -125,6 +129,7 @@ public class SqliteSessionRepository implements SessionRepository {
             session.getTransferredFrom(),
             toIso(session.getLockedUntil()),
             toIso(session.getLastActivityAt()),
+            toJson(session.getRiskAssessment()),
             session.getSessionId(),
             expectedVersion
         );
@@ -186,6 +191,7 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setLockedUntil(fromIso(rs.getString("locked_until")));
         s.setCreatedAt(fromIso(rs.getString("created_at")));
         s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));
+        s.setRiskAssessment(fromJsonSingle(rs.getString("risk_assessment"), RiskAssessment.class));
         return s;
     }
 
