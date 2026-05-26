@@ -77,7 +77,7 @@ public class SqliteSessionRepository implements SessionRepository {
             session.getTargetLevel().name(),
             session.getStatus().name(),
             session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name(),
-            toJson(session.getCollectedTokens()),
+            null,  // collected_tokens: never persisted — values are sensitive (PINs, SSNs)
             toJson(session.getValidatedTokens()),
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),
@@ -112,7 +112,7 @@ public class SqliteSessionRepository implements SessionRepository {
             session.getTargetLevel().name(),
             session.getStatus().name(),
             session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name(),
-            toJson(session.getCollectedTokens()),
+            null,  // collected_tokens: never persisted — values are sensitive (PINs, SSNs)
             toJson(session.getValidatedTokens()),
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),

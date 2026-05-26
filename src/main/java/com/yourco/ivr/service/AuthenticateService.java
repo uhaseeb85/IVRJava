@@ -94,7 +94,8 @@ public class AuthenticateService {
             for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
                 AuthenticateResponse tokenResponse = engine.submitToken(
                     session.getSessionId(), entry.getKey(), entry.getValue());
-                if (tokenResponse.getStatus() == SessionStatus.FAILED) {
+                if (tokenResponse.getStatus() == SessionStatus.FAILED
+                        || tokenResponse.getStatus() == SessionStatus.LOCKED) {
                     return tokenResponse;
                 }
             }
@@ -103,7 +104,6 @@ public class AuthenticateService {
             return engine.evaluateProgress(updatedSession, config);
         }
 
-        // Evaluate immediately — cross-brand tokens may already satisfy some levels
         return engine.evaluateProgress(session, config);
     }
 
