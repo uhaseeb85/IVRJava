@@ -51,8 +51,9 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 
 - [JDK 8](https://adoptium.net/temurin/releases/?version=8) (Java 1.8)
 - [Maven 3.6+](https://maven.apache.org/download.cgi)
+- [Node.js 18+](https://nodejs.org/) (for frontend dev only)
 
-### Run the service
+### Start the backend
 
 ```bash
 git clone <repo-url> ivr-auth-engine
@@ -62,17 +63,27 @@ mvn spring-boot:run
 
 The service starts on **`http://localhost:8081`**.
 
-### Open Swagger UI
+### Start the frontend (dev mode)
 
-```
-http://localhost:8081/swagger-ui.html
+In a separate terminal:
+
+```bash
+cd src/main/ui
+npm install       # first time only
+npm run dev       # Vite dev server on :5173, proxies /api/* and /ivr/* to :8081
 ```
 
-### Open Brand Config Editor
+Open **`http://localhost:5173`** for hot-reload development.  
+To build the static files served by Spring Boot: `npm run build`
 
-```
-http://localhost:8081/
-```
+### Key URLs
+
+| URL | Purpose |
+|---|---|
+| `http://localhost:8081/` | Brand Config Editor (production build) |
+| `http://localhost:5173/` | Frontend dev server (hot reload) |
+| `http://localhost:8081/swagger-ui.html` | Interactive API docs |
+| `http://localhost:8081/v3/api-docs` | Raw OpenAPI JSON |
 
 ---
 
@@ -387,19 +398,6 @@ src/test/java/com/yourco/ivr/
 mvn test
 ```
 
-### UI Development
-
-The brand config editor is a standalone Vite + React + TypeScript + Tailwind CSS project at `src/main/ui/`.
-
-```bash
-cd src/main/ui
-npm install
-npm run dev          # starts Vite dev server on :5173, proxies API to :8081
-npm run build        # builds static files into src/main/resources/static/
-```
-
-The dev server proxies `/api/*` and `/ivr/*` to `http://localhost:8081`. Run `mvn spring-boot:run` in a separate terminal first.
-
 ---
 
 ## 🛠 Tech Stack
@@ -420,9 +418,10 @@ The dev server proxies `/api/*` and `/ivr/*` to `http://localhost:8081`. Run `mv
 ## 🔒 Security Considerations
 
 - **Never log raw token values** — log only `tokenType` and validation outcome
-- Token values in `collectedTokens` should be encrypted at rest (see Phase 6 in the technical spec)
+- Raw token values (PINs, SSNs, account numbers) are never persisted to the database — the `collected_tokens` column is always null; values exist in memory only for the duration of a single request
 - Session IDs are UUIDs — no sequential enumeration possible
-- Token values are stored in `collectedTokens` map and submitted via API — use HTTPS in production
+- Lockout is enforced server-side and cannot be bypassed
+- Use HTTPS in production — token values are submitted via API
 
 ---
 
@@ -432,38 +431,6 @@ The dev server proxies `/api/*` and `/ivr/*` to `http://localhost:8081`. Run `mv
 - **[GitHub Guide](.github/github-instructions.md)** — Contribution workflow, branching strategy, and PR checklist
 - **[Swagger UI](http://localhost:8081/swagger-ui.html)** — Interactive API documentation (run the service first)
 - **[Brand Config Editor](http://localhost:8081/)** — Web UI for managing brand configurations
-
----
-
-## 🤝 Contributing
-
-See the [GitHub Guide](.github/github-instructions.md) for:
-- Branch strategy and PR checklist
-- Coding conventions
-- **Critical: Keeping the Technical Spec updated** with every code change
-
----
-
-## 📄 License
-
-Proprietary — Internal Use
-
----
-
-## 🔒 Security Considerations
-
-- **Never log raw token values** — log only `tokenType` and validation outcome
-- Token values in `collectedTokens` should be encrypted at rest (see Phase 6 in the technical spec)
-- Session IDs are UUIDs — no sequential enumeration possible
-- Lockout is enforced server-side and cannot be bypassed
-
----
-
-## 📚 Documentation
-
-- **[Technical Spec](IVR_Auth_Engine_Technical_Spec.md)** — Full system design document (must stay in sync with code changes)
-- **[GitHub Guide](.github/github-instructions.md)** — Contribution workflow, branching strategy, and PR checklist
-- **[Swagger UI](http://localhost:8081/swagger-ui.html)** — Interactive API documentation (run the service first)
 
 ---
 
