@@ -14,8 +14,7 @@ public class BrandAuthConfig {
 
     /**
      * Optional per-risk-level policies. Keyed by {@link RiskLevel}.
-     * When a caller's risk matches a key, the corresponding {@link RiskPolicy}
-     * is applied before any authentication steps begin.
+     * Applied after the combination strategy has produced a single final level.
      *
      * <pre>
      * "riskPolicies": {
@@ -25,6 +24,22 @@ public class BrandAuthConfig {
      * </pre>
      */
     private Map<RiskLevel, RiskPolicy> riskPolicies;
+
+    /**
+     * Declares how multiple risk signals are combined into a single final
+     * {@link RiskLevel} before {@link #riskPolicies} is consulted.
+     * Omit this block to use the default MAX strategy (highest signal wins).
+     *
+     * <pre>
+     * "riskCombination": {
+     *   "strategy": "MATRIX",
+     *   "matrixRules": [
+     *     { "conditions": { "PHONE": "HIGH", "DEVICE": "HIGH" }, "result": "CRITICAL" }
+     *   ]
+     * }
+     * </pre>
+     */
+    private RiskCombinationConfig riskCombination;
 
     public DisambiguationConfig getDisambiguation() {
         if (disambiguation == null) {

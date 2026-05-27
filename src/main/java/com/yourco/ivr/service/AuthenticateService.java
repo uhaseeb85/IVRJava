@@ -13,7 +13,8 @@ import com.yourco.ivr.exception.HighRiskCallerException;
 import com.yourco.ivr.exception.TransferNotAllowedException;
 import com.yourco.ivr.exception.UnknownCallerException;
 import com.yourco.ivr.partylookup.PartyLookupProvider;
-import com.yourco.ivr.partyrisk.PhoneRiskProvider;
+import com.yourco.ivr.domain.CompositeRiskAssessment;
+import com.yourco.ivr.partyrisk.RiskSignalRegistry;
 import com.yourco.ivr.preference.CustomerPreferenceProvider;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.registry.TransferPoliciesRegistry;
@@ -38,7 +39,7 @@ public class AuthenticateService {
     private final PartyLookupProvider partyLookup;
     private final CustomerPreferenceProvider preferenceProvider;
     private final DisambiguationEngine disambiguationEngine;
-    private final PhoneRiskProvider riskProvider;
+    private final RiskSignalRegistry signalRegistry;
 
     public AuthenticateService(AuthEngine engine, SessionRepository sessionRepo,
                                BrandRulesRegistry rulesRegistry,
@@ -46,7 +47,7 @@ public class AuthenticateService {
                                PartyLookupProvider partyLookup,
                                CustomerPreferenceProvider preferenceProvider,
                                DisambiguationEngine disambiguationEngine,
-                               PhoneRiskProvider riskProvider) {
+                               RiskSignalRegistry signalRegistry) {
         this.engine = engine;
         this.sessionRepo = sessionRepo;
         this.rulesRegistry = rulesRegistry;
@@ -54,16 +55,17 @@ public class AuthenticateService {
         this.partyLookup = partyLookup;
         this.preferenceProvider = preferenceProvider;
         this.disambiguationEngine = disambiguationEngine;
-        this.riskProvider = riskProvider;
+        this.signalRegistry = signalRegistry;
     }
 
     public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
 
         // ── Risk assessment ──────────────────────────────────────────────────
-        // Assess caller risk before creating a session so CRITICAL callers are
-        // rejected without any session state being written to the DB.
-        RiskAssessment risk = riskProvider.assess(req.getCallerId(), req.getBrandId());
+        // All registered RiskSignalProviders are called and combined before any
+        // session state is written, so CRITICAL callers are rejected with no DB writes.
+        CompositeRiskAssessment risk = signalRegistry.evaluate(
+            req.getCallerId(), req.getBrandId(), config.getRiskCombination());
         RiskPolicy riskPolicy = (config.getRiskPolicies() != null)
             ? config.getRiskPolicies().get(risk.getLevel()) : null;
 
@@ -150,8 +152,9 @@ public class AuthenticateService {
         // 2. Get target brand config
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
 
-        // 3. Risk assessment — apply same gate as session start
-        RiskAssessment risk = riskProvider.assess(req.getCallerId(), req.getBrandId());
+        // 3. Risk assessment — same composite evaluation as session start
+        CompositeRiskAssessment risk = signalRegistry.evaluate(
+            req.getCallerId(), req.getBrandId(), config.getRiskCombination());
         RiskPolicy riskPolicy = (config.getRiskPolicies() != null)
             ? config.getRiskPolicies().get(risk.getLevel()) : null;
         if (riskPolicy != null && riskPolicy.isReject()) {

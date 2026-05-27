@@ -55,6 +55,8 @@ class PhoneRiskTest {
 
     @BeforeEach
     void defaultToLow() {
+        // providerId() must be stubbed — Mockito does not call default interface methods
+        when(riskProvider.providerId()).thenReturn("PHONE");
         // safe default — individual tests override as needed
         when(riskProvider.assess(anyString(), anyString())).thenReturn(assessment(RiskLevel.LOW));
     }

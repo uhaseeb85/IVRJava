@@ -7,6 +7,7 @@ import com.yourco.ivr.domain.CrossBrandTokenRecord;
 import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.Party;
+import com.yourco.ivr.domain.CompositeRiskAssessment;
 import com.yourco.ivr.domain.RiskAssessment;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
@@ -191,7 +192,10 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setLockedUntil(fromIso(rs.getString("locked_until")));
         s.setCreatedAt(fromIso(rs.getString("created_at")));
         s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));
-        s.setRiskAssessment(fromJsonSingle(rs.getString("risk_assessment"), RiskAssessment.class));
+        // Deserialize as CompositeRiskAssessment to preserve per-provider signals.
+        // Sessions written before this change have a plain RiskAssessment JSON —
+        // Jackson will read them gracefully with signals=null.
+        s.setRiskAssessment(fromJsonSingle(rs.getString("risk_assessment"), CompositeRiskAssessment.class));
         return s;
     }
 

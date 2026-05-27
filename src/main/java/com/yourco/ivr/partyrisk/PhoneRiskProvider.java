@@ -13,7 +13,10 @@ import com.yourco.ivr.domain.RiskAssessment;
  * {@link com.yourco.ivr.service.AuthenticateService} to enforce the brand's
  * {@code riskPolicies} before any authentication steps begin.</p>
  */
-public interface PhoneRiskProvider {
+public interface PhoneRiskProvider extends RiskSignalProvider {
+
+    /** Signal ID used in {@code matrixRules} and the response's {@code riskSignals} map. */
+    default String providerId() { return "PHONE"; }
 
     /**
      * Assess the risk of the calling phone number.

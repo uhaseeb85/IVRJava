@@ -3,22 +3,23 @@ package com.yourco.ivr.engine;
 import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.api.dto.ProcessingEvent;
 import com.yourco.ivr.domain.AuthLevel;
+import com.yourco.ivr.domain.CompositeRiskAssessment;
+import com.yourco.ivr.domain.CrossBrandTokenRecord;
+import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.RiskAssessment;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
-import com.yourco.ivr.domain.CrossBrandTokenRecord;
-import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
+import com.yourco.ivr.domain.config.RiskPolicy;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.repository.SessionRepository;
-import com.yourco.ivr.domain.CustomerPreference;
-import com.yourco.ivr.domain.config.RiskPolicy;
 import com.yourco.ivr.validator.TokenValidationContext;
 import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.TokenValidatorRegistry;
@@ -365,6 +366,7 @@ public class AuthEngine {
     // ── Private helpers ──────────────────────────────────────────────────────
 
     private AuthenticateResponse.AuthenticateResponseBuilder baseResponse(IvrSession session) {
+        RiskAssessment risk = session.getRiskAssessment();
         return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
             .phase(session.getPhase())
@@ -372,8 +374,9 @@ public class AuthEngine {
             .targetLevel(session.getTargetLevel())
             .matchedPartyId(session.getMatchedParty() != null
                 ? session.getMatchedParty().getPartyId() : null)
-            .riskLevel(session.getRiskAssessment() != null
-                ? session.getRiskAssessment().getLevel() : null);
+            .riskLevel(risk != null ? risk.getLevel() : null)
+            .riskSignals(risk instanceof CompositeRiskAssessment
+                ? ((CompositeRiskAssessment) risk).getSignals() : null);
     }
 
     /**

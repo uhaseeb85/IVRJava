@@ -1,7 +1,9 @@
 package com.yourco.ivr.api.dto;
 
 import com.yourco.ivr.domain.AuthLevel;
+import com.yourco.ivr.domain.CompositeRiskAssessment;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.RiskAssessment;
 import com.yourco.ivr.domain.RiskLevel;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
@@ -14,6 +16,7 @@ import lombok.NoArgsConstructor;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 @Data
 @Builder
@@ -58,12 +61,21 @@ public class AuthenticateResponse {
         + "Null if risk assessment was not performed for this session.")
     private RiskLevel riskLevel;
 
+    @Schema(description = "Per-provider risk signal breakdown, e.g. {\"PHONE\": \"HIGH\", \"DEVICE\": \"MEDIUM\"}. "
+        + "Null when only a single provider is registered or the session predates composite risk.")
+    private Map<String, RiskLevel> riskSignals;
+
     @Schema(description = "Step-by-step processing log (only present on token-submission requests). "
         + "Shows validation outcome, backup resolution, attempt counts, and path transitions. "
         + "Token values are never included.")
     private List<ProcessingEvent> processingLog;
 
     public static AuthenticateResponse fromSession(IvrSession session) {
+        RiskAssessment risk = session.getRiskAssessment();
+        Map<String, RiskLevel> signals = null;
+        if (risk instanceof CompositeRiskAssessment) {
+            signals = ((CompositeRiskAssessment) risk).getSignals();
+        }
         return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
             .status(session.getStatus())
@@ -72,8 +84,8 @@ public class AuthenticateResponse {
             .targetLevel(session.getTargetLevel())
             .matchedPartyId(session.getMatchedParty() != null
                 ? session.getMatchedParty().getPartyId() : null)
-            .riskLevel(session.getRiskAssessment() != null
-                ? session.getRiskAssessment().getLevel() : null)
+            .riskLevel(risk != null ? risk.getLevel() : null)
+            .riskSignals(signals)
             .build();
     }
 }
