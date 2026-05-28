@@ -35,6 +35,3 @@ ALTER TABLE ivr_session ADD COLUMN matched_party TEXT;
 ALTER TABLE ivr_session ADD COLUMN customer_preferences TEXT;
 ALTER TABLE ivr_session ADD COLUMN disambiguation_attempt INTEGER DEFAULT 0;
 ALTER TABLE ivr_session ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
-
--- Migration: add risk_assessment for phone risk level integration
-ALTER TABLE ivr_session ADD COLUMN risk_assessment TEXT;
