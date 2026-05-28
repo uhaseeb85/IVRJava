@@ -6,7 +6,11 @@
       "Bash(Select-Object FullName)",
       "Bash(cd /mnt/c/Users/uhase/IVRJava/src/main/ui && npm run build 2>&1)",
       "Bash(mvn clean *)",
-      "Bash(mvn test *)"
+      "Bash(mvn test *)",
+      "Bash(git push *)",
+      "Bash(gh pr *)",
+      "PowerShell(Get-Command gh -ErrorAction SilentlyContinue; where.exe gh 2>$null; \\(Get-Command git\\).Source)",
+      "PowerShell($env:GITHUB_TOKEN; [System.Environment]::GetEnvironmentVariable\\(\"GITHUB_TOKEN\", \"User\"\\); git config --get credential.helper 2>$null)"
     ]
   }
 }

@@ -59,6 +59,10 @@ public class AuthenticateController {
                     req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId())
             );
         }
+        if (req.getTargetLevel() == null) {
+            throw new IllegalArgumentException(
+                "Escalate action requires targetLevel when sessionId is present and tokenType is absent");
+        }
         return ResponseEntity.ok(
             authenticateService.escalate(req.getSessionId(), req.getTargetLevel())
         );

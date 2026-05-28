@@ -33,7 +33,6 @@ public class AuthenticateService {
     private final PartyLookupProvider partyLookup;
     private final CustomerPreferenceProvider preferenceProvider;
     private final DisambiguationEngine disambiguationEngine;
-
     public AuthenticateService(AuthEngine engine, SessionRepository sessionRepo,
                                BrandRulesRegistry rulesRegistry,
                                TransferPoliciesRegistry transferRegistry,
@@ -52,6 +51,7 @@ public class AuthenticateService {
     public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
 
+        // ── Session creation ─────────────────────────────────────────────────
         IvrSession session = new IvrSession();
         session.setSessionId(UUID.randomUUID().toString());
         session.setBrandId(req.getBrandId());
@@ -62,7 +62,7 @@ public class AuthenticateService {
         session.setCreatedAt(Instant.now());
         session.setLastActivityAt(Instant.now());
 
-        // Party lookup and disambiguation (always-on)
+        // ── Party lookup and disambiguation (always-on) ──────────────────────
         List<Party> parties = partyLookup.lookupByAni(req.getCallerId());
 
         if (parties.isEmpty()) {
@@ -83,6 +83,7 @@ public class AuthenticateService {
             return disResp;
         }
 
+        // Single party — load preferences
         CustomerPreference prefs = preferenceProvider.getPreferences(
             parties.get(0).getPartyId(), session.getBrandId());
         session.setMatchedParty(parties.get(0));
@@ -94,16 +95,15 @@ public class AuthenticateService {
             for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
                 AuthenticateResponse tokenResponse = engine.submitToken(
                     session.getSessionId(), entry.getKey(), entry.getValue());
-                if (tokenResponse.getStatus() == SessionStatus.FAILED) {
+                if (tokenResponse.getStatus() == SessionStatus.FAILED
+                        || tokenResponse.getStatus() == SessionStatus.LOCKED) {
                     return tokenResponse;
                 }
             }
-            // Re-fetch session after token processing and re-evaluate
             IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
             return engine.evaluateProgress(updatedSession, config);
         }
 
-        // Evaluate immediately — cross-brand tokens may already satisfy some levels
         return engine.evaluateProgress(session, config);
     }
 
@@ -151,7 +151,7 @@ public class AuthenticateService {
         session.setLastActivityAt(Instant.now());
 
         // 6. Hand off to engine to populate tokens and evaluate
-        return engine.transferSession(session, config, honoredTokens, req.getSourceSystemId());
+        return engine.transferSession(session, config, honoredTokens);
     }
 
     public AuthenticateResponse submitToken(String sessionId, TokenType tokenType, String tokenValue) {

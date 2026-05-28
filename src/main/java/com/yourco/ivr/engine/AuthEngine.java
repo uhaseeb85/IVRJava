@@ -7,8 +7,6 @@ import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
-import com.yourco.ivr.domain.CrossBrandTokenRecord;
-import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
@@ -20,13 +18,13 @@ import com.yourco.ivr.repository.SessionRepository;
 import com.yourco.ivr.validator.TokenValidationContext;
 import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.TokenValidatorRegistry;
+import com.yourco.ivr.validator.ValidationResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -39,20 +37,17 @@ public class AuthEngine {
     private final BrandRulesRegistry rulesRegistry;
     private final TokenValidatorRegistry validatorRegistry;
     private final SessionRepository sessionRepo;
-    private final CrossBrandTokenEvaluator crossBrandEvaluator;
     private final PromptResolver promptResolver;
     private final DisambiguationEngine disambiguationEngine;
 
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       TokenValidatorRegistry validatorRegistry,
                       SessionRepository sessionRepo,
-                      CrossBrandTokenEvaluator crossBrandEvaluator,
                       PromptResolver promptResolver,
                       DisambiguationEngine disambiguationEngine) {
         this.rulesRegistry = rulesRegistry;
         this.validatorRegistry = validatorRegistry;
         this.sessionRepo = sessionRepo;
-        this.crossBrandEvaluator = crossBrandEvaluator;
         this.promptResolver = promptResolver;
         this.disambiguationEngine = disambiguationEngine;
     }
@@ -134,57 +129,42 @@ public class AuthEngine {
         addEntry(procLog, "INFO",
             "Validated tokens: " + (validatedSoFar.isEmpty() ? "[none]" : validatedSoFar));
 
-        // Find the current required slot and its accepted alternatives
-        if (activePathCtx != null) {
-            TokenType currentSlot = null;
-            for (TokenType req : activePathCtx.getRequiredTokens()) {
-                if (!validatedSoFar.contains(req)) {
-                    currentSlot = req;
-                    break;
-                }
-            }
-            if (currentSlot != null) {
-                List<TokenType> acceptedForSlot = buildAcceptedTokens(session, activePathCtx, currentSlot, currentSlot);
-                addEntry(procLog, "INFO",
-                    "Collecting: " + currentSlot + " | Accepted alternatives: " + acceptedForSlot);
-            }
+        // Compute next required once — used for both the log entry and the wrong-type guard below
+        TokenType nextRequired = activePathCtx != null
+            ? findNextRequired(validatedSoFar, activePathCtx) : null;
+        if (nextRequired != null) {
+            List<TokenType> acceptedForSlot = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
+            addEntry(procLog, "INFO",
+                "Collecting: " + nextRequired + " | Accepted alternatives: " + acceptedForSlot);
         }
 
         // ── Store collected token (value never logged) ──────────────────────
         session.getCollectedTokens().put(tokenType, tokenValue);
 
         // Guard: reject token types not accepted at the current step.
-        // An off-path submission (e.g. OTP when PIN/SSN_LAST4 are expected) counts as a
-        // failure against the required slot so the retry counter always decrements.
-        if (activePathCtx != null) {
-            TokenType nextRequired = null;
-            for (TokenType req : activePathCtx.getRequiredTokens()) {
-                if (!validatedSoFar.contains(req)) {
-                    nextRequired = req;
-                    break;
-                }
-            }
-            if (nextRequired != null) {
-                List<TokenType> acceptedNow = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
-                if (!acceptedNow.contains(tokenType)) {
-                    addEntry(procLog, "WARN",
-                        "WRONG_TYPE: submitted " + tokenType + " but expected one of " + acceptedNow);
-                    // Wrong-type submissions count against the required slot's retry budget but
-                    // do NOT trigger a path switch — path switching is reserved for genuine
-                    // validation failures (correct type, wrong value).  If the caller exhausts
-                    // retries on wrong-type submissions, the session is locked immediately.
-                    AuthenticateResponse wrongTypeResp = handleFailure(session, config, nextRequired, procLog, false);
-                    wrongTypeResp.setProcessingLog(procLog);
-                    return wrongTypeResp;
-                }
+        // Wrong-type submissions decrement the required slot's retry budget but do NOT
+        // trigger a path switch — path switching is reserved for genuine validation failures
+        // (correct type, wrong value). Exhausting retries on wrong-type locks the session.
+        if (nextRequired != null) {
+            List<TokenType> acceptedNow = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
+            if (!acceptedNow.contains(tokenType)) {
+                addEntry(procLog, "WARN",
+                    "WRONG_TYPE: submitted " + tokenType + " but expected one of " + acceptedNow);
+                AuthenticateResponse wrongTypeResp = handleFailure(session, config, nextRequired, procLog, false);
+                wrongTypeResp.setProcessingLog(procLog);
+                return wrongTypeResp;
             }
         }
 
         // 1. Validate externally
-        boolean valid = validateExternally(session, tokenType, tokenValue);
+        ValidationResult validationResult = validateExternally(session, tokenType, tokenValue);
+        boolean valid = validationResult.isValid();
+        String validationDetail = valid ? "PASS"
+            : (validationResult.getErrorCode() != null
+                ? validationResult.getErrorCode().name() : "FAIL");
 
         addEntry(procLog, valid ? "PASS" : "FAIL",
-            "External validation: " + tokenType + " → " + (valid ? "PASS" : "FAIL"));
+            "External validation: " + tokenType + " → " + validationDetail);
 
         log.info("AUTH [{}] brand={} caller={} token={} result={}",
             sessionId, session.getBrandId(), session.getCallerId(), tokenType,
@@ -214,7 +194,6 @@ public class AuthEngine {
         if (resolvedToken != tokenType) {
             session.getAttemptCounts().remove(resolvedToken);
         }
-        crossBrandEvaluator.recordValidated(session, tokenType);
 
         addEntry(procLog, "INFO",
             "Validated tokens now: " + session.getValidatedTokens());
@@ -243,14 +222,9 @@ public class AuthEngine {
      */
     public AuthenticateResponse transferSession(IvrSession session,
                                            BrandAuthConfig config,
-                                           List<TokenType> validatedTokens,
-                                           String sourceSystemId) {
-        Instant now = Instant.now();
-
+                                           List<TokenType> validatedTokens) {
         for (TokenType tokenType : validatedTokens) {
             session.getValidatedTokens().add(tokenType);
-            session.getCrossBrandTokens().put(tokenType,
-                new CrossBrandTokenRecord(sourceSystemId, now));
         }
 
         sessionRepo.save(session);
@@ -563,15 +537,13 @@ public class AuthEngine {
         procLog.add(ProcessingEvent.builder().level(level).message(message).build());
     }
 
-    private void pruneTokensNotInPath(IvrSession session, TokenPath newPath) {
-        Set<TokenType> keep = new HashSet<>(newPath.getRequiredTokens());
-        // Also keep any backup tokens that satisfy required tokens in the new path
-        if (newPath.getBackupTokens() != null) {
-            for (Map.Entry<TokenType, List<TokenType>> entry : newPath.getBackupTokens().entrySet()) {
-                keep.addAll(entry.getValue());
+    private static TokenType findNextRequired(Set<TokenType> validated, TokenPath path) {
+        for (TokenType req : path.getRequiredTokens()) {
+            if (!validated.contains(req)) {
+                return req;
             }
         }
-        session.getValidatedTokens().retainAll(keep);
+        return null;
     }
 
     /**
@@ -636,15 +608,15 @@ public class AuthEngine {
             .build();
     }
 
-    private boolean validateExternally(IvrSession session,
-                                        TokenType tokenType,
-                                        String tokenValue) {
+    private ValidationResult validateExternally(IvrSession session,
+                                               TokenType tokenType,
+                                               String tokenValue) {
         TokenValidator validator = validatorRegistry.resolve(session.getBrandId(), tokenType);
         TokenValidationContext ctx = new TokenValidationContext(
             tokenType, tokenValue, session.getCallerId(),
             session.getCollectedTokens(), session.getBrandId()
         );
-        return validator.validate(ctx).isValid();
+        return validator.validate(ctx);
     }
 
 }

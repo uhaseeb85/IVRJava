@@ -29,6 +29,10 @@ public class BrandRulesRegistry {
         return configs.containsKey(brandId);
     }
 
+    public void remove(String brandId) {
+        configs.remove(brandId);
+    }
+
     public void clear() {
         configs.clear();
     }

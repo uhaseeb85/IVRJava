@@ -36,20 +36,12 @@ public class BrandController {
     @PostMapping
     @Operation(summary = "Create a new brand config", description = "Creates a new brand configuration JSON file")
     public ResponseEntity<BrandAuthConfig> create(@RequestBody BrandAuthConfig config) {
-        ValidationResult validation = brandService.validate(config);
-        if (!validation.isValid()) {
-            return ResponseEntity.badRequest().body(null);
-        }
         return ResponseEntity.ok(brandService.save(config));
     }
 
     @PutMapping("/{brandId}")
     @Operation(summary = "Update a brand config", description = "Updates an existing brand configuration JSON file")
     public ResponseEntity<BrandAuthConfig> update(@PathVariable String brandId, @RequestBody BrandAuthConfig config) {
-        ValidationResult validation = brandService.validate(config);
-        if (!validation.isValid()) {
-            return ResponseEntity.badRequest().body(null);
-        }
         return ResponseEntity.ok(brandService.update(brandId, config));
     }
 

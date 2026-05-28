@@ -1,8 +1,11 @@
 package com.yourco.ivr.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.domain.config.LevelRule;
+import com.yourco.ivr.domain.config.TokenPath;
 import com.yourco.ivr.exception.BrandConfigException;
 import com.yourco.ivr.exception.UnknownBrandException;
 import com.yourco.ivr.registry.BrandRulesRegistry;
@@ -16,6 +19,7 @@ import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class BrandService {
@@ -78,11 +82,12 @@ public class BrandService {
     }
 
     public BrandAuthConfig save(BrandAuthConfig config) {
-        String brandId = config.getBrandId();
-        if (brandId == null || brandId.trim().isEmpty()) {
-            throw new IllegalArgumentException("Brand ID is required");
+        ValidationResult validation = validate(config);
+        if (!validation.isValid()) {
+            throw new IllegalArgumentException(validation.getMessage());
         }
 
+        String brandId = config.getBrandId();
         File file = getBrandFile(brandId);
         try {
             mapper.writerWithDefaultPrettyPrinter().writeValue(file, config);
@@ -109,7 +114,7 @@ public class BrandService {
             }
             log.info("Deleted brand config: {}", brandId);
         }
-        refreshRegistry();
+        registry.remove(brandId);
     }
 
     public ValidationResult validate(BrandAuthConfig config) {
@@ -118,6 +123,20 @@ public class BrandService {
         }
         if (config.getLevelRules() == null || config.getLevelRules().isEmpty()) {
             return ValidationResult.error("At least one level rule is required");
+        }
+        for (Map.Entry<AuthLevel, LevelRule> entry : config.getLevelRules().entrySet()) {
+            LevelRule rule = entry.getValue();
+            if (rule.getPaths() == null || rule.getPaths().isEmpty()) {
+                return ValidationResult.error(
+                    "Level " + entry.getKey() + " must have at least one token path");
+            }
+            for (int i = 0; i < rule.getPaths().size(); i++) {
+                TokenPath path = rule.getPaths().get(i);
+                if (path.getRequiredTokens() == null || path.getRequiredTokens().isEmpty()) {
+                    return ValidationResult.error(
+                        "Path " + i + " in level " + entry.getKey() + " must have required tokens");
+                }
+            }
         }
         return ValidationResult.ok();
     }
