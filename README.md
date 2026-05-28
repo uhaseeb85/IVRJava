@@ -16,7 +16,6 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Party Disambiguation** — When an ANI maps to multiple parties (customers), the engine applies configurable disambiguation rules and requests differentiating tokens to resolve to a single party
 - **Customer Preference Filtering** — Once a party is identified, customer-specific preferences (e.g., blocked token types) are loaded and used to filter which tokens are offered — blocked tokens are automatically skipped and backup alternatives or fallback paths are used instead
 - **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored
-- **Phone risk-aware routing** — At session start, an assessable `PhoneRiskProvider` SPI scores the caller's ANI; brand configs declare per-risk-level policies that can reject CRITICAL callers (HTTP 403), force a higher minimum target level, or block specific token types — all without any code change
 - **Optimistic locking** — Version-based concurrency control on session updates prevents lost writes under concurrent requests
 - **Structured audit logging** — Auth events (token pass/fail, escalation, lockout) logged by session with caller and brand context
 - **Initial tokens at session start** — Clients can submit pre-collected tokens when creating a session
@@ -38,7 +37,6 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 | Validator Registry | Spring Bean Discovery | Maps `TokenType` → `TokenValidator` implementations |
 | Session Store | SQLite + JdbcTemplate | Persists `IvrSession` with full token/level/party/preference state as JSON columns; optimistic locking via version column |
 | Party Lookup | Pluggable interface | Looks up parties by ANI; stub returns a single generic party |
-| Phone Risk Provider | Pluggable interface | Scores caller ANI at session start; stub returns LOW; real impl calls carrier/fraud APIs |
 | Disambiguation Engine | Plain Java | Applies rules, selects differentiating tokens, resolves to single party |
 | Customer Preference Provider | Pluggable interface | Loads customer preferences (blocked tokens, max level); stub returns empty |
 | Brand Config API | Spring MVC + File I/O | CRUD endpoints for managing brand JSON files |
@@ -263,38 +261,6 @@ The `DisambiguationConfig` is a Java class with defaults (`maxDisambiguationToke
 To integrate real backends, replace the stub implementations:
 - `PartyLookupProvider` → point to your CRM/account system API
 - `CustomerPreferenceProvider` → point to your customer preferences datastore
-- `PhoneRiskProvider` → implement and `@Component`-register to call your carrier fraud or phone-reputation API
-
-### Phone Risk Policies
-
-Each brand config can optionally include a `"riskPolicies"` block that maps a `RiskLevel` (`LOW`, `MEDIUM`, `HIGH`, `CRITICAL`) to a policy:
-
-```json
-{
-  "brandId": "BRAND_A",
-  "riskPolicies": {
-    "HIGH": {
-      "reject": false,
-      "minimumTargetLevel": "ELEVATED",
-      "blockedTokens": ["DATE_OF_BIRTH"]
-    },
-    "CRITICAL": {
-      "reject": true
-    }
-  },
-  "levelRules": { ... }
-}
-```
-
-**Policy fields:**
-
-| Field | Type | Behavior |
-|---|---|---|
-| `reject` | boolean | If `true`, returns **HTTP 403** (`HIGH_RISK_CALLER`) — no session is created |
-| `minimumTargetLevel` | `AuthLevel` | If the requested `targetLevel` is lower than this, the engine silently upgrades it |
-| `blockedTokens` | list of `TokenType` | Merged with customer preference blocked tokens; these token types are never offered or accepted |
-
-Risk levels with no entry in `riskPolicies` (or brands without the block) are treated as unrestricted. The `riskLevel` of the session is always returned in the response for the IVR platform to observe.
 
 ### Application Properties
 
@@ -355,21 +321,16 @@ src/main/java/com/yourco/ivr/
 │   ├── SessionStatus.java          # Session lifecycle states
 │   ├── Party.java                  # Customer party record
 │   ├── CustomerPreference.java     # Blocked tokens, max level caps
-│   ├── RiskLevel.java              # LOW / MEDIUM / HIGH / CRITICAL
-│   ├── RiskAssessment.java         # Risk level + flags (RECENTLY_PORTED, etc.)
 │   ├── ValidationResult.java       # Generic validation result
-│   ├── CrossBrandTokenRecord.java
 │   └── config/                     # Brand config model + transfer policy
 │       ├── BrandAuthConfig.java
 │       ├── DisambiguationConfig.java
 │       ├── LevelRule.java
-│       ├── RiskPolicy.java          # Per-risk-level gate (reject / minimumTargetLevel / blockedTokens)
 │       ├── TokenPath.java
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine/                 # Auth state machine
 │   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering + audit logging)
-│   ├── CrossBrandTokenEvaluator.java
 │   ├── DisambiguationEngine.java   # Party resolution + token matching
 │   ├── DisambiguationRule.java     # Rule interface
 │   ├── PromptResolver.java
@@ -379,9 +340,6 @@ src/main/java/com/yourco/ivr/
 ├── partylookup/            # ANI → Party resolution
 │   ├── PartyLookupProvider.java
 │   └── StubPartyLookupProvider.java
-├── partyrisk/              # Phone risk scoring
-│   ├── PhoneRiskProvider.java         # SPI interface — implement to call carrier/fraud APIs
-│   └── StubPhoneRiskProvider.java     # Returns LOW for all callers
 ├── preference/             # Customer preferences
 │   ├── CustomerPreferenceProvider.java
 │   └── StubCustomerPreferenceProvider.java
@@ -409,7 +367,6 @@ src/main/java/com/yourco/ivr/
 │   ├── UnknownBrandException.java
 │   ├── UnknownCallerException.java
 │   ├── BrandConfigException.java
-│   ├── HighRiskCallerException.java    # Thrown when riskPolicy.reject=true → HTTP 403
 │   └── UnsupportedTokenTypeException.java
 ├── IvrAuthEngineApplication.java
 └── OpenApiConfig.java
@@ -421,8 +378,7 @@ src/main/resources/
 
 config/brands/               # External brand config directory (loaded at startup)
 ├── brand_a.json              # BRAND_A — full example with 3 levels, backup tokens
-├── brand_b.json              # BRAND_B — simpler config with 2 levels
-└── risk_test_brand.json      # RISK_TEST_BRAND — demonstrates HIGH/CRITICAL riskPolicies
+└── brand_b.json              # BRAND_B — simpler config with 2 levels
 
 config/transfers/             # External transfer policy directory
 └── transfer-policies.json    # Per-source token/level policies
@@ -430,7 +386,6 @@ config/transfers/             # External transfer policy directory
 src/test/java/com/yourco/ivr/
 └── IvrAuthIntegrationTest.java           # 17 integration tests (auth, transfer, backup, fallback)
 └── DisambiguationAndPreferenceTest.java   # 12 integration tests (disambiguation + preferences, uses MockBean)
-└── PhoneRiskTest.java                     # 5 integration tests (CRITICAL rejection, HIGH upgrade, blocked tokens, LOW normal flow)
 ```
 
 ---
@@ -464,7 +419,6 @@ mvn test
 - Raw token values (PINs, SSNs, account numbers) are never persisted to the database — the `collected_tokens` column is always null; values exist in memory only for the duration of a single request
 - Session IDs are UUIDs — no sequential enumeration possible
 - Lockout is enforced server-side and cannot be bypassed
-- **CRITICAL-risk callers are rejected before any session state is written** — the database is never touched for callers flagged at the highest risk tier
 - Use HTTPS in production — token values are submitted via API
 
 ---

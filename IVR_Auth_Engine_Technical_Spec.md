@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 1.6 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 1.5 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -11,18 +11,16 @@
 3. [Brand Configuration (JSON)](#3-brand-configuration-json)
 4. [Auth Engine — Core Logic](#4-auth-engine--core-logic)
 5. [Token Validator Layer](#5-token-validator-layer)
-6. [Token Provenance Tracking](#6-token-provenance-tracking)
-7. [Call Transfer](#7-call-transfer)
-8. [REST API Specification](#8-rest-api-specification)
-9. [Session Service](#9-session-service)
-10. [Session Storage (SQLite)](#10-session-storage-sqlite)
-11. [Key Sequence Flows](#11-key-sequence-flows)
-12. [Exception Handling](#12-exception-handling)
-13. [Package Structure](#13-package-structure)
-14. [Party Disambiguation](#14-party-disambiguation)
-15. [Customer Preferences](#15-customer-preferences)
-16. [Phone Risk Integration](#16-phone-risk-integration)
-17. [Implementation Checklist](#17-implementation-checklist)
+6. [Call Transfer](#6-call-transfer)
+7. [REST API Specification](#7-rest-api-specification)
+8. [Session Service](#8-session-service)
+9. [Session Storage (SQLite)](#9-session-storage-sqlite)
+10. [Key Sequence Flows](#10-key-sequence-flows)
+11. [Exception Handling](#11-exception-handling)
+12. [Package Structure](#12-package-structure)
+13. [Party Disambiguation](#13-party-disambiguation)
+14. [Customer Preferences](#14-customer-preferences)
+15. [Implementation Checklist](#15-implementation-checklist)
 
 ---
 
@@ -73,15 +71,6 @@ public enum AuthLevel {
     public boolean isHigherThan(AuthLevel other) { return this.rank > other.rank; }
 }
 
-// RiskLevel.java  — caller risk tier assessed by PhoneRiskProvider
-public enum RiskLevel { LOW, MEDIUM, HIGH, CRITICAL }
-
-// RiskAssessment.java  — result produced by PhoneRiskProvider at session start
-@Data
-public class RiskAssessment {
-    private RiskLevel level;
-    private List<String> flags;   // e.g. "RECENTLY_PORTED", "SPOOFED_ANI"
-}
 ```
 
 ### 2.2 Brand Configuration Model
@@ -92,15 +81,7 @@ public class RiskAssessment {
 public class BrandAuthConfig {
     private String brandId;                           // e.g. "BRAND_A"
     private Map<AuthLevel, LevelRule> levelRules;     // one rule per level
-    private Map<RiskLevel, RiskPolicy> riskPolicies;  // optional; omit for unrestricted
-}
-
-// RiskPolicy.java  — action to take when caller's risk level matches
-@Data
-public class RiskPolicy {
-    private boolean reject;                 // true → HTTP 403, no session created
-    private AuthLevel minimumTargetLevel;   // upgrade targetLevel if below this
-    private List<TokenType> blockedTokens;  // merged with CustomerPreference.blockedTokens
+    private DisambiguationConfig disambiguation;      // optional; defaults apply if absent
 }
 
 // LevelRule.java
@@ -152,9 +133,6 @@ public class IvrSession {
     // Active path index per level (allows independent path tracking)
     private Map<AuthLevel, Integer> activePathIndexByLevel;
 
-    // Cross-brand token provenance: token → (brandId, validatedAt timestamp)
-    private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
-
     // Party disambiguation fields
     private List<Party> candidateParties;
     private Party matchedParty;
@@ -163,9 +141,6 @@ public class IvrSession {
 
     // Source system that transferred this call (null if session started locally)
     private String transferredFrom;
-
-    // Risk assessment produced by PhoneRiskProvider at session start
-    private RiskAssessment riskAssessment;
 
     // Optimistic locking for concurrent update safety
     private int version;
@@ -181,12 +156,6 @@ public enum SessionStatus {
 
 public enum SessionPhase {
     DISAMBIGUATION, AUTHENTICATING
-}
-
-@Data @AllArgsConstructor
-public class CrossBrandTokenRecord {
-    private String sourceBrandId;
-    private Instant validatedAt;
 }
 ```
 
@@ -299,7 +268,6 @@ public class AuthEngine {
     private final BrandRulesRegistry     rulesRegistry;
     private final TokenValidatorRegistry validatorRegistry;
     private final SessionRepository      sessionRepo;
-    private final CrossBrandTokenEvaluator crossBrandEvaluator;
 
     /** Called when the IVR platform submits a token value. */
     public AuthenticateResponse submitToken(String sessionId,
@@ -342,10 +310,9 @@ public class AuthEngine {
 
         if (!valid) return handleFailure(session, config, tokenType);
 
-        // 2. Mark validated and record provenance
+        // 2. Mark validated
         session.getValidatedTokens().add(tokenType);
         session.getAttemptCounts().remove(tokenType);
-        crossBrandEvaluator.recordValidated(session, tokenType);
 
         // 3. Evaluate progress toward targetLevel
         return evaluateProgress(session, config);
@@ -557,31 +524,11 @@ public class TokenValidatorRegistry {
 
 ---
 
-## 6. Token Provenance Tracking
-
-Tokens validated within a session are recorded with provenance metadata (source brand, timestamp) to support call transfer. Tokens are never automatically reusable across brands — each brand validates tokens independently.
-
-### 6.1 CrossBrandTokenEvaluator.java
-
-```java
-@Component
-public class CrossBrandTokenEvaluator {
-
-    /** Record a token validated in this session for provenance tracking. */
-    public void recordValidated(IvrSession session, TokenType type) {
-        session.getCrossBrandTokens().put(type,
-            new CrossBrandTokenRecord(session.getBrandId(), Instant.now()));
-    }
-}
-```
-
----
-
-## 7. Call Transfer
+## 6. Call Transfer
 
 Call transfer allows an external IVR/authentication system to hand off a caller mid-authentication to this engine. The caller's pre-validated tokens and achieved auth level are carried over, so the caller does not re-authenticate tokens they have already provided.
 
-### 7.1 Transfer Policies
+### 6.1 Transfer Policies
 
 Each external source system is governed by a `TransferPolicy` that controls which tokens are honored and the maximum auth level accepted.
 
@@ -606,7 +553,7 @@ Each external source system is governed by a `TransferPolicy` that controls whic
 }
 ```
 
-### 7.2 Transfer Policy Model
+### 6.2 Transfer Policy Model
 
 ```java
 // TransferPolicy.java
@@ -625,7 +572,7 @@ public class TransferPoliciesConfig {
 }
 ```
 
-### 7.3 TransferPoliciesRegistry
+### 6.3 TransferPoliciesRegistry
 
 ```java
 @Component
@@ -645,7 +592,7 @@ public class TransferPoliciesRegistry {
 }
 ```
 
-### 7.4 Transfer Request DTO
+### 6.4 Transfer Request DTO
 
 ```java
 // CallTransferRequest.java
@@ -660,7 +607,7 @@ public class CallTransferRequest {
 }
 ```
 
-### 7.5 Transfer Flow
+### 6.5 Transfer Flow
 
 ```
 External System (LEGACY_IVR)    TransferController     TransferPoliciesRegistry     AuthEngine
@@ -691,22 +638,18 @@ External System (LEGACY_IVR)    TransferController     TransferPoliciesRegistry 
 1. Unknown or disabled `sourceSystemId` → **403 FORBIDDEN**
 2. `validatedTokens` filtered to only those in the policy's `honoredTokens`
 3. `currentLevel` capped at the policy's `maxHonoredLevel`
-4. Filtered tokens added to both `validatedTokens` and `crossBrandTokens` (with source = `sourceSystemId`) for provenance
+4. Filtered tokens added to `validatedTokens`
 5. Session created with `transferredFrom` set, attempt counts reset to zero
 6. `evaluateProgress()` runs immediately — returns next prompt or `AUTHENTICATED`
 
-### 7.6 AuthEngine.transferSession()
+### 6.6 AuthEngine.transferSession()
 
 ```java
 public AuthenticateResponse transferSession(IvrSession session,
                                        BrandAuthConfig config,
-                                       List<TokenType> validatedTokens,
-                                       String sourceSystemId) {
-    Instant now = Instant.now();
+                                       List<TokenType> validatedTokens) {
     for (TokenType tokenType : validatedTokens) {
         session.getValidatedTokens().add(tokenType);
-        session.getCrossBrandTokens().put(tokenType,
-            new CrossBrandTokenRecord(sourceSystemId, now));
     }
     sessionRepo.save(session);
     return evaluateProgress(session, config);
@@ -715,9 +658,9 @@ public AuthenticateResponse transferSession(IvrSession session,
 
 ---
 
-## 8. REST API Specification
+## 7. REST API Specification
 
-### 8.1 Endpoints
+### 7.1 Endpoints
 
 | Method + Path | Purpose | Notes |
 |---|---|---|
@@ -731,7 +674,7 @@ public AuthenticateResponse transferSession(IvrSession session,
 - Has `sessionId`, has `tokenType` → TOKEN
 - Has `sessionId`, no `tokenType`, has `targetLevel` → ESCALATE
 
-### 8.2 AuthenticateController.java
+### 7.2 AuthenticateController.java
 
 ```java
 @RestController
@@ -762,7 +705,7 @@ public class AuthenticateController {
 }
 ```
 
-### 8.3 Request / Response DTOs
+### 7.3 Request / Response DTOs
 
 ```java
 // AuthenticateRequest.java — unified DTO for all post actions
@@ -794,14 +737,13 @@ public class AuthenticateResponse {
     private List<TokenType> acceptedTokens;     // tokens the client may submit at this step
     private SessionPhase    phase;              // DISAMBIGUATION or AUTHENTICATING
     private String          matchedPartyId;     // set once party disambiguation resolves
-    private RiskLevel       riskLevel;          // caller's risk tier; always present, null if no assessment
     private List<ProcessingEvent> processingLog; // per-token audit events (token submissions only)
 }
 ```
 
 ---
 
-## 9. Session Service
+## 8. Session Service
 
 ```java
 @Service
@@ -828,8 +770,6 @@ public class AuthenticateService {
             .validatedTokens(EnumSet.noneOf(TokenType.class))
             .attemptCounts(new EnumMap<>(TokenType.class))
             .activePathIndexByLevel(new EnumMap<>(AuthLevel.class))
-            .crossBrandTokens(Optional.ofNullable(req.getCrossBrandTokens())
-                .orElse(new EnumMap<>(TokenType.class)))
             .createdAt(Instant.now())
             .lastActivityAt(Instant.now())
             .build();
@@ -861,11 +801,11 @@ public class AuthenticateService {
 
 ---
 
-## 10. Session Storage (SQLite)
+## 9. Session Storage (SQLite)
 
 Sessions are stored in a SQLite database accessed via `JdbcTemplate`. The `IvrSession` object is serialized to JSON for complex fields (maps, sets, nested objects) using Jackson. A `@Scheduled` cleanup job removes expired sessions. **Optimistic locking** via a `version` column prevents lost updates from concurrent requests on the same session.
 
-### 10.1 Database Schema
+### 9.1 Database Schema
 
 ```sql
 CREATE TABLE IF NOT EXISTS ivr_session (
@@ -880,7 +820,6 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     validated_tokens        TEXT,       -- JSON: Set<TokenType>
     attempt_counts          TEXT,       -- JSON: Map<TokenType, Integer>
     active_path_index       TEXT,       -- JSON: Map<AuthLevel, Integer>
-    cross_brand_tokens      TEXT,       -- JSON: Map<TokenType, CrossBrandTokenRecord>
     candidate_parties       TEXT,       -- JSON: List<Party>
     matched_party           TEXT,       -- JSON: Party
     customer_preferences    TEXT,       -- JSON: CustomerPreference
@@ -889,18 +828,17 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     transferred_from        TEXT,
     locked_until            TEXT,       -- ISO-8601 timestamp
     created_at              TEXT NOT NULL,
-    last_activity_at        TEXT NOT NULL,
-    risk_assessment         TEXT        -- JSON: RiskAssessment (level + flags)
+    last_activity_at        TEXT NOT NULL
 );
 ```
 
-### 10.2 SqliteSessionRepository
+### 9.2 SqliteSessionRepository
 
 Key implementation details:
 
 - **save()**: New sessions (`version == 0`) use `INSERT` with version set to 1. Existing sessions use `UPDATE ... WHERE session_id = ? AND version = ?`. If the update affects 0 rows, a `SessionConflictException` (HTTP 409) is thrown — the caller must re-read and retry.
 - **getOrThrow()**: Single query — fetches the full row and checks TTL in Java. Previously this was two separate queries (`checkExpired` + `SELECT *`).
-- **mapRow()**: Reads all columns including `phase`, `candidate_parties`, `matched_party`, `customer_preferences`, `disambiguation_attempt`, `version`, and `risk_assessment`.
+- **mapRow()**: Reads all columns including `phase`, `candidate_parties`, `matched_party`, `customer_preferences`, `disambiguation_attempt`, and `version`.
 
 ```java
 @Repository
@@ -918,8 +856,8 @@ public class SqliteSessionRepository implements SessionRepository {
         String sql = "INSERT OR REPLACE INTO ivr_session " +
             "(session_id, brand_id, caller_id, current_level, target_level, status, " +
             "collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
-            "cross_brand_tokens, locked_until, created_at, last_activity_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "locked_until, created_at, last_activity_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         jdbc.update(sql,
             session.getSessionId(),
             session.getBrandId(),
@@ -931,7 +869,6 @@ public class SqliteSessionRepository implements SessionRepository {
             toJson(session.getValidatedTokens()),
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),
-            toJson(session.getCrossBrandTokens()),
             toIso(session.getLockedUntil()),
             toIso(session.getCreatedAt()),
             toIso(session.getLastActivityAt())
@@ -974,7 +911,6 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setValidatedTokens(fromJsonSet(rs.getString("validated_tokens"), TokenType.class));
         s.setAttemptCounts(fromJsonMap(rs.getString("attempt_counts"), TokenType.class, Integer.class));
         s.setActivePathIndexByLevel(fromJsonMap(rs.getString("active_path_index"), AuthLevel.class, Integer.class));
-        s.setCrossBrandTokens(fromJsonCrossBrand(rs.getString("cross_brand_tokens")));
         s.setLockedUntil(fromIso(rs.getString("locked_until")));
         s.setCreatedAt(fromIso(rs.getString("created_at")));
         s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));
@@ -1003,15 +939,6 @@ public class SqliteSessionRepository implements SessionRepository {
         } catch (IOException e) { throw new SessionSerializationException(e); }
     }
 
-    private Map<TokenType, CrossBrandTokenRecord> fromJsonCrossBrand(String json) {
-        if (json == null || json.isEmpty()) return new EnumMap<>(TokenType.class);
-        try {
-            return mapper.readValue(json,
-                mapper.getTypeFactory().constructMapType(EnumMap.class,
-                    TokenType.class, CrossBrandTokenRecord.class));
-        } catch (IOException e) { throw new SessionSerializationException(e); }
-    }
-
     private String toIso(Instant instant) {
         return instant != null ? instant.toString() : null;
     }
@@ -1024,9 +951,9 @@ public class SqliteSessionRepository implements SessionRepository {
 
 ---
 
-## 11. Key Sequence Flows
+## 10. Key Sequence Flows
 
-### 11.1 Normal Auth Flow (Single Brand, No Fallback)
+### 10.1 Normal Auth Flow (Single Brand, No Fallback)
 
 ```
 IVR Platform          AuthenticateController     AuthEngine             ExternalAPI
@@ -1056,7 +983,7 @@ IVR Platform          AuthenticateController     AuthEngine             External
      |<----------------------|                   |                     |
 ```
 
-### 11.2 Fallback Path Triggered
+### 10.2 Fallback Path Triggered
 
 ```
 Session targets STANDARD, primary path = [ACCOUNT_NUMBER, PIN]
@@ -1070,7 +997,7 @@ State delta:
   validatedTokens: {ACCOUNT_NUMBER} retained (in new path), {PIN} removed
 ```
 
-### 11.3 Mid-Session Escalation Flow
+### 10.3 Mid-Session Escalation Flow
 
 ```
 Session is AUTHENTICATED at STANDARD (validatedTokens: {ACCOUNT_NUMBER, PIN})
@@ -1086,7 +1013,7 @@ Engine logic:
 Caller enters OTP → validated → status = AUTHENTICATED, currentLevel = ELEVATED
 ```
 
-### 11.4 Call Transfer Flow
+### 10.4 Call Transfer Flow
 
 ```
 External System (LEGACY_IVR)   AuthenticateController   TransferPoliciesRegistry   AuthEngine
@@ -1112,7 +1039,6 @@ External System (LEGACY_IVR)   AuthenticateController   TransferPoliciesRegistry
        |                             | transferSession()     |                    |
        |                             |---------------------->|                    |
        |                             |                       | populate validated |
-       |                             |                       | & crossBrandTokens |
        |                             |                       | evaluateProgress() |
        | {nextRequiredToken: PIN}    |                       |                    |
        |<----------------------------|<----------------------|                    |
@@ -1126,14 +1052,13 @@ State after transfer:
   targetLevel = STANDARD
   status = COLLECTING
   validatedTokens = {ACCOUNT_NUMBER}  (only tokens honored by policy)
-  crossBrandTokens = {ACCOUNT_NUMBER -> {sourceBrandId: "LEGACY_IVR", validatedAt: T}}  (provenance tracking)
   transferredFrom = "LEGACY_IVR"
   attemptCounts = {}  (fresh start, always reset)
 ```
 
 ---
 
-## 12. Exception Handling
+## 11. Exception Handling
 
 ```java
 @RestControllerAdvice
@@ -1161,13 +1086,6 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleTransferNotAllowed(TransferNotAllowedException e) {
         return ResponseEntity.status(403)
             .body(new ErrorResponse("TRANSFER_NOT_ALLOWED", e.getMessage()));
-    }
-
-    @ExceptionHandler(HighRiskCallerException.class)
-    public ResponseEntity<ErrorResponse> handleHighRisk(HighRiskCallerException e) {
-        log.warn("High-risk caller rejected [{}]: {}", e.getRiskLevel(), e.getMessage());
-        return ResponseEntity.status(403)
-            .body(new ErrorResponse("HIGH_RISK_CALLER", e.getMessage()));
     }
 
     @ExceptionHandler(UnknownBrandException.class)
@@ -1207,7 +1125,7 @@ public class IvrExceptionHandler {
 
 ---
 
-## 13. Package Structure
+## 12. Package Structure
 
 ```
 com.yourco.ivr
@@ -1231,21 +1149,16 @@ com.yourco.ivr
 │   ├── SessionPhase.java
 │   ├── Party.java
 │   ├── CustomerPreference.java
-│   ├── RiskLevel.java
-│   ├── RiskAssessment.java
 │   ├── ValidationResult.java
-│   ├── CrossBrandTokenRecord.java
 │   └── config/
 │       ├── BrandAuthConfig.java
 │       ├── LevelRule.java
-│       ├── RiskPolicy.java
 │       ├── TokenPath.java
 │       ├── DisambiguationConfig.java
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine
 │   ├── AuthEngine.java
-│   ├── CrossBrandTokenEvaluator.java
 │   ├── DisambiguationEngine.java
 │   ├── DisambiguationRule.java
 │   ├── PromptResolver.java
@@ -1255,9 +1168,6 @@ com.yourco.ivr
 ├── partylookup/
 │   ├── PartyLookupProvider.java
 │   └── StubPartyLookupProvider.java
-├── partyrisk/
-│   ├── PhoneRiskProvider.java
-│   └── StubPhoneRiskProvider.java
 ├── preference/
 │   ├── CustomerPreferenceProvider.java
 │   └── StubCustomerPreferenceProvider.java
@@ -1292,17 +1202,16 @@ com.yourco.ivr
     ├── UnknownBrandException.java
     ├── UnknownCallerException.java
     ├── UnsupportedTokenTypeException.java
-    ├── HighRiskCallerException.java
     └── BrandConfigException.java
 ```
 
 ---
 
-## 14. Party Disambiguation
+## 13. Party Disambiguation
 
 Party disambiguation is always-on. Every session start triggers `PartyLookupProvider.lookupByAni()` to identify the caller's party. The caller's ANI (phone number) may map to multiple customer records; the engine resolves ambiguity before authentication proceeds.
 
-### 14.1 Party Domain Model
+### 13.1 Party Domain Model
 
 ```java
 // Party.java
@@ -1320,7 +1229,7 @@ public class Party {
 }
 ```
 
-### 14.2 PartyLookupProvider (Interface)
+### 13.2 PartyLookupProvider (Interface)
 
 ```java
 public interface PartyLookupProvider {
@@ -1330,7 +1239,7 @@ public interface PartyLookupProvider {
 
 A stub implementation (`StubPartyLookupProvider`) returns an empty list by default. Replace with a real implementation that queries your CRM/account system.
 
-### 14.3 DisambiguationRule (Interface)
+### 13.3 DisambiguationRule (Interface)
 
 ```java
 public interface DisambiguationRule {
@@ -1359,7 +1268,7 @@ Rules are configured per-brand in the brand JSON. The `disambiguation` block is 
 }
 ```
 
-### 14.4 DisambiguationEngine
+### 13.4 DisambiguationEngine
 
 ```java
 @Service
@@ -1390,7 +1299,7 @@ public class DisambiguationEngine {
 }
 ```
 
-### 14.5 Disambiguation Flow
+### 13.5 Disambiguation Flow
 
 ```
 Session Start with ANI
@@ -1437,7 +1346,7 @@ Error  │   │ Apply rules       │── EXCLUDE_INACTIVE
       AuthEngine.evaluateProgress()
 ```
 
-### 14.6 Token Selection Strategy
+### 13.6 Token Selection Strategy
 
 The engine evaluates each mappable `TokenType` (ACCOUNT_NUMBER, DATE_OF_BIRTH, SSN_LAST4, CARD_LAST4) against the remaining parties. It groups parties by the token's value and returns the token with the smallest largest group (maximum discrimination).
 
@@ -1446,7 +1355,7 @@ If all parties have identical SSN_LAST4 → group size 3 → not selected if a b
 
 **Max rounds:** Capped at `maxDisambiguationTokens` (default 3). After exhausting, the session is marked FAILED.
 
-### 14.7 Session Phase Model
+### 13.7 Session Phase Model
 
 ```java
 // SessionPhase.java
@@ -1464,11 +1373,11 @@ Sessions start in `DISAMBIGUATION` when >1 parties found. Phase transitions to `
 
 ---
 
-## 15. Customer Preferences
+## 14. Customer Preferences
 
 Once a single party is identified (either immediately or via disambiguation), customer-specific preferences are loaded to personalize the authentication experience.
 
-### 15.1 CustomerPreference Domain Model
+### 14.1 CustomerPreference Domain Model
 
 ```java
 // CustomerPreference.java
@@ -1479,7 +1388,7 @@ public class CustomerPreference {
 }
 ```
 
-### 15.2 CustomerPreferenceProvider (Interface)
+### 14.2 CustomerPreferenceProvider (Interface)
 
 ```java
 public interface CustomerPreferenceProvider {
@@ -1489,7 +1398,7 @@ public interface CustomerPreferenceProvider {
 
 A stub implementation (`StubCustomerPreferenceProvider`) returns an empty `CustomerPreference` (no blocks). Replace with a real implementation.
 
-### 15.3 AuthEngine Preference Filtering
+### 14.3 AuthEngine Preference Filtering
 
 When `CustomerPreference` is present and `blockedTokens` is non-empty, the engine applies filtering in `evaluateProgress()`:
 
@@ -1523,7 +1432,7 @@ private TokenType findAlternativeToken(IvrSession session,
 - All options on path 0 blocked → advance to path 1 (OTP)
 - Path 1 requires [ACCOUNT_NUMBER, OTP] — ACCOUNT_NUMBER already validated → prompt for OTP
 
-### 15.4 Preference Loading Trigger
+### 14.4 Preference Loading Trigger
 
 Preferences are loaded by `DisambiguationEngine.resolveParty()` immediately after a single party is identified:
 
@@ -1539,7 +1448,7 @@ private AuthenticateResponse resolveParty(IvrSession session, Party party) {
 }
 ```
 
-### 15.5 Data Flow
+### 14.5 Data Flow
 
 ```
 Party Resolved
@@ -1561,116 +1470,7 @@ Customer asked only for allowed tokens
 
 ---
 
-## 16. Phone Risk Integration
-
-Phone risk integration lets each brand gate or modify sessions based on the caller's ANI risk score, without any code change after the `PhoneRiskProvider` is deployed.
-
-### 16.1 PhoneRiskProvider (SPI Interface)
-
-```java
-// PhoneRiskProvider.java
-public interface PhoneRiskProvider {
-    /**
-     * Assess the risk of a caller for a given brand.
-     * Called at session start (and on call transfer) before any session state is written.
-     * Implementations must never throw — return RiskLevel.LOW if the upstream is unavailable.
-     *
-     * @param callerId ANI of the caller
-     * @param brandId  brand receiving the call (allows brand-specific risk thresholds at the API layer)
-     * @return non-null RiskAssessment
-     */
-    RiskAssessment assess(String callerId, String brandId);
-}
-```
-
-A `StubPhoneRiskProvider` (`@Component`) returns `RiskLevel.LOW` for all callers. Replace it with a real implementation that calls a carrier fraud API or internal phone reputation service.
-
-### 16.2 Session Start Flow with Risk Assessment
-
-```
-POST /ivr/authenticate  (start — no sessionId)
-        │
-        ▼
-PhoneRiskProvider.assess(callerId, brandId)
-        │
-        ▼
-Look up RiskPolicy = config.getRiskPolicies().get(riskLevel)
-        │
-  ┌─────┴─────┐
-  │           │
- reject=true   reject=false (or no policy)
-  │           │
-  ▼           ▼
-HTTP 403      Apply minimumTargetLevel override (if effectiveTarget < policy.minimumTargetLevel)
-HIGH_RISK_CALLER        │
-No session written      ▼
-              Create IvrSession (riskAssessment set)
-                        │
-                        ▼
-              PartyLookupProvider.lookupByAni()
-                        │
-                        ▼
-              Merge riskPolicy.blockedTokens into CustomerPreference.blockedTokens
-                        │
-                        ▼
-              AuthEngine.evaluateProgress()
-              (preference filtering skips merged blocked tokens)
-                        │
-                        ▼
-              AuthenticateResponse (riskLevel always included)
-```
-
-### 16.3 Policy Application Details
-
-**Rejection (CRITICAL):**  
-`PhoneRiskProvider.assess()` is called before `sessionRepo.save()`. A CRITICAL-risk caller with `reject=true` throws `HighRiskCallerException` and the database is never touched.
-
-**Level upgrade (HIGH):**  
-If the requested `targetLevel` is lower than `riskPolicy.minimumTargetLevel`, `effectiveTarget` is silently set to the higher level. This is transparent to the caller — they will need to provide the tokens for the higher level.
-
-**Token blocking:**  
-`riskPolicy.blockedTokens` is merged with the customer's `CustomerPreference.blockedTokens` using a set union. The merged set is stored on `CustomerPreference` and applies to all subsequent `evaluateProgress()` calls for the session. This ensures risk-blocked tokens are excluded from both `nextRequiredToken` and `acceptedTokens` responses.
-
-**Call transfer:**  
-Risk assessment is also applied to transferred sessions. If the source system transfers a CRITICAL-risk caller, the transfer is rejected with HTTP 403 before any session is created in the target brand.
-
-### 16.4 Brand Config Example
-
-```json
-{
-  "brandId": "BRAND_A",
-  "riskPolicies": {
-    "HIGH": {
-      "reject": false,
-      "minimumTargetLevel": "ELEVATED",
-      "blockedTokens": ["DATE_OF_BIRTH"]
-    },
-    "CRITICAL": {
-      "reject": true
-    }
-  },
-  "levelRules": { ... }
-}
-```
-
-Risk levels with no entry (e.g. `LOW`, `MEDIUM`) are unrestricted — no policy is applied.
-
-### 16.5 DB Schema Addition
-
-```sql
--- Migration: add risk_assessment for phone risk level integration
-ALTER TABLE ivr_session ADD COLUMN risk_assessment TEXT;
-```
-
-The `risk_assessment` column stores the `RiskAssessment` object (level + flags) as JSON. It is written at session creation and never mutated.
-
-### 16.6 Response Field
-
-`riskLevel` is always present in `AuthenticateResponse`. It is `null` only if the brand has no `riskPolicies` block and the provider was not invoked (which cannot happen in the current implementation — the provider is always called). The IVR platform can use this field to route callers to agents or apply additional UI friction without changes to the engine.
-
----
-
-## 17. Implementation Checklist
+## 15. Implementation Checklist
 
 ### Phase 1 — Core Foundation
 1. Define `AuthLevel` and `TokenType` enums
@@ -1690,8 +1490,7 @@ The `risk_assessment` column stores the `RiskAssessment` object (level + flags) 
 1. Implement `TokenValidator` interface and `ValidationResult`
 2. Implement stub validators for each `TokenType` (return configurable mock responses)
 3. Wire `TokenValidatorRegistry` with Spring auto-discovery of `@Component` validators
-4. Implement `CrossBrandTokenEvaluator` — provenance tracking (recordValidated)
-5. Replace stubs with real external API clients one validator at a time
+4. Replace stubs with real external API clients one validator at a time
 
 ### Phase 4 — API Layer
 1. Implement `AuthenticateController` and all 5 endpoints
@@ -1719,7 +1518,7 @@ The `risk_assessment` column stores the `RiskAssessment` object (level + flags) 
 3. Implement `CallTransferRequest` DTO with `@Valid` constraints
 4. Implement `TransferNotAllowedException` and wire into `IvrExceptionHandler` (HTTP 403)
 5. Add `transferredFrom` field to `IvrSession`, DB schema, and repository
-6. Implement `AuthEngine.transferSession()` — populate validated/token provenance from transfer
+6. Implement `AuthEngine.transferSession()` — populate validated tokens from transfer
 7. Implement `POST /ivr/authenticate/transfer` endpoint in `AuthenticateController`
 8. Wire token filtering and level capping in `AuthenticateService.transfer()`
 9. Create default `config/transfers/transfer-policies.json` with sample policies
@@ -1741,30 +1540,6 @@ The `risk_assessment` column stores the `RiskAssessment` object (level + flags) 
 13. Add `phase` and `matchedPartyId` to `AuthenticateResponse`
 14. Implement `UnknownCallerException` and wire into `IvrExceptionHandler`
 15. Integration-test: single party, multi-party, rules narrowing, zero parties, max rounds, disabled config, preference filtering
-
-### Phase 9 — Phone Risk Integration
-1. Define `RiskLevel` enum: `LOW`, `MEDIUM`, `HIGH`, `CRITICAL`
-2. Implement `RiskAssessment` domain model (`level` + `flags`)
-3. Implement `RiskPolicy` config model (`reject`, `minimumTargetLevel`, `blockedTokens`)
-4. Add `riskPolicies: Map<RiskLevel, RiskPolicy>` to `BrandAuthConfig`
-5. Implement `PhoneRiskProvider` interface in `partyrisk/`
-6. Implement `StubPhoneRiskProvider` returning `LOW` for all callers
-7. Implement `HighRiskCallerException` and wire into `IvrExceptionHandler` (HTTP 403, `HIGH_RISK_CALLER`)
-8. Add `riskAssessment` field to `IvrSession`; add `risk_assessment TEXT` column to `ivr_session` schema
-9. Update `SqliteSessionRepository` INSERT and UPDATE SQL to include `risk_assessment`; add deserialization in `mapRow()`
-10. Wire `PhoneRiskProvider` into `AuthenticateService.start()` and `AuthenticateService.transfer()`:
-    - Call `assess()` before session write
-    - Apply `reject` gate (throw `HighRiskCallerException`)
-    - Apply `minimumTargetLevel` override
-    - Merge `blockedTokens` into `CustomerPreference` via `mergeRiskBlockedTokens()`
-11. Add `riskLevel` to `AuthenticateResponse` DTO
-12. Create `config/brands/risk_test_brand.json` demonstrating HIGH/CRITICAL policies
-13. Write `PhoneRiskTest.java` integration tests using `@MockBean PhoneRiskProvider`:
-    - CRITICAL → HTTP 403
-    - HIGH → targetLevel upgraded to ELEVATED
-    - HIGH with blockedTokens → blocked token not in nextRequiredToken or acceptedTokens
-    - MEDIUM (no policy) → normal flow
-    - LOW → normal flow with riskLevel=LOW in response
 
 > ⚠️ **Security Note — Token Values**
 > Never log raw token values (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.
