@@ -3,7 +3,6 @@ package com.yourco.ivr.repository;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
-import com.yourco.ivr.domain.CrossBrandTokenRecord;
 import com.yourco.ivr.domain.CustomerPreference;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.Party;
@@ -66,10 +65,10 @@ public class SqliteSessionRepository implements SessionRepository {
         String sql = "INSERT INTO ivr_session " +
             "(session_id, brand_id, caller_id, current_level, target_level, status, " +
             "phase, collected_tokens, validated_tokens, attempt_counts, active_path_index, " +
-            "cross_brand_tokens, candidate_parties, matched_party, customer_preferences, " +
+            "candidate_parties, matched_party, customer_preferences, " +
             "disambiguation_attempt, version, transferred_from, locked_until, created_at, " +
             "last_activity_at) " +
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         jdbc.update(sql,
             session.getSessionId(),
             session.getBrandId(),
@@ -82,7 +81,6 @@ public class SqliteSessionRepository implements SessionRepository {
             toJson(session.getValidatedTokens()),
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),
-            toJson(session.getCrossBrandTokens()),
             toJson(session.getCandidateParties()),
             toJson(session.getMatchedParty()),
             toJson(session.getCustomerPreferences()),
@@ -102,7 +100,7 @@ public class SqliteSessionRepository implements SessionRepository {
         String sql = "UPDATE ivr_session SET " +
             "brand_id = ?, caller_id = ?, current_level = ?, target_level = ?, status = ?, " +
             "phase = ?, collected_tokens = ?, validated_tokens = ?, attempt_counts = ?, " +
-            "active_path_index = ?, cross_brand_tokens = ?, candidate_parties = ?, " +
+            "active_path_index = ?, candidate_parties = ?, " +
             "matched_party = ?, customer_preferences = ?, disambiguation_attempt = ?, " +
             "version = ?, transferred_from = ?, locked_until = ?, last_activity_at = ? " +
             "WHERE session_id = ? AND version = ?";
@@ -117,7 +115,6 @@ public class SqliteSessionRepository implements SessionRepository {
             toJson(session.getValidatedTokens()),
             toJson(session.getAttemptCounts()),
             toJson(session.getActivePathIndexByLevel()),
-            toJson(session.getCrossBrandTokens()),
             toJson(session.getCandidateParties()),
             toJson(session.getMatchedParty()),
             toJson(session.getCustomerPreferences()),
@@ -177,7 +174,6 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setValidatedTokens(fromJsonEnumSet(rs.getString("validated_tokens"), TokenType.class));
         s.setAttemptCounts(fromJsonEnumMap(rs.getString("attempt_counts"), TokenType.class, Integer.class));
         s.setActivePathIndexByLevel(fromJsonEnumMap(rs.getString("active_path_index"), AuthLevel.class, Integer.class));
-        s.setCrossBrandTokens(fromJsonCrossBrand(rs.getString("cross_brand_tokens")));
         s.setCandidateParties(fromJsonPartyList(rs.getString("candidate_parties")));
         s.setMatchedParty(fromJsonSingle(rs.getString("matched_party"), Party.class));
         s.setCustomerPreferences(fromJsonSingle(rs.getString("customer_preferences"), CustomerPreference.class));
@@ -218,17 +214,6 @@ public class SqliteSessionRepository implements SessionRepository {
                 mapper.getTypeFactory().constructCollectionType(EnumSet.class, elementType));
         } catch (IOException e) {
             throw new SessionSerializationException("Failed to deserializing enum set", e);
-        }
-    }
-
-    private Map<TokenType, CrossBrandTokenRecord> fromJsonCrossBrand(String json) {
-        if (json == null || json.isEmpty()) return new EnumMap<>(TokenType.class);
-        try {
-            return mapper.readValue(json,
-                mapper.getTypeFactory().constructMapType(EnumMap.class,
-                    TokenType.class, CrossBrandTokenRecord.class));
-        } catch (IOException e) {
-            throw new SessionSerializationException("Failed to deserialize cross-brand tokens", e);
         }
     }
 

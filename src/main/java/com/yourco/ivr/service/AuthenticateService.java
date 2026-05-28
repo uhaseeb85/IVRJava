@@ -151,7 +151,7 @@ public class AuthenticateService {
         session.setLastActivityAt(Instant.now());
 
         // 6. Hand off to engine to populate tokens and evaluate
-        return engine.transferSession(session, config, honoredTokens, req.getSourceSystemId());
+        return engine.transferSession(session, config, honoredTokens);
     }
 
     public AuthenticateResponse submitToken(String sessionId, TokenType tokenType, String tokenValue) {

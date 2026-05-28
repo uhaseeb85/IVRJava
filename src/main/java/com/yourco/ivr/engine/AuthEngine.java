@@ -3,7 +3,6 @@ package com.yourco.ivr.engine;
 import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.api.dto.ProcessingEvent;
 import com.yourco.ivr.domain.AuthLevel;
-import com.yourco.ivr.domain.CrossBrandTokenRecord;
 import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
@@ -38,20 +37,17 @@ public class AuthEngine {
     private final BrandRulesRegistry rulesRegistry;
     private final TokenValidatorRegistry validatorRegistry;
     private final SessionRepository sessionRepo;
-    private final CrossBrandTokenEvaluator crossBrandEvaluator;
     private final PromptResolver promptResolver;
     private final DisambiguationEngine disambiguationEngine;
 
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       TokenValidatorRegistry validatorRegistry,
                       SessionRepository sessionRepo,
-                      CrossBrandTokenEvaluator crossBrandEvaluator,
                       PromptResolver promptResolver,
                       DisambiguationEngine disambiguationEngine) {
         this.rulesRegistry = rulesRegistry;
         this.validatorRegistry = validatorRegistry;
         this.sessionRepo = sessionRepo;
-        this.crossBrandEvaluator = crossBrandEvaluator;
         this.promptResolver = promptResolver;
         this.disambiguationEngine = disambiguationEngine;
     }
@@ -198,7 +194,6 @@ public class AuthEngine {
         if (resolvedToken != tokenType) {
             session.getAttemptCounts().remove(resolvedToken);
         }
-        crossBrandEvaluator.recordValidated(session, tokenType);
 
         addEntry(procLog, "INFO",
             "Validated tokens now: " + session.getValidatedTokens());
@@ -227,14 +222,9 @@ public class AuthEngine {
      */
     public AuthenticateResponse transferSession(IvrSession session,
                                            BrandAuthConfig config,
-                                           List<TokenType> validatedTokens,
-                                           String sourceSystemId) {
-        Instant now = Instant.now();
-
+                                           List<TokenType> validatedTokens) {
         for (TokenType tokenType : validatedTokens) {
             session.getValidatedTokens().add(tokenType);
-            session.getCrossBrandTokens().put(tokenType,
-                new CrossBrandTokenRecord(sourceSystemId, now));
         }
 
         sessionRepo.save(session);

@@ -19,7 +19,6 @@ public class IvrSession {
     private Set<TokenType> validatedTokens;
     private Map<TokenType, Integer> attemptCounts;
     private Map<AuthLevel, Integer> activePathIndexByLevel;
-    private Map<TokenType, CrossBrandTokenRecord> crossBrandTokens;
 
     private List<Party> candidateParties;
     private Party matchedParty;
@@ -40,7 +39,6 @@ public class IvrSession {
         this.validatedTokens = EnumSet.noneOf(TokenType.class);
         this.attemptCounts = new EnumMap<>(TokenType.class);
         this.activePathIndexByLevel = new EnumMap<>(AuthLevel.class);
-        this.crossBrandTokens = new EnumMap<>(TokenType.class);
         this.candidateParties = new ArrayList<>();
     }
 }

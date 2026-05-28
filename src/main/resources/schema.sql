@@ -10,7 +10,6 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     validated_tokens        TEXT,
     attempt_counts          TEXT,
     active_path_index       TEXT,
-    cross_brand_tokens      TEXT,
     candidate_parties       TEXT,
     matched_party           TEXT,
     customer_preferences    TEXT,
