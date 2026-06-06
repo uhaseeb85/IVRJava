@@ -11,6 +11,10 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 
+/**
+ * Format validator for {@link com.yourco.ivr.domain.TokenType#DATE_OF_BIRTH}.
+ * Accepts values parseable by {@link java.time.format.DateTimeFormatter#ISO_LOCAL_DATE} (YYYY-MM-DD).
+ */
 @Component
 public class DateOfBirthValidator implements TokenValidator {
 

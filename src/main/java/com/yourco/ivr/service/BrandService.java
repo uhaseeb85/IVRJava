@@ -21,14 +21,30 @@ import org.springframework.stereotype.Service;
 import javax.annotation.PostConstruct;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+/**
+ * Service for managing brand configuration files and the in-memory {@link BrandRulesRegistry}.
+ *
+ * <p>Brand configs are JSON files stored in {@code ./config/brands/{brandId}.json}
+ * (directory configurable via {@code ivr.brands.config-dir}). This service owns all
+ * read/write/delete operations on those files and keeps the registry in sync.
+ *
+ * <p>All writes go through {@link #validate} first, which checks structural correctness
+ * (required fields, non-empty paths) and verifies that any referenced lookup service IDs
+ * are registered. Never bypass this by calling {@link BrandRulesRegistry#register} directly.
+ *
+ * <p><strong>Known issue:</strong> {@link #refreshRegistry()} clears the registry before
+ * reloading, creating a brief window where all brands are absent. Fix with an atomic swap.
+ */
 @Service
 public class BrandService {
 
     private static final Logger log = LoggerFactory.getLogger(BrandService.class);
+    private static final String JSON_EXT = ".json";
 
     private final BrandRulesRegistry registry;
     private final LookupServiceRegistry lookupRegistry;
@@ -53,10 +69,11 @@ public class BrandService {
         }
     }
 
+    /** Returns all brand configs found in the config directory, skipping unreadable files. */
     public List<BrandAuthConfig> listAll() {
         List<BrandAuthConfig> result = new ArrayList<>();
         File dir = new File(configDir);
-        File[] files = dir.listFiles((d, name) -> name.endsWith(".json"));
+        File[] files = dir.listFiles((d, name) -> name.endsWith(JSON_EXT));
         if (files != null) {
             for (File file : files) {
                 try {
@@ -70,6 +87,12 @@ public class BrandService {
         return result;
     }
 
+    /**
+     * Returns the config for the given brand ID.
+     * Checks the registry first; if absent, attempts a lazy load from the config file.
+     *
+     * @throws UnknownBrandException if neither the registry nor the file system has the brand
+     */
     public BrandAuthConfig get(String brandId) {
         try {
             return registry.get(brandId);
@@ -88,6 +111,12 @@ public class BrandService {
         }
     }
 
+    /**
+     * Validates, writes the config JSON file, and updates the registry.
+     *
+     * @throws IllegalArgumentException if validation fails
+     * @throws BrandConfigException if the file cannot be written
+     */
     public BrandAuthConfig save(BrandAuthConfig config) {
         ValidationResult validation = validate(config);
         if (!validation.isValid()) {
@@ -106,24 +135,41 @@ public class BrandService {
         }
     }
 
+    /** Sets the brand ID on the config to match the path parameter, then delegates to {@link #save}. */
     public BrandAuthConfig update(String brandId, BrandAuthConfig config) {
         config.setBrandId(brandId);
         return save(config);
     }
 
+    /**
+     * Deletes the brand config file and removes the brand from the registry.
+     *
+     * @throws BrandConfigException if the file exists but cannot be deleted
+     */
     public void delete(String brandId) {
         File file = getBrandFile(brandId);
         if (file.exists()) {
-            if (!file.delete()) {
+            try {
+                Files.delete(file.toPath());
+            } catch (IOException e) {
                 log.error("Failed to delete brand config file: {}", file.getAbsolutePath());
                 throw new BrandConfigException(
-                    "Failed to delete brand config file: " + file.getAbsolutePath(), null);
+                    "Failed to delete brand config file: " + file.getAbsolutePath(), e);
             }
             log.info("Deleted brand config: {}", brandId);
         }
         registry.remove(brandId);
     }
 
+    /**
+     * Validates a brand config for structural correctness and lookup service availability.
+     *
+     * <p>Checks: non-blank brand ID, at least one level rule with at least one path, each path
+     * has at least one required token, and all verification source service IDs are registered
+     * and support the bound token type.
+     *
+     * @return {@link ValidationResult#ok()} or a descriptive error result
+     */
     public ValidationResult validate(BrandAuthConfig config) {
         if (config.getBrandId() == null || config.getBrandId().trim().isEmpty()) {
             return ValidationResult.error("Brand ID is required");
@@ -131,53 +177,27 @@ public class BrandService {
         if (config.getLevelRules() == null || config.getLevelRules().isEmpty()) {
             return ValidationResult.error("At least one level rule is required");
         }
-        for (Map.Entry<AuthLevel, LevelRule> entry : config.getLevelRules().entrySet()) {
-            LevelRule rule = entry.getValue();
-            if (rule.getPaths() == null || rule.getPaths().isEmpty()) {
-                return ValidationResult.error(
-                    "Level " + entry.getKey() + " must have at least one token path");
-            }
-            for (int i = 0; i < rule.getPaths().size(); i++) {
-                TokenPath path = rule.getPaths().get(i);
-                if (path.getRequiredTokens() == null || path.getRequiredTokens().isEmpty()) {
-                    return ValidationResult.error(
-                        "Path " + i + " in level " + entry.getKey() + " must have required tokens");
-                }
-            }
+        ValidationResult levelCheck = validateLevelRules(config.getLevelRules());
+        if (!levelCheck.isValid()) {
+            return levelCheck;
         }
         if (config.getVerificationSources() != null) {
-            for (Map.Entry<TokenType, VerificationBinding> entry : config.getVerificationSources().entrySet()) {
-                TokenType token = entry.getKey();
-                VerificationBinding binding = entry.getValue();
-                if (binding == null || binding.getServiceId() == null
-                        || binding.getServiceId().trim().isEmpty()) {
-                    return ValidationResult.error(
-                        "Verification source for " + token + " must specify a serviceId");
-                }
-                if (!lookupRegistry.contains(binding.getServiceId())) {
-                    return ValidationResult.error(
-                        "Unknown lookup service '" + binding.getServiceId() + "' for token " + token);
-                }
-                TokenLookupService service = lookupRegistry.get(binding.getServiceId());
-                if (service.supportedTokens() == null || !service.supportedTokens().contains(token)) {
-                    return ValidationResult.error(
-                        "Lookup service '" + binding.getServiceId()
-                        + "' does not support token " + token);
-                }
-            }
+            return validateVerificationSources(config.getVerificationSources());
         }
         return ValidationResult.ok();
     }
 
+    /** Clears and reloads the registry from the config directory. See class-level note on the race window. */
     public void refreshRegistry() {
         registry.clear();
         loadFromDirectory();
     }
 
+    /** Scans the config directory and registers all valid brand configs found. */
     public void loadFromDirectory() {
         File dir = new File(configDir);
         if (!dir.exists()) return;
-        File[] files = dir.listFiles((d, name) -> name.endsWith(".json"));
+        File[] files = dir.listFiles((d, name) -> name.endsWith(JSON_EXT));
         if (files != null) {
             for (File file : files) {
                 try {
@@ -193,8 +213,49 @@ public class BrandService {
         }
     }
 
+    private ValidationResult validateLevelRules(Map<AuthLevel, LevelRule> levelRules) {
+        for (Map.Entry<AuthLevel, LevelRule> entry : levelRules.entrySet()) {
+            LevelRule rule = entry.getValue();
+            if (rule.getPaths() == null || rule.getPaths().isEmpty()) {
+                return ValidationResult.error(
+                    "Level " + entry.getKey() + " must have at least one token path");
+            }
+            for (int i = 0; i < rule.getPaths().size(); i++) {
+                TokenPath path = rule.getPaths().get(i);
+                if (path.getRequiredTokens() == null || path.getRequiredTokens().isEmpty()) {
+                    return ValidationResult.error(
+                        "Path " + i + " in level " + entry.getKey() + " must have required tokens");
+                }
+            }
+        }
+        return ValidationResult.ok();
+    }
+
+    private ValidationResult validateVerificationSources(Map<TokenType, VerificationBinding> sources) {
+        for (Map.Entry<TokenType, VerificationBinding> entry : sources.entrySet()) {
+            TokenType token = entry.getKey();
+            VerificationBinding binding = entry.getValue();
+            if (binding == null || binding.getServiceId() == null
+                    || binding.getServiceId().trim().isEmpty()) {
+                return ValidationResult.error(
+                    "Verification source for " + token + " must specify a serviceId");
+            }
+            if (!lookupRegistry.contains(binding.getServiceId())) {
+                return ValidationResult.error(
+                    "Unknown lookup service '" + binding.getServiceId() + "' for token " + token);
+            }
+            TokenLookupService service = lookupRegistry.get(binding.getServiceId());
+            if (service.supportedTokens() == null || !service.supportedTokens().contains(token)) {
+                return ValidationResult.error(
+                    "Lookup service '" + binding.getServiceId()
+                    + "' does not support token " + token);
+            }
+        }
+        return ValidationResult.ok();
+    }
+
     private File getBrandFile(String brandId) {
         String sanitized = brandId.replaceAll("[^a-zA-Z0-9_-]", "_").toLowerCase();
-        return new File(configDir, sanitized + ".json");
+        return new File(configDir, sanitized + JSON_EXT);
     }
 }

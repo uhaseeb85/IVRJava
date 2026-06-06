@@ -15,6 +15,32 @@ import java.util.*;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
+/**
+ * Resolves ambiguous party lookups by iteratively prompting the caller for identifying tokens.
+ *
+ * <p>When an ANI lookup returns multiple {@link com.yourco.ivr.domain.Party} records,
+ * this engine is responsible for narrowing the list to a single match before authentication
+ * can proceed. The flow is:
+ * <ol>
+ *   <li>{@link #start} — applies configured pre-filter rules (e.g. exclude inactive parties,
+ *       prefer primary ANI), then selects the best differentiating token type to prompt.</li>
+ *   <li>{@link #handleToken} — on each subsequent submission, narrows the candidate list by
+ *       matching the token value against the remaining parties' corresponding fields.</li>
+ *   <li>Once a single party remains, the session transitions to
+ *       {@link com.yourco.ivr.domain.SessionPhase#AUTHENTICATING} and authentication begins.</li>
+ * </ol>
+ *
+ * <p>Token-to-field mapping is fixed at construction ({@link #defaultTokenFieldMap}) and
+ * covers the four PII fields most useful for disambiguation:
+ * {@code ACCOUNT_NUMBER}, {@code DATE_OF_BIRTH}, {@code SSN_LAST4}, {@code CARD_LAST4}.
+ *
+ * <p>The engine selects the next token type using a greedy max-information heuristic:
+ * it picks the token whose values, across the current candidate list, produce the smallest
+ * maximum group size — i.e. the token that most evenly splits the parties.
+ *
+ * @see com.yourco.ivr.domain.config.DisambiguationConfig
+ * @see DisambiguationRule
+ */
 @Service
 public class DisambiguationEngine {
 
@@ -24,14 +50,11 @@ public class DisambiguationEngine {
 
     private final SessionRepository sessionRepo;
     private final CustomerPreferenceProvider preferenceProvider;
-    private final PromptResolver promptResolver;
 
     public DisambiguationEngine(SessionRepository sessionRepo,
-                                 CustomerPreferenceProvider preferenceProvider,
-                                 PromptResolver promptResolver) {
+                                 CustomerPreferenceProvider preferenceProvider) {
         this.sessionRepo = sessionRepo;
         this.preferenceProvider = preferenceProvider;
-        this.promptResolver = promptResolver;
         this.tokenFieldMap = defaultTokenFieldMap();
     }
 
@@ -44,6 +67,15 @@ public class DisambiguationEngine {
         return Collections.unmodifiableMap(map);
     }
 
+    /**
+     * Begins disambiguation for a session that has multiple candidate parties.
+     *
+     * <p>Applies the configured pre-filter rules, then either resolves to a single party
+     * immediately or selects the most discriminating token type to prompt the caller for.
+     *
+     * @return a response with a prompt and the next token type to collect, or a FAILED
+     *         response if rules eliminate all parties or no discriminating token exists
+     */
     public AuthenticateResponse start(IvrSession session, DisambiguationConfig config) {
         // 1. Apply configured rules
         List<Party> parties = applyRules(session.getCandidateParties(), config);
@@ -78,6 +110,17 @@ public class DisambiguationEngine {
         return buildResponse(session, prompt, nextToken);
     }
 
+    /**
+     * Processes a token submission during the disambiguation phase.
+     *
+     * <p>Matches the submitted value against the remaining candidate parties' corresponding
+     * field. On a unique match, transitions the session to
+     * {@link com.yourco.ivr.domain.SessionPhase#AUTHENTICATING}. On multiple remaining
+     * parties, prompts for the next most-discriminating token.
+     *
+     * @return a response prompting for more tokens, a FAILED response if the attempt limit
+     *         is exceeded, or a resolved response if a single party is identified
+     */
     public AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
                                         String tokenValue, DisambiguationConfig config) {
         // 1. Verify token is usable for disambiguation
@@ -137,6 +180,13 @@ public class DisambiguationEngine {
         return buildResponse(session, prompt, nextToken);
     }
 
+    /**
+     * Selects the {@link TokenType} that best splits the candidate party list.
+     *
+     * <p>Uses a greedy min-max-group-size heuristic: for each token type, group parties by
+     * their field value and find the largest group; pick the token type whose largest group
+     * is smallest. Returns {@code null} if no token type can differentiate the parties.
+     */
     TokenType selectDisambiguationToken(List<Party> parties) {
         TokenType bestToken = null;
         int bestMaxGroupSize = Integer.MAX_VALUE;
@@ -164,6 +214,10 @@ public class DisambiguationEngine {
         return bestToken;
     }
 
+    /**
+     * Applies each configured {@link DisambiguationRule} in order to the candidate party list.
+     * Returns the original list unchanged if no rules are configured.
+     */
     List<Party> applyRules(List<Party> parties, DisambiguationConfig config) {
         if (config.getRules() == null || config.getRules().isEmpty()) {
             return parties;

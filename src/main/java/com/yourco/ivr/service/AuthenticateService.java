@@ -23,6 +23,25 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+/**
+ * Application-layer orchestrator for the IVR authentication lifecycle.
+ *
+ * <p>This service is the single entry point called by {@link com.yourco.ivr.api.AuthenticateController}.
+ * It owns session creation and delegates token evaluation to {@link AuthEngine}.
+ *
+ * <p>Supported operations:
+ * <ul>
+ *   <li>{@link #start} — creates a new session, runs party lookup and optional disambiguation,
+ *       processes any initial tokens, and returns the first prompt.</li>
+ *   <li>{@link #transfer} — creates a session pre-loaded with tokens and an auth level carried
+ *       over from another IVR system, subject to the configured {@link TransferPolicy}.</li>
+ *   <li>{@link #submitToken} / {@link #submitTokenWithCaller} — delegates to the engine for
+ *       format + backend validation and progress evaluation.</li>
+ *   <li>{@link #escalate} — requests a higher auth level mid-session.</li>
+ *   <li>{@link #getStatus} — returns the current session snapshot without mutating state.</li>
+ *   <li>{@link #end} — deletes the session on hang-up.</li>
+ * </ul>
+ */
 @Service
 public class AuthenticateService {
 
@@ -48,6 +67,22 @@ public class AuthenticateService {
         this.disambiguationEngine = disambiguationEngine;
     }
 
+    /**
+     * Starts a new authentication session.
+     *
+     * <ol>
+     *   <li>Looks up parties by ANI — throws {@link com.yourco.ivr.exception.UnknownCallerException}
+     *       if the list is empty.</li>
+     *   <li>If more than one party is found, the session enters
+     *       {@link com.yourco.ivr.domain.SessionPhase#DISAMBIGUATION} and
+     *       {@link DisambiguationEngine#start} is invoked.</li>
+     *   <li>For a single-party result, customer preferences are loaded and the engine
+     *       evaluates progress (possibly collecting any {@code initialTokens} first).</li>
+     * </ol>
+     *
+     * @throws com.yourco.ivr.exception.UnknownBrandException if {@code req.getBrandId()} is not loaded
+     * @throws com.yourco.ivr.exception.UnknownCallerException if no parties match the caller's ANI
+     */
     public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
 
@@ -107,6 +142,23 @@ public class AuthenticateService {
         return engine.evaluateProgress(session, config);
     }
 
+    /**
+     * Creates a session from an inbound call transfer, importing pre-validated tokens from
+     * the source system subject to its {@link com.yourco.ivr.domain.config.TransferPolicy}.
+     *
+     * <p>Steps:
+     * <ol>
+     *   <li>Validates that the source system is configured and enabled.</li>
+     *   <li>Filters the presented tokens to the subset allowed by the policy's
+     *       {@code honoredTokens} list.</li>
+     *   <li>Caps the carried-over auth level at the policy's {@code maxHonoredLevel}.</li>
+     *   <li>Creates a new session pre-populated with the filtered tokens and delegates to
+     *       {@link AuthEngine#transferSession} for progress evaluation.</li>
+     * </ol>
+     *
+     * @throws com.yourco.ivr.exception.TransferNotAllowedException if the source system is
+     *         not configured or is disabled
+     */
     public AuthenticateResponse transfer(CallTransferRequest req) {
         TransferPolicy policy = transferRegistry.get(req.getSourceSystemId());
         if (policy == null) {
@@ -154,24 +206,42 @@ public class AuthenticateService {
         return engine.transferSession(session, config, honoredTokens);
     }
 
+    /** Submits a token value for validation; delegates entirely to {@link AuthEngine#submitToken}. */
     public AuthenticateResponse submitToken(String sessionId, TokenType tokenType, String tokenValue) {
         return engine.submitToken(sessionId, tokenType, tokenValue);
     }
 
+    /**
+     * Submits a token value with optional caller verification.
+     * The engine checks that {@code callerId} matches the session's registered caller before
+     * accepting the token, protecting against session-ID enumeration attacks.
+     */
     public AuthenticateResponse submitTokenWithCaller(String sessionId, TokenType tokenType,
                                                        String tokenValue, String callerId) {
         return engine.submitTokenWithCaller(sessionId, tokenType, tokenValue, callerId);
     }
 
+    /**
+     * Requests a mid-session upgrade to a higher auth level.
+     *
+     * @throws IllegalArgumentException if {@code targetLevel} is not higher than the current level
+     */
     public AuthenticateResponse escalate(String sessionId, AuthLevel targetLevel) {
         return engine.escalate(sessionId, targetLevel);
     }
 
+    /**
+     * Returns a snapshot of the current session state without modifying it.
+     * Used by the polling {@code GET /ivr/authenticate/{id}/status} endpoint.
+     *
+     * @throws com.yourco.ivr.exception.SessionNotFoundException if the session does not exist or is expired
+     */
     public AuthenticateResponse getStatus(String sessionId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
         return AuthenticateResponse.fromSession(session);
     }
 
+    /** Deletes the session record; called on hang-up via {@code DELETE /ivr/authenticate/{id}}. */
     public void end(String sessionId) {
         sessionRepo.delete(sessionId);
     }

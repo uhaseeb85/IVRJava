@@ -7,6 +7,7 @@ import com.yourco.ivr.validator.ValidationErrorCode;
 import com.yourco.ivr.validator.ValidationResult;
 import org.springframework.stereotype.Component;
 
+/** Format validator for {@link com.yourco.ivr.domain.TokenType#OTP}: requires exactly 6 characters. */
 @Component
 public class OtpTokenValidator implements TokenValidator {
 

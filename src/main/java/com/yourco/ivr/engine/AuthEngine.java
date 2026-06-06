@@ -35,6 +35,49 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * Core authentication state machine — the heart of the IVR auth engine.
+ *
+ * <p>This service owns all token-level business logic: validating submitted tokens,
+ * managing retry budgets, switching between fallback paths, and determining when a session
+ * has achieved its target auth level (or must be locked).
+ *
+ * <h2>Two-stage validation pipeline</h2>
+ * <p>Each token submission goes through two gates in sequence:
+ * <ol>
+ *   <li><strong>Format gate</strong> — a lightweight {@link com.yourco.ivr.validator.TokenValidator}
+ *       checks structure (length, format). Runs always, no network call.</li>
+ *   <li><strong>Backend gate</strong> — if the brand config binds the token type to a
+ *       {@link com.yourco.ivr.lookup.TokenLookupService}, the engine calls the service to
+ *       verify the value against a system of record. Skipped if no binding exists.</li>
+ * </ol>
+ *
+ * <h2>Retry and path switching</h2>
+ * <p>Failure counts are tracked at the <em>required-token-slot</em> level, not the submitted
+ * type level. This prevents bypassing retry limits by cycling through backup alternatives
+ * (e.g. failing PIN once + SSN_LAST4 once + DATE_OF_BIRTH once should count as three
+ * failures against the PIN slot, not three independent single-failure counters).
+ *
+ * <p>When retries are exhausted on a path:
+ * <ul>
+ *   <li>For genuine validation failures (correct type, wrong value), the engine advances to
+ *       the next fallback path defined in the {@link com.yourco.ivr.domain.config.LevelRule}.</li>
+ *   <li>For wrong-type submissions, the session is locked immediately — no path switch —
+ *       to prevent probing for valid token types.</li>
+ *   <li>When all paths are exhausted, the session is locked for {@code lockoutSeconds}.</li>
+ * </ul>
+ *
+ * <h2>Security invariants</h2>
+ * <ul>
+ *   <li>Raw token values are never logged — only {@link com.yourco.ivr.domain.TokenType} and
+ *       outcome (PASS/FAIL).</li>
+ *   <li>Backup token resolution maps an accepted alternative back to the required slot so
+ *       session state always records the canonical required type, not the submitted type.</li>
+ * </ul>
+ *
+ * @see com.yourco.ivr.service.AuthenticateService
+ * @see com.yourco.ivr.engine.DisambiguationEngine
+ */
 @Service
 public class AuthEngine {
 
@@ -355,6 +398,7 @@ public class AuthEngine {
 
     // ── Private helpers ──────────────────────────────────────────────────────
 
+    /** Constructs a response builder pre-populated with fields common to all responses. */
     private AuthenticateResponse.AuthenticateResponseBuilder baseResponse(IvrSession session) {
         return AuthenticateResponse.builder()
             .sessionId(session.getSessionId())
@@ -579,12 +623,17 @@ public class AuthEngine {
         return accepted;
     }
 
+    /** Returns {@code true} if the customer's preferences block the given token type. */
     private boolean isBlocked(IvrSession session, TokenType tokenType) {
         if (session.getCustomerPreferences() == null) return false;
         Set<TokenType> blocked = session.getCustomerPreferences().getBlockedTokens();
         return blocked != null && blocked.contains(tokenType);
     }
 
+    /**
+     * Finds the first unblocked backup alternative for {@code blockedToken} on the given path.
+     * Returns {@code null} if no unblocked alternative exists (caller should advance path).
+     */
     private TokenType findAlternativeToken(IvrSession session, TokenPath path, TokenType blockedToken) {
         if (path.getBackupTokens() == null) return null;
         List<TokenType> backups = path.getBackupTokens().get(blockedToken);
@@ -597,6 +646,10 @@ public class AuthEngine {
         return null;
     }
 
+    /**
+     * Advances the active path index to the next fallback path, or sets the session to
+     * {@link com.yourco.ivr.domain.SessionStatus#FAILED} if no further paths exist.
+     */
     private AuthenticateResponse advanceToNextPathOrFail(IvrSession session, BrandAuthConfig config,
                                                       LevelRule rule, int currentPathIdx) {
         Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
@@ -617,6 +670,14 @@ public class AuthEngine {
             .build();
     }
 
+    /**
+     * Runs the two-stage validation pipeline for the submitted token.
+     *
+     * <p>Stage 1 (format gate): cheap, in-process format check via {@link TokenValidatorRegistry}.
+     * Returns early with a failure if the format is invalid, sparing the backend call.
+     * Stage 2 (backend gate): only runs if a {@link com.yourco.ivr.domain.config.VerificationBinding}
+     * exists for this token type in the brand config.
+     */
     private ValidationResult validateExternally(IvrSession session,
                                                BrandAuthConfig config,
                                                TokenType tokenType,
@@ -640,6 +701,13 @@ public class AuthEngine {
         return verifyAgainstBackend(session, tokenType, tokenValue, binding);
     }
 
+    /**
+     * Calls the configured backend lookup service to verify the token value.
+     * On any {@link RuntimeException} (timeout, unavailable service, unknown ID), behaviour
+     * is governed by {@link com.yourco.ivr.domain.config.VerificationBinding#isFailClosed()}:
+     * {@code true} (default) → treat as a validation failure;
+     * {@code false} → pass the token through on the format check alone.
+     */
     private ValidationResult verifyAgainstBackend(IvrSession session,
                                                   TokenType tokenType,
                                                   String tokenValue,

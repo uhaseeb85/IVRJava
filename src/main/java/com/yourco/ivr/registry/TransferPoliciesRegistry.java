@@ -18,6 +18,22 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * In-memory registry of {@link TransferPolicy} objects loaded from
+ * {@code ./config/transfers/*.json} at startup.
+ *
+ * <p>Transfer policies govern what authentication credit an incoming call transfer can carry
+ * from another IVR system. When a call is transferred, the engine:
+ * <ol>
+ *   <li>Looks up the source system's policy by {@code sourceSystemId}.</li>
+ *   <li>Filters the presented validated tokens to only those listed in
+ *       {@link TransferPolicy#getHonoredTokens()}.</li>
+ *   <li>Caps the transferred auth level at {@link TransferPolicy#getMaxHonoredLevel()}.</li>
+ * </ol>
+ *
+ * <p>Unlike brand configs, transfer policies are loaded once at startup and require a
+ * restart to pick up file changes ({@link #loadPolicies()} can also be called programmatically).
+ */
 @Component
 public class TransferPoliciesRegistry {
 
@@ -66,22 +82,39 @@ public class TransferPoliciesRegistry {
         }
     }
 
+    /**
+     * Returns the policy for the given source system ID, or {@code null} if not configured.
+     * Callers should treat a {@code null} return as an unconfigured/disallowed source.
+     */
     public TransferPolicy get(String sourceSystemId) {
         return policies.get(sourceSystemId);
     }
 
+    /**
+     * Returns {@code true} if the policy for {@code sourceSystemId} is enabled and includes
+     * {@code tokenType} in its honored-tokens list.
+     */
     public boolean isTokenHonored(String sourceSystemId, TokenType tokenType) {
         TransferPolicy policy = get(sourceSystemId);
         if (policy == null || !policy.isEnabled()) return false;
         return policy.getHonoredTokens() != null && policy.getHonoredTokens().contains(tokenType);
     }
 
+    /**
+     * Returns the maximum auth level the policy allows to be transferred from
+     * {@code sourceSystemId}; falls back to {@link AuthLevel#NONE} if the policy is absent,
+     * disabled, or has no explicit cap.
+     */
     public AuthLevel getMaxHonoredLevel(String sourceSystemId) {
         TransferPolicy policy = get(sourceSystemId);
         if (policy == null || !policy.isEnabled()) return AuthLevel.NONE;
         return policy.getMaxHonoredLevel() != null ? policy.getMaxHonoredLevel() : AuthLevel.NONE;
     }
 
+    /**
+     * Returns the list of token types honored from {@code sourceSystemId}; returns an empty
+     * list if the policy is absent, disabled, or has no honored tokens defined.
+     */
     public List<TokenType> getHonoredTokens(String sourceSystemId) {
         TransferPolicy policy = get(sourceSystemId);
         if (policy == null || !policy.isEnabled()) return Collections.emptyList();

@@ -32,6 +32,26 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+/**
+ * SQLite-backed implementation of {@link SessionRepository} using Spring's {@link JdbcTemplate}.
+ *
+ * <p>Session state is stored in the {@code ivr_session} table (schema defined in
+ * {@code src/main/resources/schema.sql}). Complex fields ({@link com.yourco.ivr.domain.IvrSession}
+ * collections and objects) are serialised to JSON columns via Jackson.
+ *
+ * <p><strong>Sensitive data:</strong> {@code collected_tokens} (raw PIN, SSN, etc.) is
+ * intentionally never written to the database — the column is always stored as {@code null}.
+ * Only the set of successfully <em>validated</em> token types is persisted.
+ *
+ * <p><strong>Optimistic locking:</strong> the {@code version} column is incremented on every
+ * {@code UPDATE}. If the row's version no longer matches the in-memory version a
+ * {@link com.yourco.ivr.exception.SessionConflictException} is thrown.
+ *
+ * <p><strong>TTL cleanup:</strong> {@link #cleanupExpired()} runs on a fixed-rate schedule
+ * (default 60 seconds, configurable via {@code ivr.session.cleanup.interval}) and bulk-deletes
+ * sessions older than {@code ivr.session.ttl-minutes} (default 30 minutes). {@link #getOrThrow}
+ * also performs a per-row TTL check on every read.
+ */
 @Repository
 public class SqliteSessionRepository implements SessionRepository {
 
@@ -49,6 +69,10 @@ public class SqliteSessionRepository implements SessionRepository {
         this.sessionTtl = Duration.ofMinutes(ttlMinutes);
     }
 
+    /**
+     * Persists the session. Dispatches to {@link #insert} for new sessions ({@code version == 0})
+     * and {@link #update} for existing ones. Always stamps {@code lastActivityAt} before writing.
+     */
     @Override
     public void save(IvrSession session) {
         session.setLastActivityAt(Instant.now());
@@ -151,6 +175,11 @@ public class SqliteSessionRepository implements SessionRepository {
         jdbc.update("DELETE FROM ivr_session WHERE session_id = ?", sessionId);
     }
 
+    /**
+     * Bulk-deletes sessions whose {@code last_activity_at} is older than the configured TTL.
+     * Runs automatically at a fixed rate (default 60 000 ms, override via
+     * {@code ivr.session.cleanup.interval}).
+     */
     @Scheduled(fixedRateString = "${ivr.session.cleanup.interval:60000}")
     public void cleanupExpired() {
         Instant cutoff = Instant.now().minus(sessionTtl);

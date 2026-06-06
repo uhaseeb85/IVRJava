@@ -7,6 +7,7 @@ import com.yourco.ivr.validator.ValidationErrorCode;
 import com.yourco.ivr.validator.ValidationResult;
 import org.springframework.stereotype.Component;
 
+/** Format validator for {@link com.yourco.ivr.domain.TokenType#CARD_LAST4}: requires exactly 4 characters. */
 @Component
 public class CardLast4Validator implements TokenValidator {
 

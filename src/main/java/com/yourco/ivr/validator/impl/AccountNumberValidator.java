@@ -6,6 +6,7 @@ import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.ValidationResult;
 import org.springframework.stereotype.Component;
 
+/** Format validator for {@link com.yourco.ivr.domain.TokenType#ACCOUNT_NUMBER}: accepts any non-blank value. */
 @Component
 public class AccountNumberValidator implements TokenValidator {
 

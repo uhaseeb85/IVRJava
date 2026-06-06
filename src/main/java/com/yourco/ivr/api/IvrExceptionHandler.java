@@ -20,6 +20,28 @@ import org.springframework.web.bind.annotation.RestControllerAdvice;
 
 import java.util.stream.Collectors;
 
+/**
+ * Global exception handler for all IVR REST controllers.
+ *
+ * <p>Maps domain and validation exceptions to structured {@link ErrorResponse} bodies with
+ * appropriate HTTP status codes. All exception types thrown by the engine and service layer
+ * should have a handler here to avoid leaking stack traces in 500 responses.
+ *
+ * <p>HTTP status mapping:
+ * <ul>
+ *   <li>400 — {@link com.yourco.ivr.exception.UnknownBrandException},
+ *             {@link com.yourco.ivr.exception.UnknownCallerException},
+ *             {@link com.yourco.ivr.exception.UnsupportedTokenTypeException},
+ *             {@link com.yourco.ivr.exception.UnknownLookupServiceException},
+ *             {@link IllegalArgumentException}, validation errors</li>
+ *   <li>403 — {@link com.yourco.ivr.exception.TransferNotAllowedException}</li>
+ *   <li>404 — {@link com.yourco.ivr.exception.SessionNotFoundException}</li>
+ *   <li>409 — {@link com.yourco.ivr.exception.SessionConflictException}</li>
+ *   <li>423 — {@link com.yourco.ivr.exception.SessionLockedException} (HTTP Locked)</li>
+ *   <li>500 — {@link com.yourco.ivr.exception.SessionSerializationException},
+ *             {@link com.yourco.ivr.exception.BrandConfigException}, unexpected exceptions</li>
+ * </ul>
+ */
 @RestControllerAdvice
 public class IvrExceptionHandler {
 

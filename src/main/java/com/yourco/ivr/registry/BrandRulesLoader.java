@@ -1,7 +1,5 @@
 package com.yourco.ivr.registry;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.service.BrandService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,6 +7,16 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+/**
+ * Spring startup hook that triggers the initial load of brand configs from disk.
+ *
+ * <p>Separated from {@link BrandService} so that the service can be unit-tested without
+ * triggering filesystem access at construction time. The {@code @PostConstruct} here runs
+ * after all beans are wired, at which point the config directory is guaranteed to exist
+ * (created by {@link BrandService#init()} which also runs {@code @PostConstruct} — Spring
+ * calls {@code @PostConstruct} methods in dependency order, so {@code BrandService} initialises
+ * first).
+ */
 @Component
 public class BrandRulesLoader {
 

@@ -4,6 +4,32 @@ import com.yourco.ivr.domain.Party;
 
 import java.util.List;
 
+/**
+ * Strategy interface for pre-filtering the candidate party list before token-based
+ * disambiguation begins.
+ *
+ * <p>Rules are applied in the order they appear in
+ * {@link com.yourco.ivr.domain.config.DisambiguationConfig#getRules()} by
+ * {@link DisambiguationEngine#applyRules}. A rule receives the current list and returns a
+ * (possibly smaller) filtered list. Returning an empty list will cause the session to fail.
+ *
+ * <p>Built-in implementations:
+ * <ul>
+ *   <li>{@link impl.ExcludeInactiveRule} — removes parties where {@code active == false}</li>
+ *   <li>{@link impl.PrimaryAniRule} — prefers parties whose {@code primaryAni == true}, falling
+ *       back to all parties if none are flagged</li>
+ * </ul>
+ *
+ * <p>Rule type names are resolved in
+ * {@link DisambiguationEngine#createRule(String)} — add a new {@code case} there to register
+ * a custom rule type.
+ */
 public interface DisambiguationRule {
+    /**
+     * Filters or reorders the candidate party list.
+     *
+     * @param parties the current candidate list; must not be modified in place — return a new list
+     * @return the filtered list; may be empty (which will fail disambiguation)
+     */
     List<Party> apply(List<Party> parties);
 }
