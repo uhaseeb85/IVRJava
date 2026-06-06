@@ -9,6 +9,7 @@ import com.yourco.ivr.exception.SessionSerializationException;
 import com.yourco.ivr.exception.TransferNotAllowedException;
 import com.yourco.ivr.exception.UnknownBrandException;
 import com.yourco.ivr.exception.UnknownCallerException;
+import com.yourco.ivr.exception.UnknownLookupServiceException;
 import com.yourco.ivr.exception.UnsupportedTokenTypeException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +47,12 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleToken(UnsupportedTokenTypeException e) {
         return ResponseEntity.status(400)
             .body(new ErrorResponse("UNSUPPORTED_TOKEN", e.getMessage()));
+    }
+
+    @ExceptionHandler(UnknownLookupServiceException.class)
+    public ResponseEntity<ErrorResponse> handleLookupService(UnknownLookupServiceException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("UNKNOWN_LOOKUP_SERVICE", e.getMessage()));
     }
 
     @ExceptionHandler(TransferNotAllowedException.class)

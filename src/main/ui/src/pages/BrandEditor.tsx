@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { cn } from '../lib/utils'
-import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2, Users } from 'lucide-react'
+import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2, Users, ServerCog } from 'lucide-react'
 
 const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
 const TYPES  = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
@@ -20,6 +20,12 @@ interface LevelRule {
   lockoutSeconds: number
 }
 
+interface VerificationBinding {
+  serviceId: string
+  params?: Record<string, string>
+  failClosed?: boolean
+}
+
 interface BrandConfig {
   brandId: string
   _existing?: boolean
@@ -28,6 +34,14 @@ interface BrandConfig {
     maxDisambiguationTokens?: number
     rules?: { type: string }[]
   }
+  verificationSources?: Record<string, VerificationBinding>
+}
+
+interface LookupServiceDescriptor {
+  id: string
+  displayName: string
+  description: string
+  supportedTokens: TokenType[]
 }
 
 const LEVEL_COLOR: Record<string, string> = {
@@ -46,6 +60,8 @@ const LEVEL_LEFT: Record<string, string> = {
 
 const API = {
   get: (id: string): Promise<BrandConfig> => fetch('/api/brands/' + id).then(r => r.json()),
+  lookupServices: (): Promise<LookupServiceDescriptor[]> =>
+    fetch('/api/lookup-services').then(r => r.ok ? r.json() : []),
   save: (cfg: BrandConfig) => {
     const isNew = !cfg._existing
     return fetch(isNew ? '/api/brands' : '/api/brands/' + cfg.brandId, {
@@ -148,10 +164,11 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
     levelRules: {},
     disambiguation: { maxDisambiguationTokens: 3, rules: [] },
   })
-  const [tab, setTab] = useState<'rules' | 'disambiguation' | 'flow' | 'json'>('rules')
+  const [tab, setTab] = useState<'rules' | 'disambiguation' | 'verification' | 'flow' | 'json'>('rules')
   const [saving, setSaving] = useState(false)
   const [loading, setLoading] = useState(!isNew)
   const [toast, setToast] = useState<{ msg: string; ok: boolean } | null>(null)
+  const [services, setServices] = useState<LookupServiceDescriptor[]>([])
 
   useEffect(() => {
     if (isNew) return
@@ -164,6 +181,10 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
       .catch(() => setToast({ msg: 'Failed to load brand config', ok: false }))
       .finally(() => setLoading(false))
   }, [brand.brandId, isNew])
+
+  useEffect(() => {
+    API.lookupServices().then(setServices).catch(() => setServices([]))
+  }, [])
 
   const showToast = (msg: string, ok: boolean) => {
     setToast({ msg, ok })
@@ -275,6 +296,35 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
     })
   }
 
+  const setVerificationSource = (tok: TokenType, serviceId: string) => {
+    setCfg(c => {
+      const next: Record<string, VerificationBinding> = { ...(c.verificationSources ?? {}) }
+      if (!serviceId) {
+        delete next[tok]
+      } else {
+        next[tok] = { ...next[tok], serviceId }
+      }
+      return { ...c, verificationSources: Object.keys(next).length ? next : undefined }
+    })
+  }
+
+  const setVerificationFailClosed = (tok: TokenType, failClosed: boolean) => {
+    setCfg(c => {
+      const cur = c.verificationSources?.[tok]
+      if (!cur) return c
+      return {
+        ...c,
+        verificationSources: { ...c.verificationSources, [tok]: { ...cur, failClosed } },
+      }
+    })
+  }
+
+  // Token types this brand actually references across all paths (what's worth binding).
+  const usedTokens: TokenType[] = TYPES.filter(t =>
+    Object.values(cfg.levelRules).some(rule =>
+      rule.paths.some(p => p.requiredTokens.includes(t)
+        || Object.values(p.backupTokens ?? {}).some(alts => alts.includes(t)))))
+
   const save = async () => {
     if (!cfg.brandId.trim()) { showToast('Brand ID is required', false); return }
     setSaving(true)
@@ -363,6 +413,9 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
           </button>
           <button onClick={() => setTab('disambiguation')} className={tabBtn('disambiguation')}>
             <Users size={14} />Disambiguation
+          </button>
+          <button onClick={() => setTab('verification')} className={tabBtn('verification')}>
+            <ServerCog size={14} />Verification
           </button>
           <button onClick={() => setTab('flow')} className={tabBtn('flow')}>
             <GitBranch size={14} />Flow
@@ -587,6 +640,74 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
                   })}
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* ── Verification tab ── */}
+          {tab === 'verification' && (
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-6 space-y-6">
+              <div>
+                <h2 className="font-bold text-slate-800 flex items-center gap-2">
+                  <ServerCog size={16} className="text-slate-500" />Backend Verification Sources
+                </h2>
+                <p className="text-sm text-slate-500 mt-0.5">
+                  Optionally bind each token to a backend service that verifies its value against a
+                  system of record. Tokens left as <span className="font-semibold">None</span> are
+                  format-checked only.
+                </p>
+              </div>
+
+              {usedTokens.length === 0 ? (
+                <div className="rounded-xl border border-dashed border-slate-200 p-10 text-center">
+                  <p className="text-sm font-semibold text-slate-500">No tokens configured yet</p>
+                  <p className="text-xs text-slate-400 mt-1">Add required tokens in the Rules tab first</p>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {usedTokens.map(tok => {
+                    const compatible = services.filter(s => s.supportedTokens.includes(tok))
+                    const binding = cfg.verificationSources?.[tok]
+                    return (
+                      <div key={tok} className="rounded-xl border border-slate-200 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <span className="text-sm font-bold text-slate-700">{tok}</span>
+                          {binding && (
+                            <label className="mt-2 flex items-center gap-2 text-xs text-slate-500 cursor-pointer select-none">
+                              <input
+                                type="checkbox"
+                                checked={binding.failClosed !== false}
+                                onChange={e => setVerificationFailClosed(tok, e.target.checked)}
+                                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                              />
+                              Fail closed if backend unavailable
+                            </label>
+                          )}
+                        </div>
+                        <select
+                          className={cn(inputCls, 'sm:w-72')}
+                          value={binding?.serviceId ?? ''}
+                          onChange={e => setVerificationSource(tok, e.target.value)}
+                        >
+                          <option value="">None (format check only)</option>
+                          {compatible.map(s => (
+                            <option key={s.id} value={s.id}>{s.displayName}</option>
+                          ))}
+                          {/* Preserve an unknown/incompatible bound service so it isn't silently dropped */}
+                          {binding?.serviceId && !compatible.some(s => s.id === binding.serviceId) && (
+                            <option value={binding.serviceId}>{binding.serviceId} (unavailable)</option>
+                          )}
+                        </select>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+
+              {services.length === 0 && (
+                <p className="text-xs text-amber-600">
+                  No lookup services are registered on the server.
+                </p>
+              )}
             </div>
           )}
 

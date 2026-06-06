@@ -11,13 +11,19 @@ import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
+import com.yourco.ivr.domain.config.VerificationBinding;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
+import com.yourco.ivr.lookup.LookupRequest;
+import com.yourco.ivr.lookup.LookupResult;
+import com.yourco.ivr.lookup.LookupServiceRegistry;
+import com.yourco.ivr.lookup.TokenLookupService;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.repository.SessionRepository;
 import com.yourco.ivr.validator.TokenValidationContext;
 import com.yourco.ivr.validator.TokenValidator;
 import com.yourco.ivr.validator.TokenValidatorRegistry;
+import com.yourco.ivr.validator.ValidationErrorCode;
 import com.yourco.ivr.validator.ValidationResult;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,17 +42,20 @@ public class AuthEngine {
 
     private final BrandRulesRegistry rulesRegistry;
     private final TokenValidatorRegistry validatorRegistry;
+    private final LookupServiceRegistry lookupRegistry;
     private final SessionRepository sessionRepo;
     private final PromptResolver promptResolver;
     private final DisambiguationEngine disambiguationEngine;
 
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       TokenValidatorRegistry validatorRegistry,
+                      LookupServiceRegistry lookupRegistry,
                       SessionRepository sessionRepo,
                       PromptResolver promptResolver,
                       DisambiguationEngine disambiguationEngine) {
         this.rulesRegistry = rulesRegistry;
         this.validatorRegistry = validatorRegistry;
+        this.lookupRegistry = lookupRegistry;
         this.sessionRepo = sessionRepo;
         this.promptResolver = promptResolver;
         this.disambiguationEngine = disambiguationEngine;
@@ -157,7 +166,7 @@ public class AuthEngine {
         }
 
         // 1. Validate externally
-        ValidationResult validationResult = validateExternally(session, tokenType, tokenValue);
+        ValidationResult validationResult = validateExternally(session, config, tokenType, tokenValue);
         boolean valid = validationResult.isValid();
         String validationDetail = valid ? "PASS"
             : (validationResult.getErrorCode() != null
@@ -609,14 +618,56 @@ public class AuthEngine {
     }
 
     private ValidationResult validateExternally(IvrSession session,
+                                               BrandAuthConfig config,
                                                TokenType tokenType,
                                                String tokenValue) {
+        // ── Stage 1: format gate (cheap, no network) ─────────────────────────
         TokenValidator validator = validatorRegistry.resolve(session.getBrandId(), tokenType);
         TokenValidationContext ctx = new TokenValidationContext(
             tokenType, tokenValue, session.getCallerId(),
             session.getCollectedTokens(), session.getBrandId()
         );
-        return validator.validate(ctx);
+        ValidationResult formatResult = validator.validate(ctx);
+        if (!formatResult.isValid()) {
+            return formatResult;
+        }
+
+        // ── Stage 2: backend verification (only if this token is bound to a service) ──
+        VerificationBinding binding = config.verificationSourceFor(tokenType);
+        if (binding == null) {
+            return ValidationResult.ok();  // legacy behavior: format check only
+        }
+        return verifyAgainstBackend(session, tokenType, tokenValue, binding);
+    }
+
+    private ValidationResult verifyAgainstBackend(IvrSession session,
+                                                  TokenType tokenType,
+                                                  String tokenValue,
+                                                  VerificationBinding binding) {
+        try {
+            TokenLookupService service = lookupRegistry.get(binding.getServiceId());
+            LookupRequest request = new LookupRequest(
+                tokenType, tokenValue, session.getCallerId(),
+                session.getBrandId(), session.getCollectedTokens(), binding.getParams()
+            );
+            LookupResult result = service.verify(request);
+            // Token value never logged — only type, service and outcome.
+            log.info("LOOKUP [{}] brand={} token={} service={} result={}",
+                session.getSessionId(), session.getBrandId(), tokenType,
+                binding.getServiceId(), result.isVerified() ? "VERIFIED" : "REJECTED");
+            return result.isVerified()
+                ? ValidationResult.ok()
+                : ValidationResult.fail(result.getCode() != null
+                    ? result.getCode() : ValidationErrorCode.VERIFICATION_FAILED);
+        } catch (RuntimeException ex) {
+            // Backend unavailable (timeout, error, or unknown service id).
+            log.warn("LOOKUP [{}] brand={} token={} service={} UNAVAILABLE failClosed={}: {}",
+                session.getSessionId(), session.getBrandId(), tokenType,
+                binding.getServiceId(), binding.isFailClosed(), ex.getMessage());
+            return binding.isFailClosed()
+                ? ValidationResult.fail(ValidationErrorCode.VERIFICATION_UNAVAILABLE)
+                : ValidationResult.ok();
+        }
     }
 
 }

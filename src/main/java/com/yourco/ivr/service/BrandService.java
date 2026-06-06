@@ -4,10 +4,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
+import com.yourco.ivr.domain.config.VerificationBinding;
 import com.yourco.ivr.exception.BrandConfigException;
 import com.yourco.ivr.exception.UnknownBrandException;
+import com.yourco.ivr.lookup.LookupServiceRegistry;
+import com.yourco.ivr.lookup.TokenLookupService;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,12 +31,15 @@ public class BrandService {
     private static final Logger log = LoggerFactory.getLogger(BrandService.class);
 
     private final BrandRulesRegistry registry;
+    private final LookupServiceRegistry lookupRegistry;
     private final ObjectMapper mapper;
     private final String configDir;
 
-    public BrandService(BrandRulesRegistry registry, ObjectMapper mapper,
+    public BrandService(BrandRulesRegistry registry, LookupServiceRegistry lookupRegistry,
+                        ObjectMapper mapper,
                         @Value("${ivr.brands.config-dir:./config/brands}") String configDir) {
         this.registry = registry;
+        this.lookupRegistry = lookupRegistry;
         this.mapper = mapper;
         this.configDir = configDir;
     }
@@ -135,6 +142,27 @@ public class BrandService {
                 if (path.getRequiredTokens() == null || path.getRequiredTokens().isEmpty()) {
                     return ValidationResult.error(
                         "Path " + i + " in level " + entry.getKey() + " must have required tokens");
+                }
+            }
+        }
+        if (config.getVerificationSources() != null) {
+            for (Map.Entry<TokenType, VerificationBinding> entry : config.getVerificationSources().entrySet()) {
+                TokenType token = entry.getKey();
+                VerificationBinding binding = entry.getValue();
+                if (binding == null || binding.getServiceId() == null
+                        || binding.getServiceId().trim().isEmpty()) {
+                    return ValidationResult.error(
+                        "Verification source for " + token + " must specify a serviceId");
+                }
+                if (!lookupRegistry.contains(binding.getServiceId())) {
+                    return ValidationResult.error(
+                        "Unknown lookup service '" + binding.getServiceId() + "' for token " + token);
+                }
+                TokenLookupService service = lookupRegistry.get(binding.getServiceId());
+                if (service.supportedTokens() == null || !service.supportedTokens().contains(token)) {
+                    return ValidationResult.error(
+                        "Lookup service '" + binding.getServiceId()
+                        + "' does not support token " + token);
                 }
             }
         }

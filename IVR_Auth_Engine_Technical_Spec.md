@@ -522,6 +522,36 @@ public class TokenValidatorRegistry {
 }
 ```
 
+### 5.4 Backend Verification Layer (Lookup Services)
+
+`TokenValidator` only checks a token's **format**. A second, optional layer verifies the value against a real backend system of record. `validateExternally` is a two-stage pipeline: the format validator runs first (cheap, no network); then, **only if the brand config binds the token to a lookup service**, the engine calls that service. Both must pass.
+
+```java
+public interface TokenLookupService {
+    String id();                         // stable registry key, stored in brand config
+    String displayName();
+    String description();
+    Set<TokenType> supportedTokens();
+    LookupResult verify(LookupRequest request);
+}
+```
+
+Lookup services are Spring `@Component`s auto-discovered into `LookupServiceRegistry` (same pattern as the validator registry). **Adding a backend integration requires no per-brand code** — only a new bean. Brands select a service per token via config:
+
+```json
+"verificationSources": {
+  "SSN_LAST4": { "serviceId": "experian-ssn", "params": { "region": "US" }, "failClosed": true }
+}
+```
+
+- `BrandService.validate()` rejects a config that references an unknown `serviceId`, or a service that does not support the bound token type (HTTP 400).
+- On backend error/timeout the engine applies the binding's `failClosed` policy (`true` ⇒ `VERIFICATION_UNAVAILABLE` failure; `false` ⇒ format-only result stands).
+- Raw token values are never logged by the engine or services — only `serviceId`, `tokenType`, and outcome.
+- `GET /api/lookup-services` exposes the registry to the Brand Editor's **Verification** tab.
+- A configurable `stub-verify` service ships for development. See [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md) for full design.
+
+> Note: `validateExternally` now also receives the loaded `BrandAuthConfig` so it can read `verificationSourceFor(tokenType)`.
+
 ---
 
 ## 6. Call Transfer

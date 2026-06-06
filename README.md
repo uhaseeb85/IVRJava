@@ -13,6 +13,7 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Progressive authentication** — Sessions start at `NONE` and step up to the target level; mid-session escalation is supported
 - **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path before failing
 - **Backup token alternatives** — Each required token can declare alternative token types that the client may submit instead (e.g. accept `SSN_LAST4` or `DATE_OF_BIRTH` in place of `PIN`)
+- **Configurable backend verification** — Each token can be bound (per brand, in config/UI) to a pluggable backend **lookup service** that verifies the value against a system of record. Services are auto-discovered Spring beans; brands wire them up on demand with no code. See [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md)
 - **Party Disambiguation** — When an ANI maps to multiple parties (customers), the engine applies configurable disambiguation rules and requests differentiating tokens to resolve to a single party
 - **Customer Preference Filtering** — Once a party is identified, customer-specific preferences (e.g., blocked token types) are loaded and used to filter which tokens are offered — blocked tokens are automatically skipped and backup alternatives or fallback paths are used instead
 - **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored
@@ -106,6 +107,7 @@ To build the static files served by Spring Boot: `npm run build`
 | `POST` | `/api/brands` | Create a new brand config |
 | `PUT` | `/api/brands/{id}` | Update an existing brand config |
 | `DELETE` | `/api/brands/{id}` | Delete a brand config |
+| `GET` | `/api/lookup-services` | List available backend verification services (for the Verification tab) |
 
 ### 🔄 Full Auth Flow Example
 
@@ -227,6 +229,27 @@ Each brand config has the following structure:
 }
 ```
 
+### Backend Verification Sources
+
+By default a submitted token is only **format-checked** (e.g. "PIN is ≥ 4 digits"). To additionally verify a token against a real backend system of record, bind it to a **lookup service** in the brand config (optional, per token):
+
+```json
+{
+  "brandId": "BRAND_A",
+  "verificationSources": {
+    "SSN_LAST4":      { "serviceId": "stub-verify", "params": { "region": "US" }, "failClosed": true },
+    "ACCOUNT_NUMBER": { "serviceId": "stub-verify" }
+  },
+  "levelRules": { ... }
+}
+```
+
+- **`serviceId`** — id of a registered `TokenLookupService` (list them via `GET /api/lookup-services`)
+- **`params`** *(optional)* — per-brand params passed to the service (e.g. region/dataset). **Never store secrets here**; reference them by alias
+- **`failClosed`** *(default `true`)* — when the backend is unavailable, fail the token (`true`) or fall back to format-only (`false`)
+
+When a binding is present, the engine runs the format validator **then** calls the service; both must pass. Tokens with no binding behave exactly as before. **Adding a backend integration is just dropping a new `@Component implements TokenLookupService`** — no per-brand code. A configurable `stub-verify` service ships for development. Full design: [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md).
+
 ### Party Disambiguation & Customer Preferences
 
 Party disambiguation is always-on for all brands. On session start, the engine calls `PartyLookupProvider.lookupByAni(callerId)` (pluggable interface) to find parties matching the ANI.
@@ -347,9 +370,14 @@ src/main/java/com/yourco/ivr/
 │   ├── AuthenticateService.java    # Session orchestrator
 │   └── BrandService.java           # Brand file CRUD orchestrator
 ├── validator/
-│   ├── TokenValidator.java         # Interface
+│   ├── TokenValidator.java         # Interface (format checks)
 │   ├── TokenValidatorRegistry.java
 │   └── impl/                       # 7 stub validators
+├── lookup/                 # Backend token verification
+│   ├── TokenLookupService.java     # SPI — pluggable backend verifier
+│   ├── LookupServiceRegistry.java  # Auto-built registry of all services
+│   ├── LookupRequest.java / LookupResult.java
+│   └── impl/StubLookupService.java # Configurable dev stub
 ├── registry/
 │   ├── BrandRulesRegistry.java
 │   ├── BrandRulesLoader.java       # Loads brand configs at startup
@@ -425,6 +453,7 @@ mvn test
 
 ## 📚 Documentation
 
+- **[Brand Onboarding Guide](ONBOARDING.md)** — Step-by-step guide to adding a new brand (config vs. code)
 - **[Technical Spec](IVR_Auth_Engine_Technical_Spec.md)** — Full system design document (must stay in sync with code changes)
 - **[GitHub Guide](.github/github-instructions.md)** — Contribution workflow, branching strategy, and PR checklist
 - **[Swagger UI](http://localhost:8081/swagger-ui.html)** — Interactive API documentation (run the service first)
