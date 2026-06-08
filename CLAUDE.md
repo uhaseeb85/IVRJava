@@ -36,7 +36,7 @@ mvn clean compile
 mvn test
 
 # Run a specific test class
-mvn test -Dtest=AuthEngineTest
+mvn test -Dtest=IvrAuthIntegrationTest
 
 # Start the server (port 8081)
 mvn spring-boot:run
@@ -72,10 +72,11 @@ src/main/java/com/yourco/ivr/
 ├── api/                    # REST controllers + DTOs + global exception handler
 ├── domain/                 # Core model: IvrSession, AuthLevel, TokenType, Party, ...
 │   └── config/             # Brand config model: BrandAuthConfig, LevelRule, TokenPath, ...
-├── engine/                 # AuthEngine, DisambiguationEngine, CrossBrandTokenEvaluator
+├── engine/                 # AuthEngine, DisambiguationEngine
 ├── service/                # AuthenticateService (orchestrator), BrandService (file CRUD)
 ├── registry/               # BrandRulesRegistry, TransferPoliciesRegistry (in-memory caches)
-├── repository/             # SqliteSessionRepository (INSERT OR REPLACE, JSON columns)
+├── lookup/                 # TokenLookupService SPI + VerificationBindings + LookupServiceRegistry + StubLookupService
+├── repository/             # SqliteSessionRepository (insert/update with optimistic locking, JSON columns)
 ├── validator/              # TokenValidator interface + 7 stub implementations
 ├── partylookup/            # PartyLookupProvider interface + StubPartyLookupProvider
 ├── preference/             # CustomerPreferenceProvider interface + stub
@@ -143,27 +144,6 @@ AuthenticateController → AuthenticateService
 3. **New unit/integration tests are required for every new feature or engine behavior change.** Tests live in `src/test/java/com/yourco/ivr/`.
 4. **Keep docs in sync** — `README.md` and `IVR_Auth_Engine_Technical_Spec.md` must be updated when endpoints, config structure, or engine behavior changes.
 5. **Validate brand configs** before saving via `BrandService.validate()`. Never bypass this by calling `registry.register()` directly from outside the service.
-
----
-
-## Known Issues / Tech Debt (from code review)
-
-These are open problems to be aware of when touching related code:
-
-| Issue | Location | Notes |
-|---|---|---|
-| **Session write race condition** | `SqliteSessionRepository`, `AuthEngine` | No optimistic locking. Concurrent token submissions for the same session → last write wins. Fix: add a `version` column, use `UPDATE … WHERE version = ?`. |
-| **`SessionSerializationException` unhandled** | `IvrExceptionHandler` | Falls through to 500 with stack trace. Add a handler. |
-| **No catch-all exception handler** | `IvrExceptionHandler` | Unexpected exceptions expose stack traces. Add `@ExceptionHandler(Exception.class)`. |
-| **Registry gap during refresh** | `BrandService.refreshRegistry()` | `clear()` then `loadFromDirectory()` leaves a window where all brands are gone. Fix with atomic swap. |
-| **`file.delete()` return not checked** | `BrandService.delete()` | Silent failure on permission errors. |
-| **Double registry lookup in transfer** | `AuthenticateService.transfer()` | `transferRegistry.get()` called twice; use a local variable. |
-| **No session ownership check** | `AuthEngine`, `AuthenticateService` | Any caller who knows a `sessionId` can submit tokens against it. |
-| **Token pruning loses cross-path tokens** | `AuthEngine.pruneTokensNotInPath()` | Tokens validated in path N are discarded when switching to path N+1, even if they're required there. |
-| **Locked sessions not enforced at entry** | `AuthEngine.submitToken()` | Check `LOCKED` status before processing; respect `lockedUntil` expiry. |
-| **Two DB queries per session read** | `SqliteSessionRepository.getOrThrow()` | `checkExpired()` + main `SELECT` can be merged into one query. |
-| **No audit logging** | `AuthEngine`, `AuthenticateService` | Zero auth events logged. Add structured log entries for start/token/escalate/auth outcomes. |
-
 ---
 
 ## Testing
@@ -172,7 +152,7 @@ Tests are integration tests using `@SpringBootTest(webEnvironment = RANDOM_PORT)
 
 ```bash
 mvn test                          # run everything
-mvn test -Dtest=AuthEngineTest    # single class
+mvn test -Dtest=IvrAuthIntegrationTest    # single class
 ```
 
 The stub implementations (`StubPartyLookupProvider`, `StubCustomerPreferenceProvider`) return hardcoded data — see these stubs to understand what test scenarios assume about parties and preferences.

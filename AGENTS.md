@@ -2,7 +2,7 @@
 
 ## 📖 Overview
 
-This project implements a **multi-brand IVR Token Authentication Engine** with progressive authentication levels, token sharing policies, and rule-driven path fallbacks. It is built with **Java 8 / Spring Boot 2.7.x** and uses **SQLite** for session storage and **JSON** for brand configuration.
+This project implements a **multi-brand IVR Token Authentication Engine** with progressive authentication levels, customer preference filtering, and rule-driven path fallbacks. It is built with **Java 8 / Spring Boot 2.7.x** and uses **SQLite** for session storage and **JSON** for brand configuration.
 
 Key capabilities:
 - Multi-brand rule isolation with independent auth levels
@@ -36,7 +36,7 @@ mvn clean compile
 mvn spring-boot:run
 ```
 
-The application starts on `http://localhost:8080`.
+The application starts on `http://localhost:8081`.
 
 ### Run Tests
 
@@ -55,17 +55,15 @@ This project includes **Springdoc OpenAPI** for interactive API documentation an
 Once the service is running, open your browser to:
 
 ```
-http://localhost:8080/swagger-ui.html
+http://localhost:8081/swagger-ui.html
 ```
-
-(or `http://localhost:8081/swagger-ui.html` if port 8080 is occupied)
 
 ### OpenAPI Spec
 
 The raw OpenAPI 3.0 JSON spec is available at:
 
 ```
-http://localhost:8080/v3/api-docs
+http://localhost:8081/v3/api-docs
 ```
 
 ### How to Test Drive the APIs
@@ -135,8 +133,8 @@ src/
 │   │   │   └── config/        # Brand config model
 │   │   ├── engine/            # Auth state machine
 │   │   │   ├── AuthEngine.java
-│   │   │   ├── CrossBrandTokenEvaluator.java
-│   │   │   └── PromptResolver.java
+│   │   │   ├── PromptResolver.java
+│   │   │   └── DisambiguationEngine.java
 │   │   ├── service/           # AuthenticateService orchestrator
 │   │   ├── validator/         # Token validation layer
 │   │   │   ├── TokenValidator.java (interface)
@@ -145,12 +143,18 @@ src/
 │   │   ├── registry/          # Brand config loader
 │   │   ├── repository/        # SQLite session storage
 │   │   └── exception/         # Custom exceptions
-│   └── resources/
-│       ├── application.properties
-│       ├── schema.sql
-│       └── brands/            # JSON brand configs
-│           ├── brand-a.json
-│           └── brand-b.json
+    │   └── resources/
+    │       ├── application.properties
+    │       └── schema.sql
+    │
+    ├── config/brands/              # External brand JSON files
+    │   ├── brand_a.json
+    │   ├── brand_b.json
+    │   ├── id_only_brand.json
+    │   └── test_brand.json
+    │
+    └── config/transfers/           # External transfer policy files
+        └── transfer-policies.json
 ```
 
 ---
@@ -162,20 +166,26 @@ src/
 Brand rules live in `./config/brands/*.json` (external directory). Each file defines:
 - **`levelRules`** — one `LevelRule` per `AuthLevel` (BASIC, STANDARD, ELEVATED, etc.)
   - **`paths`** — ordered list of token paths; [0] = primary, [1..n] = fallbacks
-  - **`maxRetriesPerToken`** — attempts before path fallback or lockout
+    - **`pathIndex`** — 0-based position
+    - **`description`** — human label
+    - **`requiredTokens`** — all must validate to complete the path
+    - **`backupTokens`** *(optional)* — map from required token to alternatives that satisfy the slot
+  - **`maxRetriesPerToken`** — default attempts before path fallback or lockout
+  - **`tokenRetryLimits`** — per-token retry overrides; values here take precedence over `maxRetriesPerToken`
   - **`lockoutSeconds`** — lockout duration when all paths exhausted
-- **`backupTokens`** — optional mapping from a required token to alternative tokens the client may submit instead (e.g. `PIN` can be replaced by `SSN_LAST4` or `DATE_OF_BIRTH`)
 
-Add a new brand by creating a new `.json` file in the `brands/` directory and restarting.
+Add a new brand by creating a new `.json` file in the `config/brands/` directory and restarting, or via the UI/API.
 
 ### Application Properties
 
 | Property | Default | Description |
 |---|---|---|
-| `server.port` | `8080` | HTTP port |
+| `server.port` | `8081` | HTTP port |
 | `spring.datasource.url` | `jdbc:sqlite:ivr-auth.db` | SQLite database path |
 | `ivr.session.ttl-minutes` | `30` | Session TTL in minutes |
 | `ivr.session.cleanup.interval` | `60000` | Cleanup interval in ms |
+| `ivr.brands.config-dir` | `./config/brands` | External brand config directory |
+| `ivr.transfer.config-dir` | `./config/transfers` | External transfer policies directory |
 
 ---
 
@@ -190,7 +200,7 @@ Add a new brand by creating a new `.json` file in the `brands/` directory and re
 ### Example: Start a Session
 
 ```bash
-curl -X POST http://localhost:8080/ivr/authenticate \
+curl -X POST http://localhost:8081/ivr/authenticate \
   -H "Content-Type: application/json" \
   -d '{
     "brandId": "BRAND_A",
@@ -264,6 +274,6 @@ mvn test -Dtest=AuthEngineTest
 ## 🔒 Security Notes
 
 - **Never log raw token values** (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.
-- Token values stored in `collectedTokens` should be encrypted at rest (see Phase 6 in the spec).
+- Raw token values are never persisted to the database (the `collected_tokens` column is always null). Values exist in memory only for the duration of a single request.
 - Session IDs are UUIDs — no sequential IDs.
 - Lockout is enforced server-side; cannot be bypassed by restarting the session.

@@ -31,7 +31,7 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 
 | Layer | Technology | Responsibility |
 |---|---|---|
-| REST API | Spring MVC | Accepts IVR platform calls on 6 session endpoints + brand CRUD |
+| REST API | Spring MVC | Accepts IVR platform calls on 3 session endpoint paths + brand CRUD |
 | Auth Engine | Plain Java (Spring `@Service`) | Core state machine — evaluates rules, drives path progression |
 | Rules Registry | Jackson + external JSON | Loads and caches `BrandAuthConfig` objects from `./config/brands/` |
 | Transfer Policies Registry | Jackson + external JSON | Loads per-source `TransferPolicy` objects from `./config/transfers/` |
@@ -189,8 +189,10 @@ Each brand config has the following structure:
     - **`pathIndex`** — position in the path list
     - **`description`** — human-readable label
     - **`requiredTokens`** — ordered list of `TokenType` values that must all be validated to complete this path
-    - **`backupTokens`** *(optional)* — map from a required token to alternative token types the client may submit. The client is told which tokens are accepted via the `acceptedTokens` response field. However, the required token itself must still be collected directly for the path to complete.
-  - **`maxRetriesPerToken`** — number of failed attempts allowed per token type before triggering a path fallback or failing the session
+    - **`backupTokens`** *(optional)* — map from a required token to alternative token types the client may submit. The client is told which tokens are accepted via the `acceptedTokens` response field. Submitting a backup token (e.g. `SSN_LAST4` for `PIN`) satisfies the required-token slot — the engine maps the submitted type back to the required slot, so the path can complete without ever collecting the required token directly.
+  - **`maxRetriesPerToken`** — default maximum failed attempts allowed per required-token slot before triggering a path fallback or failing the session
+  - **`tokenRetryLimits`** *(optional)* — per-token retry overrides; keyed by `TokenType`, values take precedence over `maxRetriesPerToken` for that specific token
+  - **`lockoutSeconds`** — duration in seconds the session stays locked (status `REDIRECT_TO_AGENT`) after all paths at that level are exhausted
 
 ### Brand A (full example)
 
@@ -210,7 +212,8 @@ Each brand config has the following structure:
           "requiredTokens": ["ACCOUNT_NUMBER", "PIN"],
           "backupTokens": { "PIN": ["SSN_LAST4", "DATE_OF_BIRTH"] } },
         { "pathIndex": 1, "description": "Account + OTP fallback",
-          "requiredTokens": ["ACCOUNT_NUMBER", "OTP"] }
+          "requiredTokens": ["ACCOUNT_NUMBER", "OTP"],
+          "backupTokens": null }
       ],
       "maxRetriesPerToken": 3
     },
@@ -296,6 +299,8 @@ To integrate real backends, replace the stub implementations:
 | `ivr.session.cleanup.interval` | `60000` | Expired session cleanup interval (ms) |
 | `ivr.brands.config-dir` | `./config/brands` | External brand config directory |
 | `ivr.transfer.config-dir` | `./config/transfers` | External transfer policies directory |
+| `spring.jackson.serialization.write-dates-as-timestamps` | `false` | ISO-8601 date formatting |
+| `spring.jackson.time-zone` | `UTC` | Jackson time zone |
 
 ### Transfer Policies (JSON)
 
@@ -333,10 +338,12 @@ src/main/java/com/yourco/ivr/
 ├── api/                    # REST layer
 │   ├── AuthenticateController.java  # Unified session endpoints (3 total)
 │   ├── BrandController.java         # Brand CRUD endpoints
-│   ├── IvrExceptionHandler.java     # Global error handler
-│   └── dto/                         # Request/Response DTOs
-│       ├── CallTransferRequest.java  # Call transfer DTO
-│       └── ...
+    │   ├── IvrExceptionHandler.java     # Global error handler
+    │   ├── LookupServiceController.java # Lookup service discovery API
+    │   └── dto/                         # Request/Response DTOs
+    │       ├── CallTransferRequest.java  # Call transfer DTO
+    │       ├── ProcessingEvent.java      # Audit log entry in responses
+    │       └── ...
 ├── domain/                 # Core domain model
 │   ├── AuthLevel.java              # Auth level enum with rank
 │   ├── TokenType.java              # 7 token types
@@ -353,13 +360,21 @@ src/main/java/com/yourco/ivr/
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine/                 # Auth state machine
-│   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering + audit logging)
+│   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering + two-stage validation)
 │   ├── DisambiguationEngine.java   # Party resolution + token matching
 │   ├── DisambiguationRule.java     # Rule interface
 │   ├── PromptResolver.java
 │   └── impl/
 │       ├── ExcludeInactiveRule.java
 │       └── PrimaryAniRule.java
+├── lookup/                 # Backend token verification
+│   ├── TokenLookupService.java     # SPI — pluggable backend verifier
+│   ├── LookupServiceRegistry.java  # Auto-built registry of all services
+│   ├── VerificationBindings.java   # In-code token→service binding interface
+│   ├── DefaultVerificationBindings.java  # Default impl (empty bindings)
+│   ├── VerificationBinding.java    # Binding config (serviceId, params, failClosed)
+│   ├── LookupRequest.java / LookupResult.java
+│   └── impl/StubLookupService.java # Configurable dev stub
 ├── partylookup/            # ANI → Party resolution
 │   ├── PartyLookupProvider.java
 │   └── StubPartyLookupProvider.java
@@ -407,14 +422,18 @@ src/main/resources/
 
 config/brands/               # External brand config directory (loaded at startup)
 ├── brand_a.json              # BRAND_A — full example with 3 levels, backup tokens
-└── brand_b.json              # BRAND_B — simpler config with 2 levels
+├── brand_b.json              # BRAND_B — simpler config with 2 levels
+├── id_only_brand.json        # ID_ONLY_BRAND — identification-only mode
+└── test_brand.json           # TEST_BRAND — test brand with 2 levels
 
 config/transfers/             # External transfer policy directory
 └── transfer-policies.json    # Per-source token/level policies
 
 src/test/java/com/yourco/ivr/
-└── IvrAuthIntegrationTest.java           # 17 integration tests (auth, transfer, backup, fallback)
-└── DisambiguationAndPreferenceTest.java   # 12 integration tests (disambiguation + preferences, uses MockBean)
+├── IvrAuthIntegrationTest.java                 # 17+ integration tests (auth, transfer, backup, fallback)
+├── DisambiguationAndPreferenceTest.java         # 12 integration tests (disambiguation + preferences, uses MockBean)
+├── BackendVerificationIntegrationTest.java      # Backend verification pipeline tests
+└── IdentificationOnlyIntegrationTest.java       # Identification-only brand mode tests
 ```
 
 ---
