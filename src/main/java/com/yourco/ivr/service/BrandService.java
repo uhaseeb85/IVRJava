@@ -197,10 +197,15 @@ public class BrandService {
             for (File file : files) {
                 try {
                     BrandAuthConfig config = mapper.readValue(file, BrandAuthConfig.class);
-                    if (config.getBrandId() != null) {
-                        registry.register(config);
-                        log.info("Loaded brand config: {} from {}", config.getBrandId(), file.getName());
+                    ValidationResult validation = validate(config);
+                    if (config.getBrandId() == null || !validation.isValid()) {
+                        log.warn("Skipping invalid brand config {} — {}",
+                            file.getName(),
+                            config.getBrandId() == null ? "missing brandId" : validation.getMessage());
+                        continue;
                     }
+                    registry.register(config);
+                    log.info("Loaded brand config: {} from {}", config.getBrandId(), file.getName());
                 } catch (Exception e) {
                     log.warn("Failed to load brand file: {}", file.getName(), e);
                 }
