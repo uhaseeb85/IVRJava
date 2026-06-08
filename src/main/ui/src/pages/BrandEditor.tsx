@@ -5,7 +5,7 @@ import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2 } f
 const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
 const TYPES  = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
 type TokenType = typeof TYPES[number]
-type AuthLevel = typeof LEVELS[number]
+type AuthLevel = typeof LEVELS[number] | 'NONE'
 
 interface AuthPath {
   pathIndex: number
@@ -28,6 +28,7 @@ interface BrandConfig {
 }
 
 const LEVEL_COLOR: Record<string, string> = {
+  NONE:     'text-emerald-700 bg-emerald-50 border-emerald-200',
   BASIC:    'text-slate-700 bg-slate-100 border-slate-300',
   STANDARD: 'text-blue-700 bg-blue-50 border-blue-200',
   ELEVATED: 'text-violet-700 bg-violet-50 border-violet-200',
@@ -35,6 +36,7 @@ const LEVEL_COLOR: Record<string, string> = {
 }
 
 const LEVEL_LEFT: Record<string, string> = {
+  NONE:     'border-l-emerald-500',
   BASIC:    'border-l-slate-400',
   STANDARD: 'border-l-blue-500',
   ELEVATED: 'border-l-violet-500',
@@ -384,19 +386,145 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
                   <span className="text-sm">
                     <span className="font-semibold text-slate-700">Identification only</span>
                     <span className="block text-xs text-slate-400">
-                      No authentication — resolve the caller to a single party, then stop. Access level stays NONE.
+                      No authentication levels — resolve caller to a single party. Optionally collect identity tokens under NONE level rules to confirm identity.
                     </span>
                   </span>
                 </label>
               </div>
 
               {cfg.identificationOnly ? (
-                <div className="bg-white rounded-xl border border-slate-200 shadow-sm p-5">
-                  <p className="text-sm text-slate-500">
-                    This brand runs in <span className="font-semibold text-slate-700">identification-only</span> mode.
-                    Auth levels are not used — the flow stops once a single party is identified and reports access level NONE.
+                <>
+                <div className="bg-emerald-50 rounded-xl border border-emerald-200 p-4">
+                  <p className="text-sm text-emerald-800">
+                    <span className="font-semibold">Identification-only mode.</span> Optionally define tokens
+                    to collect under <span className="font-semibold">NONE</span> level — these are matched against
+                    the resolved party's fields to confirm caller identity. Without rules, the flow finalizes
+                    immediately after party resolution.
                   </p>
                 </div>
+
+                {/* NONE level editor for identification-only brands */}
+                {(() => {
+                  const lvl = 'NONE'
+                  const rule = cfg.levelRules[lvl]
+                  return (
+                    <div className={cn(
+                      'bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden',
+                      rule ? 'border-l-4 border-l-emerald-500' : ''
+                    )}>
+                      <div className="px-5 py-4 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <span className="inline-flex rounded-full border px-2.5 py-0.5 text-xs font-bold text-emerald-700 bg-emerald-50 border-emerald-200">
+                            NONE
+                          </span>
+                          {rule && (
+                            <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 uppercase tracking-wide">
+                              active
+                            </span>
+                          )}
+                        </div>
+                        {rule
+                          ? <button onClick={() => removeLevel(lvl)} className="text-xs text-slate-400 hover:text-red-600 transition-colors font-semibold">Remove Rules</button>
+                          : <button onClick={() => addLevel(lvl)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold">+ Add Identity Tokens</button>
+                        }
+                      </div>
+
+                      {rule && (
+                        <div className="border-t border-slate-100 px-5 pb-5 space-y-5 pt-4">
+                          <div className="grid grid-cols-2 gap-3">
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Max Retries per Token</label>
+                              <input type="number" min={1} className={inputCls}
+                                value={rule.maxRetriesPerToken}
+                                onChange={e => setLevelField(lvl, 'maxRetriesPerToken', parseInt(e.target.value) || 1)}
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Lockout (sec)</label>
+                              <input type="number" min={0} className={inputCls}
+                                value={rule.lockoutSeconds}
+                                onChange={e => setLevelField(lvl, 'lockoutSeconds', parseInt(e.target.value) || 0)}
+                              />
+                            </div>
+                          </div>
+
+                          <div>
+                            <div className="flex items-center justify-between mb-3">
+                              <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Identity Paths</span>
+                              <button onClick={() => addPath(lvl)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold flex items-center gap-1">
+                                <Plus size={11} />Add Path
+                              </button>
+                            </div>
+
+                            <div className="space-y-3">
+                              {rule.paths.map((p, pi) => (
+                                <div key={pi} className={cn(
+                                  'rounded-xl border p-4 space-y-4',
+                                  pi === 0 ? 'border-indigo-100 bg-indigo-50/30' : 'border-slate-100 bg-slate-50/40'
+                                )}>
+                                  <div className="flex items-center justify-between">
+                                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                                      {pi === 0 ? 'Primary Path' : `Fallback ${pi}`}
+                                    </span>
+                                    {rule.paths.length > 1 && (
+                                      <button onClick={() => removePath(lvl, pi)}
+                                        className="text-slate-400 hover:text-red-600 transition-colors">
+                                        <Trash2 size={13} />
+                                      </button>
+                                    )}
+                                  </div>
+
+                                  <input className={inputCls}
+                                    placeholder="Description (e.g. Account + PIN)"
+                                    value={p.description || ''}
+                                    onChange={e => setPathDesc(lvl, pi, e.target.value)}
+                                  />
+
+                                  <div>
+                                    <label className="block text-xs font-semibold text-slate-500 mb-2">Required Tokens</label>
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {TYPES.map(t => (
+                                        <span key={t}
+                                          className={tokenChip(p.requiredTokens.includes(t))}
+                                          onClick={() => toggleToken(lvl, pi, t)}
+                                        >
+                                          {t}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  </div>
+
+                                  {p.requiredTokens.map(req => (
+                                    <div key={req} className="border-t border-slate-100 pt-3">
+                                      <label className="block text-xs font-semibold text-slate-500 mb-2">
+                                        Backup tokens for <span className="text-slate-700">{req}</span>
+                                      </label>
+                                      <div className="flex flex-wrap gap-x-4 gap-y-2">
+                                        {TYPES.filter(t => t !== req).map(t => {
+                                          const checked = !!(p.backupTokens?.[req]?.includes(t))
+                                          return (
+                                            <label key={t} className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer hover:text-slate-800 select-none">
+                                              <input type="checkbox" checked={checked}
+                                                onChange={() => toggleBackup(lvl, pi, req, t)}
+                                                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                                              />
+                                              {t}
+                                            </label>
+                                          )
+                                        })}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()}
+                </>
               ) : (
               <>
               {/* Levels */}

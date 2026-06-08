@@ -97,6 +97,10 @@ public class AuthenticateService {
         session.setCreatedAt(Instant.now());
         session.setLastActivityAt(Instant.now());
 
+        if (config.isIdentificationOnly()) {
+            session.setTargetLevel(AuthLevel.NONE);
+        }
+
         // ── Party lookup and disambiguation (always-on) ──────────────────────
         List<Party> parties = partyLookup.lookupByAni(req.getCallerId());
 
@@ -112,6 +116,23 @@ public class AuthenticateService {
         if (parties.size() > 1) {
             AuthenticateResponse disResp = disambiguationEngine.start(session);
             if (session.getPhase() == SessionPhase.AUTHENTICATING) {
+                if (config.isIdentificationOnly()) {
+                    boolean hasNoneRule = config.getLevelRules() != null
+                        && config.getLevelRules().containsKey(AuthLevel.NONE);
+                    if (hasNoneRule && req.getInitialTokens() != null
+                            && !req.getInitialTokens().isEmpty()) {
+                        for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
+                            AuthenticateResponse tokenResponse = engine.submitToken(
+                                session.getSessionId(), entry.getKey(), entry.getValue());
+                            if (tokenResponse.getStatus() == SessionStatus.FAILED
+                                    || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
+                                return tokenResponse;
+                            }
+                        }
+                        IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
+                        return engine.evaluateProgress(updatedSession, config);
+                    }
+                }
                 return engine.onPartyResolved(session, config);
             }
             return disResp;
@@ -124,9 +145,22 @@ public class AuthenticateService {
         session.setCustomerPreferences(prefs);
         sessionRepo.save(session);
 
-        // Identification-only brands: a single resolved party completes the session — there is
-        // no authentication step, so any initial tokens are irrelevant.
         if (config.isIdentificationOnly()) {
+            boolean hasNoneRule = config.getLevelRules() != null
+                && config.getLevelRules().containsKey(AuthLevel.NONE);
+            if (hasNoneRule && req.getInitialTokens() != null
+                    && !req.getInitialTokens().isEmpty()) {
+                for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
+                    AuthenticateResponse tokenResponse = engine.submitToken(
+                        session.getSessionId(), entry.getKey(), entry.getValue());
+                    if (tokenResponse.getStatus() == SessionStatus.FAILED
+                            || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
+                        return tokenResponse;
+                    }
+                }
+                IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
+                return engine.evaluateProgress(updatedSession, config);
+            }
             return engine.onPartyResolved(session, config);
         }
 

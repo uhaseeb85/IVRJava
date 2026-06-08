@@ -11,7 +11,10 @@ import java.util.Map;
  * <p>A brand config drives the entire authentication flow for one brand:
  * <ul>
  *   <li>{@code levelRules} — maps each supported {@link AuthLevel} to a {@link LevelRule}
- *       describing which token paths are required and how many retries are allowed.</li>
+ *       describing which token paths are required and how many retries are allowed.
+ *       Also used by identification-only brands to optionally define identification tokens
+ *       under the {@code NONE} level key. These tokens are matched against party fields to
+ *       confirm caller identity.</li>
  * </ul>
  *
  * <p>Brand configs are managed via {@link com.yourco.ivr.service.BrandService} and kept
@@ -30,13 +33,18 @@ public class BrandAuthConfig {
     /**
      * Authentication rules keyed by target level. Required for authentication brands;
      * may be omitted/empty when {@link #identificationOnly} is {@code true}.
+     * Also used by identification-only brands to optionally define identification tokens
+     * under the {@code NONE} level key. These tokens are matched against party fields
+     * to confirm caller identity.
      */
     private Map<AuthLevel, LevelRule> levelRules;
 
     /**
-     * When {@code true}, the goal is identification, not authentication: the flow stops as soon
-     * as a single party is resolved and reports {@code AUTHENTICATED} with {@code currentLevel=NONE}.
-     * No auth tokens are collected and escalation is not permitted. Defaults to {@code false}.
+     * When {@code true}, the flow identifies the caller to a single party. If
+     * {@code levelRules[NONE]} is defined, those tokens are collected and matched
+     * against party fields for identity confirmation. Without rules, finalizes
+     * immediately after party resolution. Escalation is not permitted.
+     * Defaults to {@code false}.
      */
     private boolean identificationOnly;
 }

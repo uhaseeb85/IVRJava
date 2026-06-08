@@ -1,4 +1,18 @@
 {
   "brandId" : "ID_ONLY_BRAND",
-  "identificationOnly" : true
+  "identificationOnly" : true,
+  "levelRules" : {
+    "NONE" : {
+      "paths" : [ {
+        "pathIndex" : 0,
+        "description" : "Account + PIN",
+        "requiredTokens" : [ "ACCOUNT_NUMBER", "PIN" ],
+        "backupTokens" : {
+          "PIN" : [ "SSN_LAST4", "DATE_OF_BIRTH" ]
+        }
+      } ],
+      "maxRetriesPerToken" : 3,
+      "lockoutSeconds" : 300
+    }
+  }
 }

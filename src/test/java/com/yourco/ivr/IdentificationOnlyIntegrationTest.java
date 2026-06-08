@@ -19,6 +19,8 @@ import org.springframework.http.ResponseEntity;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.when;
@@ -26,12 +28,10 @@ import static org.mockito.Mockito.when;
 /**
  * Integration tests for identification-only brands ({@code identificationOnly = true}).
  *
- * <p>These brands resolve the caller to a single party and stop — no authentication tokens are
- * collected and the result is {@code AUTHENTICATED} with {@code currentLevel = NONE}.
- *
- * <p>The {@code ID_ONLY_BRAND} fixture lives in {@code config/brands/id_only_brand.json}. The
- * {@link PartyLookupProvider} is mocked so we can exercise both the single-party and
- * multiple-party (disambiguation) resolution paths.
+ * <p>When {@code levelRules[NONE]} is defined, identification tokens are collected and
+ * matched against the resolved party's fields to confirm caller identity. Without
+ * {@code levelRules}, the session finalizes immediately after party resolution
+ * (backward-compatible behavior).
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class IdentificationOnlyIntegrationTest {
@@ -53,35 +53,131 @@ class IdentificationOnlyIntegrationTest {
         Party p = new Party();
         p.setPartyId(id);
         p.setAccountNumber(account);
+        p.setDateOfBirth("1990-01-15");
+        p.setSsnLast4("1234");
+        p.setCardLast4("5678");
         p.setActive(true);
         p.setPrimaryAni(true);
         return p;
     }
 
     @Test
-    void singlePartyResolvesImmediatelyToNone() {
+    void collectsIdentificationTokensThenResolves() {
         when(partyLookup.lookupByAni("1110001111"))
             .thenReturn(Collections.singletonList(party("P-001", "111000")));
 
         AuthenticateRequest start = new AuthenticateRequest();
         start.setBrandId("ID_ONLY_BRAND");
         start.setCallerId("1110001111");
-        start.setTargetLevel(AuthLevel.NONE); // ignored in identification-only mode
+        start.setTargetLevel(AuthLevel.NONE);
 
         ResponseEntity<AuthenticateResponse> resp = post(start);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
-        assertThat(resp.getBody().getMatchedPartyId()).isEqualTo("P-001");
-        assertThat(resp.getBody().getNextRequiredToken()).isNull();
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+
+        String sessionId = resp.getBody().getSessionId();
+
+        AuthenticateRequest token1 = new AuthenticateRequest();
+        token1.setSessionId(sessionId);
+        token1.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token1.setTokenValue("111000");
+
+        ResponseEntity<AuthenticateResponse> t1Resp = post(token1);
+        assertThat(t1Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(t1Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(t1Resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+
+        AuthenticateRequest token2 = new AuthenticateRequest();
+        token2.setSessionId(sessionId);
+        token2.setTokenType(TokenType.PIN);
+        token2.setTokenValue("1234");
+
+        ResponseEntity<AuthenticateResponse> t2Resp = post(token2);
+        assertThat(t2Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(t2Resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(t2Resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(t2Resp.getBody().getMatchedPartyId()).isEqualTo("P-001");
     }
 
     @Test
-    void multiplePartiesDisambiguateThenResolveToNone() {
-        when(partyLookup.lookupByAni("2220002222")).thenReturn(Arrays.asList(
-            party("P-100", "100100"),
-            party("P-200", "200200"),
-            party("P-300", "300300")));
+    void identificationTokenMismatchFails() {
+        when(partyLookup.lookupByAni("4440004444"))
+            .thenReturn(Collections.singletonList(party("P-400", "ABC123")));
+
+        AuthenticateRequest start = new AuthenticateRequest();
+        start.setBrandId("ID_ONLY_BRAND");
+        start.setCallerId("4440004444");
+        start.setTargetLevel(AuthLevel.NONE);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        AuthenticateRequest token1 = new AuthenticateRequest();
+        token1.setSessionId(sessionId);
+        token1.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token1.setTokenValue("WRONG");
+
+        ResponseEntity<AuthenticateResponse> t1Resp = post(token1);
+        assertThat(t1Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(t1Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(t1Resp.getBody().getRemainingAttempts()).isEqualTo(2);
+
+        AuthenticateRequest token2 = new AuthenticateRequest();
+        token2.setSessionId(sessionId);
+        token2.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token2.setTokenValue("WRONG2");
+
+        ResponseEntity<AuthenticateResponse> t2Resp = post(token2);
+        assertThat(t2Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(t2Resp.getBody().getRemainingAttempts()).isEqualTo(1);
+
+        AuthenticateRequest token3 = new AuthenticateRequest();
+        token3.setSessionId(sessionId);
+        token3.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token3.setTokenValue("WRONG3");
+
+        ResponseEntity<AuthenticateResponse> t3Resp = post(token3);
+        assertThat(t3Resp.getBody().getStatus()).isEqualTo(SessionStatus.REDIRECT_TO_AGENT);
+    }
+
+    @Test
+    void identificationTokensWithBackup() {
+        when(partyLookup.lookupByAni("5550005555"))
+            .thenReturn(Collections.singletonList(party("P-500", "555000")));
+
+        AuthenticateRequest start = new AuthenticateRequest();
+        start.setBrandId("ID_ONLY_BRAND");
+        start.setCallerId("5550005555");
+        start.setTargetLevel(AuthLevel.NONE);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        AuthenticateRequest token1 = new AuthenticateRequest();
+        token1.setSessionId(sessionId);
+        token1.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token1.setTokenValue("555000");
+
+        ResponseEntity<AuthenticateResponse> t1Resp = post(token1);
+        assertThat(t1Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(t1Resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+
+        AuthenticateRequest token2 = new AuthenticateRequest();
+        token2.setSessionId(sessionId);
+        token2.setTokenType(TokenType.SSN_LAST4);
+        token2.setTokenValue("1234");
+
+        ResponseEntity<AuthenticateResponse> t2Resp = post(token2);
+        assertThat(t2Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(t2Resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(t2Resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+    }
+
+    @Test
+    void identificationTokensAfterDisambiguation() {
+        Party p1 = party("P-100", "100100");
+        Party p2 = party("P-200", "200200");
+        Party p3 = party("P-300", "300300");
+        when(partyLookup.lookupByAni("2220002222")).thenReturn(Arrays.asList(p1, p2, p3));
 
         AuthenticateRequest start = new AuthenticateRequest();
         start.setBrandId("ID_ONLY_BRAND");
@@ -90,22 +186,51 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> startResp = post(start);
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        // Still resolving: must prompt for a disambiguating token, not yet authenticated.
         assertThat(startResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
         assertThat(startResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
 
         String sessionId = startResp.getBody().getSessionId();
 
-        AuthenticateRequest token = new AuthenticateRequest();
-        token.setSessionId(sessionId);
-        token.setTokenType(TokenType.ACCOUNT_NUMBER);
-        token.setTokenValue("200200"); // uniquely matches P-200
+        AuthenticateRequest disToken = new AuthenticateRequest();
+        disToken.setSessionId(sessionId);
+        disToken.setTokenType(TokenType.ACCOUNT_NUMBER);
+        disToken.setTokenValue("200200");
 
-        ResponseEntity<AuthenticateResponse> tokenResp = post(token);
-        assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(tokenResp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
-        assertThat(tokenResp.getBody().getMatchedPartyId()).isEqualTo("P-200");
+        ResponseEntity<AuthenticateResponse> disResp = post(disToken);
+        assertThat(disResp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(disResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(disResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+
+        AuthenticateRequest pinToken = new AuthenticateRequest();
+        pinToken.setSessionId(sessionId);
+        pinToken.setTokenType(TokenType.PIN);
+        pinToken.setTokenValue("1234");
+
+        ResponseEntity<AuthenticateResponse> pinResp = post(pinToken);
+        assertThat(pinResp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(pinResp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(pinResp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(pinResp.getBody().getMatchedPartyId()).isEqualTo("P-200");
+    }
+
+    @Test
+    void identificationTokensWithInitialTokens() {
+        when(partyLookup.lookupByAni("6660006666"))
+            .thenReturn(Collections.singletonList(party("P-600", "666000")));
+
+        Map<TokenType, String> initialTokens = new LinkedHashMap<>();
+        initialTokens.put(TokenType.ACCOUNT_NUMBER, "666000");
+
+        AuthenticateRequest start = new AuthenticateRequest();
+        start.setBrandId("ID_ONLY_BRAND");
+        start.setCallerId("6660006666");
+        start.setTargetLevel(AuthLevel.NONE);
+        start.setInitialTokens(initialTokens);
+
+        ResponseEntity<AuthenticateResponse> resp = post(start);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
     }
 
     @Test
@@ -117,7 +242,21 @@ class IdentificationOnlyIntegrationTest {
         start.setBrandId("ID_ONLY_BRAND");
         start.setCallerId("3330003333");
         start.setTargetLevel(AuthLevel.NONE);
+
         String sessionId = post(start).getBody().getSessionId();
+
+        // Complete identification first
+        AuthenticateRequest token1 = new AuthenticateRequest();
+        token1.setSessionId(sessionId);
+        token1.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token1.setTokenValue("999000");
+        post(token1);
+
+        AuthenticateRequest token2 = new AuthenticateRequest();
+        token2.setSessionId(sessionId);
+        token2.setTokenType(TokenType.PIN);
+        token2.setTokenValue("1234");
+        post(token2);
 
         AuthenticateRequest escalate = new AuthenticateRequest();
         escalate.setSessionId(sessionId);
@@ -129,11 +268,28 @@ class IdentificationOnlyIntegrationTest {
     }
 
     @Test
+    void noLevelRulesStillWorks() {
+        when(partyLookup.lookupByAni("7770007777"))
+            .thenReturn(Collections.singletonList(party("P-700", "777000")));
+
+        AuthenticateRequest start = new AuthenticateRequest();
+        start.setBrandId("ID_ONLY_NO_RULES");
+        start.setCallerId("7770007777");
+        start.setTargetLevel(AuthLevel.NONE);
+
+        ResponseEntity<AuthenticateResponse> resp = post(start);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(resp.getBody().getMatchedPartyId()).isEqualTo("P-700");
+        assertThat(resp.getBody().getNextRequiredToken()).isNull();
+    }
+
+    @Test
     void validationAcceptsIdentificationOnlyBrandWithoutLevelRules() {
         BrandAuthConfig config = new BrandAuthConfig();
         config.setBrandId("ID_ONLY_VALIDATION");
         config.setIdentificationOnly(true);
-        // no levelRules set
 
         assertThat(brandService.validate(config).isValid()).isTrue();
     }

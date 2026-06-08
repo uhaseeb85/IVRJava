@@ -4,6 +4,7 @@ import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.api.dto.ProcessingEvent;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.IvrSession;
+import com.yourco.ivr.domain.Party;
 import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
@@ -31,9 +32,12 @@ import org.springframework.stereotype.Service;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * Core authentication state machine — the heart of the IVR auth engine.
@@ -92,6 +96,8 @@ public class AuthEngine {
     private final PromptResolver promptResolver;
     private final DisambiguationEngine disambiguationEngine;
 
+    private final Map<TokenType, Function<Party, String>> partyFieldMap;
+
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       TokenValidatorRegistry validatorRegistry,
                       LookupServiceRegistry lookupRegistry,
@@ -106,6 +112,16 @@ public class AuthEngine {
         this.sessionRepo = sessionRepo;
         this.promptResolver = promptResolver;
         this.disambiguationEngine = disambiguationEngine;
+        this.partyFieldMap = buildPartyFieldMap();
+    }
+
+    private static Map<TokenType, Function<Party, String>> buildPartyFieldMap() {
+        Map<TokenType, Function<Party, String>> map = new LinkedHashMap<>();
+        map.put(TokenType.ACCOUNT_NUMBER, Party::getAccountNumber);
+        map.put(TokenType.DATE_OF_BIRTH, Party::getDateOfBirth);
+        map.put(TokenType.SSN_LAST4, Party::getSsnLast4);
+        map.put(TokenType.CARD_LAST4, Party::getCardLast4);
+        return Collections.unmodifiableMap(map);
     }
 
     /**
@@ -147,7 +163,14 @@ public class AuthEngine {
             throw new SessionNotFoundException(sessionId);
         }
 
+        if (session.getStatus() == SessionStatus.AUTHENTICATED
+                || session.getStatus() == SessionStatus.FAILED) {
+            return AuthenticateResponse.fromSession(session);
+        }
+
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+
+        session.getCollectedTokens().put(tokenType, tokenValue);
 
         // Route to disambiguation if session is still resolving parties
         if (session.getPhase() == SessionPhase.DISAMBIGUATION) {
@@ -165,7 +188,8 @@ public class AuthEngine {
         // ── Build per-request processing log ────────────────────────────────
         List<ProcessingEvent> procLog = new ArrayList<>();
 
-        LevelRule ruleCtx = config.getLevelRules().get(session.getTargetLevel());
+        LevelRule ruleCtx = config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
         int pathIdxCtx = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
         TokenPath activePathCtx = (ruleCtx != null && pathIdxCtx < ruleCtx.getPaths().size())
             ? ruleCtx.getPaths().get(pathIdxCtx) : null;
@@ -316,9 +340,25 @@ public class AuthEngine {
      * Called once a single party has been resolved (directly or via disambiguation).
      * In identification-only mode the session is complete — there is nothing to authenticate;
      * otherwise the flow proceeds to collect tokens toward {@code targetLevel}.
+     *
+     * <p>When identification-only with {@code levelRules[NONE]}, disambiguation tokens
+     * that match required identification tokens are transferred to {@code validatedTokens}
+     * to avoid double-prompting the caller for the same information.
      */
     public AuthenticateResponse onPartyResolved(IvrSession session, BrandAuthConfig config) {
         if (config.isIdentificationOnly()) {
+            if (config.getLevelRules() != null && config.getLevelRules().containsKey(AuthLevel.NONE)) {
+                LevelRule noneRule = config.getLevelRules().get(AuthLevel.NONE);
+                for (TokenType collected : session.getCollectedTokens().keySet()) {
+                    for (TokenPath path : noneRule.getPaths()) {
+                        if (path.getRequiredTokens().contains(collected)) {
+                            session.getValidatedTokens().add(collected);
+                            break;
+                        }
+                    }
+                }
+                return evaluateProgress(session, config);
+            }
             return finalizeIdentification(session);
         }
         return evaluateProgress(session, config);
@@ -346,7 +386,8 @@ public class AuthEngine {
      * Evaluate whether the current validated tokens satisfy the target level.
      */
     public AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
-        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        LevelRule rule = config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
         if (rule == null) {
             throw new IllegalArgumentException("No rule defined for level: " + session.getTargetLevel());
         }
@@ -376,6 +417,9 @@ public class AuthEngine {
         }
 
         if (pathComplete) {
+            if (config.isIdentificationOnly() && session.getTargetLevel() == AuthLevel.NONE) {
+                return finalizeIdentification(session);
+            }
             session.setCurrentLevel(session.getTargetLevel());
             session.setStatus(SessionStatus.AUTHENTICATED);
             sessionRepo.save(session);
@@ -451,7 +495,8 @@ public class AuthEngine {
      * on the active path, map it to the required token so the path check passes.
      */
     private TokenType resolveBackupToken(IvrSession session, BrandAuthConfig config, TokenType submittedType) {
-        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+        LevelRule rule = config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
         if (rule == null) return submittedType;
 
         int activePathIdx = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
@@ -482,9 +527,10 @@ public class AuthEngine {
      * DATE_OF_BIRTH each counts against the same PIN slot).
      */
     private TokenType findRequiredTokenForSlot(IvrSession session,
-                                               BrandAuthConfig config,
-                                               TokenType submittedType) {
-        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+                                                BrandAuthConfig config,
+                                                TokenType submittedType) {
+        LevelRule rule = config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
         if (rule == null) return submittedType;
 
         int activePathIdx = session.getActivePathIndexByLevel()
@@ -515,8 +561,9 @@ public class AuthEngine {
                                            BrandAuthConfig config,
                                            TokenType tokenType,
                                            List<ProcessingEvent> procLog,
-                                           boolean allowPathSwitch) {
-        LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
+                                            boolean allowPathSwitch) {
+        LevelRule rule = config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
         Map<TokenType, Integer> counts = session.getAttemptCounts();
 
         // Bug 1 fix: track attempts against the required-token slot, not the submitted
@@ -730,12 +777,48 @@ public class AuthEngine {
             return formatResult;
         }
 
+        // ── Party-field verification (identification-only brands) ──────────
+        BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+        if (config.isIdentificationOnly()) {
+            ValidationResult partyResult = verifyAgainstParty(session, tokenType, tokenValue);
+            if (!partyResult.isValid()) {
+                return partyResult;
+            }
+        }
+
         // ── Stage 2: backend verification (only if this token is bound to a service) ──
         VerificationBinding binding = verificationBindings.bindingFor(session.getBrandId(), tokenType);
         if (binding == null) {
             return ValidationResult.ok();  // format check only — no backend gate for this token
         }
         return verifyAgainstBackend(session, tokenType, tokenValue, binding);
+    }
+
+    /**
+     * Verifies a token value against the matched party's corresponding field.
+     * Used by identification-only brands to confirm caller identity.
+     *
+     * <p>Token types without a party-field mapping (PIN, OTP, VOICE_PRINT) are skipped
+     * and return {@link ValidationResult#ok()}. Tokens whose party field is null
+     * (no data to match against) are also skipped.
+     */
+    private ValidationResult verifyAgainstParty(IvrSession session, TokenType tokenType,
+                                                String tokenValue) {
+        Party party = session.getMatchedParty();
+        if (party == null) return ValidationResult.ok();
+
+        Function<Party, String> extractor = partyFieldMap.get(tokenType);
+        if (extractor == null) return ValidationResult.ok();
+
+        String expectedValue = extractor.apply(party);
+        if (expectedValue == null) return ValidationResult.ok();
+
+        if (tokenValue.equals(expectedValue)) {
+            return ValidationResult.ok();
+        }
+        log.info("PARTY_VERIFY [{}] token={} value mismatch for party={}",
+            session.getSessionId(), tokenType, party.getPartyId());
+        return ValidationResult.fail(ValidationErrorCode.VERIFICATION_FAILED);
     }
 
     /**
