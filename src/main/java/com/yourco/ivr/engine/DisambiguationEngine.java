@@ -2,7 +2,6 @@ package com.yourco.ivr.engine;
 
 import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.domain.*;
-import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.engine.impl.ExcludeInactiveRule;
 import com.yourco.ivr.engine.impl.PrimaryAniRule;
 import com.yourco.ivr.preference.CustomerPreferenceProvider;
@@ -22,7 +21,7 @@ import java.util.stream.Collectors;
  * this engine is responsible for narrowing the list to a single match before authentication
  * can proceed. The flow is:
  * <ol>
- *   <li>{@link #start} — applies configured pre-filter rules (e.g. exclude inactive parties,
+ *   <li>{@link #start} — applies the fixed pre-filter rules (exclude inactive parties,
  *       prefer primary ANI), then selects the best differentiating token type to prompt.</li>
  *   <li>{@link #handleToken} — on each subsequent submission, narrows the candidate list by
  *       matching the token value against the remaining parties' corresponding fields.</li>
@@ -38,7 +37,6 @@ import java.util.stream.Collectors;
  * it picks the token whose values, across the current candidate list, produce the smallest
  * maximum group size — i.e. the token that most evenly splits the parties.
  *
- * @see com.yourco.ivr.domain.config.DisambiguationConfig
  * @see DisambiguationRule
  */
 @Service
@@ -46,7 +44,16 @@ public class DisambiguationEngine {
 
     private static final Logger log = LoggerFactory.getLogger(DisambiguationEngine.class);
 
+    /**
+     * Maximum number of token-collection rounds before disambiguation gives up and the session
+     * is set to {@link SessionStatus#FAILED}. Disambiguation is always-on and not configurable.
+     */
+    private static final int MAX_DISAMBIGUATION_TOKENS = 3;
+
     private final Map<TokenType, Function<Party, String>> tokenFieldMap;
+
+    /** Fixed pre-filter rule chain, applied in order at the start of disambiguation. */
+    private final List<DisambiguationRule> rules;
 
     private final SessionRepository sessionRepo;
     private final CustomerPreferenceProvider preferenceProvider;
@@ -56,6 +63,7 @@ public class DisambiguationEngine {
         this.sessionRepo = sessionRepo;
         this.preferenceProvider = preferenceProvider;
         this.tokenFieldMap = defaultTokenFieldMap();
+        this.rules = Arrays.asList(new ExcludeInactiveRule(), new PrimaryAniRule());
     }
 
     private static Map<TokenType, Function<Party, String>> defaultTokenFieldMap() {
@@ -70,15 +78,15 @@ public class DisambiguationEngine {
     /**
      * Begins disambiguation for a session that has multiple candidate parties.
      *
-     * <p>Applies the configured pre-filter rules, then either resolves to a single party
+     * <p>Applies the fixed pre-filter rules, then either resolves to a single party
      * immediately or selects the most discriminating token type to prompt the caller for.
      *
      * @return a response with a prompt and the next token type to collect, or a FAILED
      *         response if rules eliminate all parties or no discriminating token exists
      */
-    public AuthenticateResponse start(IvrSession session, DisambiguationConfig config) {
-        // 1. Apply configured rules
-        List<Party> parties = applyRules(session.getCandidateParties(), config);
+    public AuthenticateResponse start(IvrSession session) {
+        // 1. Apply the fixed pre-filter rules
+        List<Party> parties = applyRules(session.getCandidateParties());
 
         // 2. Check result
         if (parties.isEmpty()) {
@@ -122,7 +130,7 @@ public class DisambiguationEngine {
      *         is exceeded, or a resolved response if a single party is identified
      */
     public AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
-                                        String tokenValue, DisambiguationConfig config) {
+                                        String tokenValue) {
         // 1. Verify token is usable for disambiguation
         if (!tokenFieldMap.containsKey(tokenType)) {
             return buildResponse(session,
@@ -131,7 +139,7 @@ public class DisambiguationEngine {
         }
 
         // 2. Check max rounds
-        if (session.getDisambiguationAttemptCount() >= config.getMaxDisambiguationTokens()) {
+        if (session.getDisambiguationAttemptCount() >= MAX_DISAMBIGUATION_TOKENS) {
             session.setStatus(SessionStatus.FAILED);
             sessionRepo.save(session);
             return buildResponse(session, "Maximum disambiguation attempts exceeded.", null);
@@ -161,7 +169,7 @@ public class DisambiguationEngine {
         session.setCandidateParties(matching);
         session.setDisambiguationAttemptCount(session.getDisambiguationAttemptCount() + 1);
 
-        if (session.getDisambiguationAttemptCount() >= config.getMaxDisambiguationTokens()) {
+        if (session.getDisambiguationAttemptCount() >= MAX_DISAMBIGUATION_TOKENS) {
             session.setStatus(SessionStatus.FAILED);
             sessionRepo.save(session);
             return buildResponse(session, "Maximum disambiguation attempts exceeded.", null);
@@ -215,20 +223,12 @@ public class DisambiguationEngine {
     }
 
     /**
-     * Applies each configured {@link DisambiguationRule} in order to the candidate party list.
-     * Returns the original list unchanged if no rules are configured.
+     * Applies the fixed {@link DisambiguationRule} chain (in order) to the candidate party list.
      */
-    List<Party> applyRules(List<Party> parties, DisambiguationConfig config) {
-        if (config.getRules() == null || config.getRules().isEmpty()) {
-            return parties;
-        }
-
+    List<Party> applyRules(List<Party> parties) {
         List<Party> result = new ArrayList<>(parties);
-        for (DisambiguationConfig.DisambiguationRuleConfig ruleConfig : config.getRules()) {
-            DisambiguationRule rule = createRule(ruleConfig.getType());
-            if (rule != null) {
-                result = rule.apply(result);
-            }
+        for (DisambiguationRule rule : rules) {
+            result = rule.apply(result);
         }
         return result;
     }
@@ -245,17 +245,6 @@ public class DisambiguationEngine {
                 return "last 4 digits of your card";
             default:
                 return tokenType.name().toLowerCase().replace('_', ' ');
-        }
-    }
-
-    private DisambiguationRule createRule(String type) {
-        switch (type) {
-            case "EXCLUDE_INACTIVE":
-                return new ExcludeInactiveRule();
-            case "PREFER_PRIMARY_ANI":
-                return new PrimaryAniRule();
-            default:
-                return null;
         }
     }
 

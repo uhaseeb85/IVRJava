@@ -8,10 +8,9 @@ import java.util.List;
  * Strategy interface for pre-filtering the candidate party list before token-based
  * disambiguation begins.
  *
- * <p>Rules are applied in the order they appear in
- * {@link com.yourco.ivr.domain.config.DisambiguationConfig#getRules()} by
- * {@link DisambiguationEngine#applyRules}. A rule receives the current list and returns a
- * (possibly smaller) filtered list. Returning an empty list will cause the session to fail.
+ * <p>Rules are applied in order by {@link DisambiguationEngine#applyRules} using the engine's
+ * fixed rule chain. A rule receives the current list and returns a (possibly smaller) filtered
+ * list. Returning an empty list will cause the session to fail.
  *
  * <p>Built-in implementations:
  * <ul>
@@ -20,9 +19,8 @@ import java.util.List;
  *       back to all parties if none are flagged</li>
  * </ul>
  *
- * <p>Rule type names are resolved in
- * {@link DisambiguationEngine#createRule(String)} — add a new {@code case} there to register
- * a custom rule type.
+ * <p>The active rule chain is fixed in the {@link DisambiguationEngine} constructor — add a new
+ * implementation there to register a custom rule.
  */
 public interface DisambiguationRule {
     /**

@@ -310,10 +310,10 @@ class IvrAuthIntegrationTest {
         resp = post(token);
         assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(1);
 
-        // Third wrong-type exhausts retries → session LOCKED immediately (no path switch).
+        // Third wrong-type exhausts retries → redirect to agent immediately (no path switch).
         // Wrong-type submissions do not earn a fresh retry budget on an alternative path.
         resp = post(token);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.LOCKED);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.REDIRECT_TO_AGENT);
     }
 
     /**

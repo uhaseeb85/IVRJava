@@ -56,7 +56,7 @@ public class IvrExceptionHandler {
     @ExceptionHandler(SessionLockedException.class)
     public ResponseEntity<ErrorResponse> handleLocked(SessionLockedException e) {
         return ResponseEntity.status(423)
-            .body(new ErrorResponse("SESSION_LOCKED", e.getMessage()));
+            .body(new ErrorResponse("SESSION_REDIRECT_TO_AGENT", e.getMessage()));
     }
 
     @ExceptionHandler(UnknownBrandException.class)

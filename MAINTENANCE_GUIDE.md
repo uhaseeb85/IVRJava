@@ -93,14 +93,6 @@ curl -X PUT http://localhost:8081/api/brands/BRAND_C \
 {
   "brandId": "BRAND_C",
 
-  "disambiguation": {
-    "maxDisambiguationTokens": 3,
-    "rules": [
-      { "type": "EXCLUDE_INACTIVE" },
-      { "type": "PREFER_PRIMARY_ANI" }
-    ]
-  },
-
   "levelRules": {
     "BASIC": {
       "paths": [
@@ -148,7 +140,8 @@ curl -X PUT http://localhost:8081/api/brands/BRAND_C \
 | `backupTokens` | Map from a required token → list of alternatives the caller may submit instead. The engine accepts any of them but maps them back to the required slot internally. |
 | `maxRetriesPerToken` | Failures per required-token slot before switching to the next path (or locking if all paths exhausted). |
 | `lockoutSeconds` | How long the session is locked after all paths fail. |
-| `disambiguation` | Optional. Defaults to `maxDisambiguationTokens: 3`, no rules. |
+
+> **Disambiguation is not configurable.** It is always-on with a fixed 3-round limit and a fixed rule chain (`EXCLUDE_INACTIVE`, then `PREFER_PRIMARY_ANI`). There is no `disambiguation` block in the brand JSON.
 
 ---
 
@@ -313,29 +306,20 @@ public class PreferBusinessAccountRule implements DisambiguationRule {
 }
 ```
 
-Note: **do not** annotate with `@Component` — rules are instantiated on demand by the engine.
+Note: **do not** annotate with `@Component` — rules are instantiated directly by the engine.
 
-### Step 2 — Register the rule type string
+### Step 2 — Add it to the fixed rule chain
 
-`src/main/java/com/yourco/ivr/engine/DisambiguationEngine.java` — add a case to `createRule()`:
+Disambiguation is not configurable per brand; the active rule chain is hardcoded in the `DisambiguationEngine` constructor (`src/main/java/com/yourco/ivr/engine/DisambiguationEngine.java`). Add your rule to that list, in order (broader filters first):
 
 ```java
-case "PREFER_BUSINESS_ACCOUNT":
-    return new PreferBusinessAccountRule();
+this.rules = Arrays.asList(
+    new ExcludeInactiveRule(),
+    new PrimaryAniRule(),
+    new PreferBusinessAccountRule());
 ```
 
-### Step 3 — Use it in brand configs
-
-```json
-"disambiguation": {
-  "rules": [
-    { "type": "EXCLUDE_INACTIVE" },
-    { "type": "PREFER_BUSINESS_ACCOUNT" }
-  ]
-}
-```
-
-Rules are applied in order, so put broader filters first.
+The new rule then applies to **every** brand.
 
 ---
 

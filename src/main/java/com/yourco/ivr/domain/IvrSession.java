@@ -80,7 +80,7 @@ public class IvrSession {
     /** Caller preferences loaded once the party is resolved; may restrict which tokens are offered. */
     private CustomerPreference customerPreferences;
 
-    /** Number of disambiguation rounds already attempted; bounded by {@code DisambiguationConfig.maxDisambiguationTokens}. */
+    /** Number of disambiguation rounds already attempted; bounded by the engine's fixed {@code MAX_DISAMBIGUATION_TOKENS}. */
     private int disambiguationAttemptCount;
 
     /**

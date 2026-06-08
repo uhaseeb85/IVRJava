@@ -4,7 +4,7 @@ package com.yourco.ivr.domain;
  * Lifecycle state of an {@link IvrSession}.
  *
  * <p>The engine ({@link com.yourco.ivr.engine.AuthEngine}) transitions between these states
- * as the caller submits tokens. Terminal states (AUTHENTICATED, LOCKED, EXPIRED, FAILED)
+ * as the caller submits tokens. Terminal states (AUTHENTICATED, REDIRECT_TO_AGENT, EXPIRED, FAILED)
  * do not advance further.
  */
 public enum SessionStatus {
@@ -18,11 +18,11 @@ public enum SessionStatus {
     /** All required tokens for the target level have been validated. Terminal state. */
     AUTHENTICATED,
     /**
-     * The caller exceeded the maximum retry count. The session is locked until
-     * {@link IvrSession#getLockedUntil()} expires. Terminal until the lock lapses,
-     * after which the engine auto-unlocks on the next token submission.
+     * The caller exceeded the maximum retry count. The session is redirected to a live agent
+     * until {@link IvrSession#getLockedUntil()} expires. Terminal until the delay lapses,
+     * after which the engine auto-resets on the next token submission.
      */
-    LOCKED,
+    REDIRECT_TO_AGENT,
     /** The session exceeded its TTL ({@code ivr.session.ttl-minutes}) and was deleted. */
     EXPIRED,
     /** All token paths were exhausted or disambiguation failed. Terminal state. */

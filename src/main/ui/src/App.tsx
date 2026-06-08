@@ -7,7 +7,7 @@ import BrandEditor from './pages/BrandEditor'
 import SessionLog from './pages/SessionLog'
 
 type Page = 'dashboard' | 'brands' | 'editor' | 'sessions'
-interface Brand { brandId: string; levelRules?: Record<string, unknown>; disambiguation?: unknown }
+interface Brand { brandId: string; levelRules?: Record<string, unknown> }
 
 const NAV = [
   { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },

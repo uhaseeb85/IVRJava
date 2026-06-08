@@ -13,21 +13,15 @@ import java.util.Set;
  * system). Each implementation is a Spring {@code @Component}; they are auto-discovered into
  * {@link LookupServiceRegistry}. Adding a new backend integration is just dropping a new bean.
  *
- * <p>A brand wires a service to a token via config — see
- * {@code BrandAuthConfig.verificationSources}. No per-brand code is required.
+ * <p>A token is wired to a service in code via {@link VerificationBindings} — there is no
+ * per-brand config or UI for this.
  */
 public interface TokenLookupService {
 
-    /** Stable, unique registry key (e.g. {@code "experian-ssn"}). Stored in brand config. */
+    /** Stable, unique registry key (e.g. {@code "experian-ssn"}). */
     String id();
 
-    /** Human-readable label shown in the Brand Editor dropdown. */
-    String displayName();
-
-    /** Short description shown as UI helptext. */
-    String description();
-
-    /** Token types this service is able to verify; the UI offers it only for these. */
+    /** Token types this service is able to verify. */
     Set<TokenType> supportedTokens();
 
     /**

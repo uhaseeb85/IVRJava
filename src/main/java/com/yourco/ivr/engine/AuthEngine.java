@@ -8,16 +8,16 @@ import com.yourco.ivr.domain.SessionPhase;
 import com.yourco.ivr.domain.SessionStatus;
 import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
-import com.yourco.ivr.domain.config.DisambiguationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
-import com.yourco.ivr.domain.config.VerificationBinding;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.lookup.LookupRequest;
 import com.yourco.ivr.lookup.LookupResult;
 import com.yourco.ivr.lookup.LookupServiceRegistry;
 import com.yourco.ivr.lookup.TokenLookupService;
+import com.yourco.ivr.lookup.VerificationBinding;
+import com.yourco.ivr.lookup.VerificationBindings;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import com.yourco.ivr.repository.SessionRepository;
 import com.yourco.ivr.validator.TokenValidationContext;
@@ -47,9 +47,10 @@ import java.util.Set;
  * <ol>
  *   <li><strong>Format gate</strong> — a lightweight {@link com.yourco.ivr.validator.TokenValidator}
  *       checks structure (length, format). Runs always, no network call.</li>
- *   <li><strong>Backend gate</strong> — if the brand config binds the token type to a
- *       {@link com.yourco.ivr.lookup.TokenLookupService}, the engine calls the service to
- *       verify the value against a system of record. Skipped if no binding exists.</li>
+ *   <li><strong>Backend gate</strong> — if {@link com.yourco.ivr.lookup.VerificationBindings}
+ *       binds the token type to a {@link com.yourco.ivr.lookup.TokenLookupService}, the engine
+ *       calls the service to verify the value against a system of record. Skipped if no binding
+ *       exists.</li>
  * </ol>
  *
  * <h2>Retry and path switching</h2>
@@ -86,6 +87,7 @@ public class AuthEngine {
     private final BrandRulesRegistry rulesRegistry;
     private final TokenValidatorRegistry validatorRegistry;
     private final LookupServiceRegistry lookupRegistry;
+    private final VerificationBindings verificationBindings;
     private final SessionRepository sessionRepo;
     private final PromptResolver promptResolver;
     private final DisambiguationEngine disambiguationEngine;
@@ -93,12 +95,14 @@ public class AuthEngine {
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       TokenValidatorRegistry validatorRegistry,
                       LookupServiceRegistry lookupRegistry,
+                      VerificationBindings verificationBindings,
                       SessionRepository sessionRepo,
                       PromptResolver promptResolver,
                       DisambiguationEngine disambiguationEngine) {
         this.rulesRegistry = rulesRegistry;
         this.validatorRegistry = validatorRegistry;
         this.lookupRegistry = lookupRegistry;
+        this.verificationBindings = verificationBindings;
         this.sessionRepo = sessionRepo;
         this.promptResolver = promptResolver;
         this.disambiguationEngine = disambiguationEngine;
@@ -123,8 +127,8 @@ public class AuthEngine {
                                         String callerId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
 
-        // Locked session guard
-        if (session.getStatus() == SessionStatus.LOCKED) {
+        // Redirect-to-agent guard: auto-reset once the delay window has elapsed
+        if (session.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
             if (session.getLockedUntil() != null
                     && Instant.now().isAfter(session.getLockedUntil())) {
                 session.setStatus(SessionStatus.COLLECTING);
@@ -147,14 +151,13 @@ public class AuthEngine {
 
         // Route to disambiguation if session is still resolving parties
         if (session.getPhase() == SessionPhase.DISAMBIGUATION) {
-            DisambiguationConfig disConfig = config.getDisambiguation();
             AuthenticateResponse disResp = disambiguationEngine.handleToken(
-                session, tokenType, tokenValue, disConfig);
+                session, tokenType, tokenValue);
             if (session.getPhase() == SessionPhase.AUTHENTICATING) {
                 log.info("AUTH [{}] brand={} caller={} disambiguation resolved party={}",
                     sessionId, session.getBrandId(), session.getCallerId(),
                     session.getMatchedParty() != null ? session.getMatchedParty().getPartyId() : "null");
-                return evaluateProgress(session, config);
+                return onPartyResolved(session, config);
             }
             return disResp;
         }
@@ -209,7 +212,7 @@ public class AuthEngine {
         }
 
         // 1. Validate externally
-        ValidationResult validationResult = validateExternally(session, config, tokenType, tokenValue);
+        ValidationResult validationResult = validateExternally(session, tokenType, tokenValue);
         boolean valid = validationResult.isValid();
         String validationDetail = valid ? "PASS"
             : (validationResult.getErrorCode() != null
@@ -280,7 +283,7 @@ public class AuthEngine {
         }
 
         sessionRepo.save(session);
-        return evaluateProgress(session, config);
+        return onPartyResolved(session, config);
     }
 
     /**
@@ -289,6 +292,11 @@ public class AuthEngine {
     public AuthenticateResponse escalate(String sessionId, AuthLevel newTarget) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
         AuthLevel current = session.getCurrentLevel();
+
+        BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+        if (config.isIdentificationOnly()) {
+            throw new IllegalArgumentException("Escalation is not supported for identification-only brands");
+        }
 
         if (!newTarget.isHigherThan(current)) {
             throw new IllegalArgumentException("Target must exceed current level");
@@ -301,8 +309,37 @@ public class AuthEngine {
         session.setTargetLevel(newTarget);
         sessionRepo.save(session);
 
-        BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
         return evaluateProgress(session, config);
+    }
+
+    /**
+     * Called once a single party has been resolved (directly or via disambiguation).
+     * In identification-only mode the session is complete — there is nothing to authenticate;
+     * otherwise the flow proceeds to collect tokens toward {@code targetLevel}.
+     */
+    public AuthenticateResponse onPartyResolved(IvrSession session, BrandAuthConfig config) {
+        if (config.isIdentificationOnly()) {
+            return finalizeIdentification(session);
+        }
+        return evaluateProgress(session, config);
+    }
+
+    /**
+     * Finalizes an identification-only session: the caller is identified, access level stays
+     * {@link AuthLevel#NONE}, and the session reports {@link SessionStatus#AUTHENTICATED}.
+     */
+    private AuthenticateResponse finalizeIdentification(IvrSession session) {
+        session.setCurrentLevel(AuthLevel.NONE);
+        session.setTargetLevel(AuthLevel.NONE);
+        session.setStatus(SessionStatus.AUTHENTICATED);
+        sessionRepo.save(session);
+        log.info("AUTH [{}] brand={} caller={} IDENTIFICATION_ONLY resolved party={}",
+            session.getSessionId(), session.getBrandId(), session.getCallerId(),
+            session.getMatchedParty() != null ? session.getMatchedParty().getPartyId() : "null");
+        return baseResponse(session)
+            .status(SessionStatus.AUTHENTICATED)
+            .prompt("Caller identified.")
+            .build();
     }
 
     /**
@@ -386,11 +423,11 @@ public class AuthEngine {
         // Determine accepted tokens for this step (required token + any backups)
         List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, nextToken, originalRequired);
 
-        String prompt = promptResolver.resolvePrompt(nextToken, activePath, rule.getMaxRetriesPerToken());
+        String prompt = promptResolver.resolvePrompt(nextToken, activePath, rule.getMaxRetriesFor(nextToken));
         return baseResponse(session)
             .status(SessionStatus.COLLECTING)
             .nextRequiredToken(nextToken)
-            .remainingAttempts(rule.getMaxRetriesPerToken())
+            .remainingAttempts(rule.getMaxRetriesFor(nextToken))
             .acceptedTokens(acceptedTokens)
             .prompt(prompt)
             .build();
@@ -491,10 +528,11 @@ public class AuthEngine {
             ? counts.get(requiredToken) + 1
             : 1;
         counts.put(requiredToken, attempts);
-        int remaining = rule.getMaxRetriesPerToken() - attempts;
+        int maxRetries = rule.getMaxRetriesFor(requiredToken);
+        int remaining = maxRetries - attempts;
 
         addEntry(procLog, "WARN",
-            "Attempt " + attempts + " of " + rule.getMaxRetriesPerToken()
+            "Attempt " + attempts + " of " + maxRetries
             + " for " + requiredToken + " slot");
 
         if (remaining > 0) {
@@ -566,22 +604,22 @@ public class AuthEngine {
             }
         } else {
             addEntry(procLog, "FAIL",
-                "Wrong token type exhausted retries — session locked (no path switch)");
+                "Wrong token type exhausted retries — redirecting to agent (no path switch)");
         }
 
         // All paths exhausted (or wrong-type exhaustion) — lock the session
-        addEntry(procLog, "FAIL", "Session LOCKED for " + rule.getLockoutSeconds() + " seconds");
+        addEntry(procLog, "FAIL", "Redirect to agent after " + rule.getLockoutSeconds() + " seconds");
 
-        session.setStatus(SessionStatus.LOCKED);
+        session.setStatus(SessionStatus.REDIRECT_TO_AGENT);
         session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
         sessionRepo.save(session);
-        log.warn("AUTH [{}] brand={} caller={} LOCKED for {} seconds",
+        log.warn("AUTH [{}] brand={} caller={} REDIRECT_TO_AGENT for {} seconds",
             session.getSessionId(), session.getBrandId(), session.getCallerId(),
             rule.getLockoutSeconds());
         return baseResponse(session)
-            .status(SessionStatus.LOCKED)
+            .status(SessionStatus.REDIRECT_TO_AGENT)
             .lockedUntil(session.getLockedUntil())
-            .prompt("Authentication failed. All retry attempts exhausted.")
+            .prompt("Authentication failed. All retry attempts exhausted. Redirecting to agent.")
             .build();
     }
 
@@ -675,11 +713,10 @@ public class AuthEngine {
      *
      * <p>Stage 1 (format gate): cheap, in-process format check via {@link TokenValidatorRegistry}.
      * Returns early with a failure if the format is invalid, sparing the backend call.
-     * Stage 2 (backend gate): only runs if a {@link com.yourco.ivr.domain.config.VerificationBinding}
-     * exists for this token type in the brand config.
+     * Stage 2 (backend gate): only runs if a {@link VerificationBinding} is wired in code for
+     * this token type — see {@link VerificationBindings}.
      */
     private ValidationResult validateExternally(IvrSession session,
-                                               BrandAuthConfig config,
                                                TokenType tokenType,
                                                String tokenValue) {
         // ── Stage 1: format gate (cheap, no network) ─────────────────────────
@@ -694,9 +731,9 @@ public class AuthEngine {
         }
 
         // ── Stage 2: backend verification (only if this token is bound to a service) ──
-        VerificationBinding binding = config.verificationSourceFor(tokenType);
+        VerificationBinding binding = verificationBindings.bindingFor(session.getBrandId(), tokenType);
         if (binding == null) {
-            return ValidationResult.ok();  // legacy behavior: format check only
+            return ValidationResult.ok();  // format check only — no backend gate for this token
         }
         return verifyAgainstBackend(session, tokenType, tokenValue, binding);
     }
@@ -704,7 +741,7 @@ public class AuthEngine {
     /**
      * Calls the configured backend lookup service to verify the token value.
      * On any {@link RuntimeException} (timeout, unavailable service, unknown ID), behaviour
-     * is governed by {@link com.yourco.ivr.domain.config.VerificationBinding#isFailClosed()}:
+     * is governed by {@link VerificationBinding#isFailClosed()}:
      * {@code true} (default) → treat as a validation failure;
      * {@code false} → pass the token through on the format check alone.
      */

@@ -110,10 +110,9 @@ public class AuthenticateService {
         sessionRepo.save(session);
 
         if (parties.size() > 1) {
-            AuthenticateResponse disResp = disambiguationEngine.start(
-                session, config.getDisambiguation());
+            AuthenticateResponse disResp = disambiguationEngine.start(session);
             if (session.getPhase() == SessionPhase.AUTHENTICATING) {
-                return engine.evaluateProgress(session, config);
+                return engine.onPartyResolved(session, config);
             }
             return disResp;
         }
@@ -125,13 +124,19 @@ public class AuthenticateService {
         session.setCustomerPreferences(prefs);
         sessionRepo.save(session);
 
+        // Identification-only brands: a single resolved party completes the session — there is
+        // no authentication step, so any initial tokens are irrelevant.
+        if (config.isIdentificationOnly()) {
+            return engine.onPartyResolved(session, config);
+        }
+
         // Process any initial tokens provided at session start
         if (req.getInitialTokens() != null && !req.getInitialTokens().isEmpty()) {
             for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
                 AuthenticateResponse tokenResponse = engine.submitToken(
                     session.getSessionId(), entry.getKey(), entry.getValue());
                 if (tokenResponse.getStatus() == SessionStatus.FAILED
-                        || tokenResponse.getStatus() == SessionStatus.LOCKED) {
+                        || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
                     return tokenResponse;
                 }
             }
@@ -139,7 +144,7 @@ public class AuthenticateService {
             return engine.evaluateProgress(updatedSession, config);
         }
 
-        return engine.evaluateProgress(session, config);
+        return engine.onPartyResolved(session, config);
     }
 
     /**

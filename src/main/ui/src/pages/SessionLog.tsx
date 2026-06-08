@@ -7,7 +7,7 @@ function statusCls(status: string) {
   const s = status.toUpperCase()
   if (s === 'AUTHENTICATED') return 'text-emerald-700 bg-emerald-50 border-emerald-200'
   if (s === 'FAILED') return 'text-red-600 bg-red-50 border-red-200'
-  if (s === 'LOCKED') return 'text-orange-600 bg-orange-50 border-orange-200'
+  if (s === 'REDIRECT_TO_AGENT') return 'text-orange-600 bg-orange-50 border-orange-200'
   return 'text-amber-700 bg-amber-50 border-amber-200'
 }
 
@@ -22,7 +22,7 @@ function StatusBadge({ status }: { status: string }) {
 function stepIcon(status: string, index: number) {
   const s = status.toUpperCase()
   if (s === 'AUTHENTICATED') return { symbol: '✓', cls: 'bg-emerald-100 text-emerald-700' }
-  if (s === 'FAILED' || s === 'LOCKED') return { symbol: '✗', cls: 'bg-red-100 text-red-600' }
+  if (s === 'FAILED' || s === 'REDIRECT_TO_AGENT') return { symbol: '✗', cls: 'bg-red-100 text-red-600' }
   return { symbol: String(index + 1), cls: 'bg-amber-100 text-amber-700' }
 }
 

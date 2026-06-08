@@ -80,9 +80,11 @@ public enum AuthLevel {
 @Data
 public class BrandAuthConfig {
     private String brandId;                           // e.g. "BRAND_A"
-    private Map<AuthLevel, LevelRule> levelRules;     // one rule per level
-    private DisambiguationConfig disambiguation;      // optional; defaults apply if absent
+    private Map<AuthLevel, LevelRule> levelRules;     // one rule per level (not required when identificationOnly)
+    private boolean identificationOnly;               // when true: identify-and-stop, access level stays NONE
 }
+// Disambiguation is always-on and not configurable — see DisambiguationEngine (fixed 3-round
+// limit + EXCLUDE_INACTIVE / PREFER_PRIMARY_ANI rule chain). No per-brand config.
 
 // LevelRule.java
 @Data
@@ -106,6 +108,8 @@ public class TokenPath {
     private Map<TokenType, List<TokenType>> backupTokens;
 }
 ```
+
+**Identification-only brands.** When `identificationOnly = true`, the brand's goal is identification rather than authentication. Party lookup and disambiguation run unchanged, but the moment a single party is resolved the engine finalizes the session via `AuthEngine.onPartyResolved()` → `finalizeIdentification()` instead of collecting auth tokens: it sets `currentLevel = NONE`, `status = AUTHENTICATED`, and returns the `matchedPartyId`. `levelRules` are not required for such brands (`BrandService.validate()` relaxes the check), and `escalate()` is rejected with an `IllegalArgumentException` (HTTP 400).
 
 ### 2.3 Session State
 
@@ -1184,7 +1188,6 @@ com.yourco.ivr
 │       ├── BrandAuthConfig.java
 │       ├── LevelRule.java
 │       ├── TokenPath.java
-│       ├── DisambiguationConfig.java
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine
@@ -1284,19 +1287,7 @@ public interface DisambiguationRule {
 | `EXCLUDE_INACTIVE` | `ExcludeInactiveRule` | Removes parties where `active == false` |
 | `PREFER_PRIMARY_ANI` | `PrimaryAniRule` | Keeps only parties where `primaryAni == true`; if none, keeps all |
 
-Rules are configured per-brand in the brand JSON. The `disambiguation` block is optional; defaults apply if absent:
-
-```json
-{
-  "disambiguation": {
-    "maxDisambiguationTokens": 3,
-    "rules": [
-      { "type": "EXCLUDE_INACTIVE" },
-      { "type": "PREFER_PRIMARY_ANI" }
-    ]
-  }
-}
-```
+These rules are **not configurable** — they are a fixed chain applied in order by every brand. There is no `disambiguation` block in the brand JSON.
 
 ### 13.4 DisambiguationEngine
 
@@ -1304,28 +1295,26 @@ Rules are configured per-brand in the brand JSON. The `disambiguation` block is 
 @Service
 public class DisambiguationEngine {
 
-    // Maps TokenType to Party field extractors for matching
-    private static final Map<TokenType, Function<Party, String>> TOKEN_FIELD_MAP;
+    // Disambiguation is always-on and not configurable.
+    private static final int MAX_DISAMBIGUATION_TOKENS = 3;
 
-    static {
-        // ACCOUNT_NUMBER → Party::getAccountNumber
-        // DATE_OF_BIRTH → Party::getDateOfBirth
-        // SSN_LAST4 → Party::getSsnLast4
-        // CARD_LAST4 → Party::getCardLast4
-    }
+    // Maps TokenType to Party field extractors for matching
+    private final Map<TokenType, Function<Party, String>> tokenFieldMap;   // ACCOUNT_NUMBER, DATE_OF_BIRTH, SSN_LAST4, CARD_LAST4
+
+    // Fixed pre-filter rule chain, applied in order
+    private final List<DisambiguationRule> rules;   // [ExcludeInactiveRule, PrimaryAniRule]
 
     /** Called on session start to initialize disambiguation. */
-    AuthenticateResponse start(IvrSession session, DisambiguationConfig config);
+    AuthenticateResponse start(IvrSession session);
 
     /** Called when a token is submitted during disambiguation phase. */
-    AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
-                                 String tokenValue, DisambiguationConfig config);
+    AuthenticateResponse handleToken(IvrSession session, TokenType tokenType, String tokenValue);
 
     /** Selects the token that best differentiates remaining parties. */
     TokenType selectDisambiguationToken(List<Party> parties);
 
-    /** Applies configured filtering rules. */
-    List<Party> applyRules(List<Party> parties, DisambiguationConfig config);
+    /** Applies the fixed filtering rule chain. */
+    List<Party> applyRules(List<Party> parties);
 }
 ```
 
@@ -1383,7 +1372,7 @@ The engine evaluates each mappable `TokenType` (ACCOUNT_NUMBER, DATE_OF_BIRTH, S
 Example: 3 parties, SSN_LAST4 values: {1234, 5678, 9012} → groups of size 1 each → selected.  
 If all parties have identical SSN_LAST4 → group size 3 → not selected if a better token exists.
 
-**Max rounds:** Capped at `maxDisambiguationTokens` (default 3). After exhausting, the session is marked FAILED.
+**Max rounds:** Capped at a fixed `MAX_DISAMBIGUATION_TOKENS = 3`. After exhausting, the session is marked FAILED.
 
 ### 13.7 Session Phase Model
 
@@ -1556,20 +1545,18 @@ Customer asked only for allowed tokens
 
 ### Phase 8 — Party Disambiguation & Customer Preferences
 1. Implement `Party`, `SessionPhase`, `CustomerPreference` domain models
-2. Implement `DisambiguationConfig` config model
-3. Implement `PartyLookupProvider` interface and `StubPartyLookupProvider`
-4. Implement `DisambiguationRule` interface, `ExcludeInactiveRule`, `PrimaryAniRule`
-5. Implement `DisambiguationEngine` — rule application, token selection, party matching
-6. Implement `CustomerPreferenceProvider` interface and `StubCustomerPreferenceProvider`
-7. Add `phase`, `candidateParties`, `matchedParty`, `customerPreferences`, `disambiguationAttemptCount` to `IvrSession`
-8. Update DB schema and `SqliteSessionRepository` for new fields
-9. Add `DisambiguationConfig` to `BrandAuthConfig` and brand JSON files
-10. Wire party lookup and disambiguation into `AuthenticateService.start()`
-11. Route `DISAMBIGUATION` phase in `AuthEngine.submitToken()` to `DisambiguationEngine`
-12. Add preference filtering in `AuthEngine.evaluateProgress()` and `buildAcceptedTokens()`
-13. Add `phase` and `matchedPartyId` to `AuthenticateResponse`
-14. Implement `UnknownCallerException` and wire into `IvrExceptionHandler`
-15. Integration-test: single party, multi-party, rules narrowing, zero parties, max rounds, disabled config, preference filtering
+2. Implement `PartyLookupProvider` interface and `StubPartyLookupProvider`
+3. Implement `DisambiguationRule` interface, `ExcludeInactiveRule`, `PrimaryAniRule`
+4. Implement `DisambiguationEngine` — fixed rule chain, token selection, party matching (always-on, not configurable)
+5. Implement `CustomerPreferenceProvider` interface and `StubCustomerPreferenceProvider`
+6. Add `phase`, `candidateParties`, `matchedParty`, `customerPreferences`, `disambiguationAttemptCount` to `IvrSession`
+7. Update DB schema and `SqliteSessionRepository` for new fields
+8. Wire party lookup and disambiguation into `AuthenticateService.start()`
+9. Route `DISAMBIGUATION` phase in `AuthEngine.submitToken()` to `DisambiguationEngine`
+10. Add preference filtering in `AuthEngine.evaluateProgress()` and `buildAcceptedTokens()`
+11. Add `phase` and `matchedPartyId` to `AuthenticateResponse`
+12. Implement `UnknownCallerException` and wire into `IvrExceptionHandler`
+13. Integration-test: single party, multi-party, rules narrowing, zero parties, max rounds, preference filtering
 
 > ⚠️ **Security Note — Token Values**
 > Never log raw token values (PINs, OTPs, SSN digits). Log only `tokenType` and validation outcome.

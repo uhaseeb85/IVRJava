@@ -13,7 +13,7 @@ A production-ready engine for IVR systems that need **multi-brand authentication
 - **Progressive authentication** — Sessions start at `NONE` and step up to the target level; mid-session escalation is supported
 - **Path fallbacks** — When the primary token path is exhausted, the engine automatically falls back to a configured alternative path before failing
 - **Backup token alternatives** — Each required token can declare alternative token types that the client may submit instead (e.g. accept `SSN_LAST4` or `DATE_OF_BIRTH` in place of `PIN`)
-- **Configurable backend verification** — Each token can be bound (per brand, in config/UI) to a pluggable backend **lookup service** that verifies the value against a system of record. Services are auto-discovered Spring beans; brands wire them up on demand with no code. See [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md)
+- **Backend verification** — A token can be bound in code to a pluggable backend **lookup service** that verifies the value against a system of record. Services are auto-discovered Spring beans; tokens are wired to them in `DefaultVerificationBindings` (no per-brand config or UI). See [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md)
 - **Party Disambiguation** — When an ANI maps to multiple parties (customers), the engine applies configurable disambiguation rules and requests differentiating tokens to resolve to a single party
 - **Customer Preference Filtering** — Once a party is identified, customer-specific preferences (e.g., blocked token types) are loaded and used to filter which tokens are offered — blocked tokens are automatically skipped and backup alternatives or fallback paths are used instead
 - **Call Transfer support** — Accept calls transferred from external IVR systems with pre-validated tokens; per-source policies control which tokens and auth levels are honored
@@ -107,7 +107,6 @@ To build the static files served by Spring Boot: `npm run build`
 | `POST` | `/api/brands` | Create a new brand config |
 | `PUT` | `/api/brands/{id}` | Update an existing brand config |
 | `DELETE` | `/api/brands/{id}` | Delete a brand config |
-| `GET` | `/api/lookup-services` | List available backend verification services (for the Verification tab) |
 
 ### 🔄 Full Auth Flow Example
 
@@ -229,26 +228,42 @@ Each brand config has the following structure:
 }
 ```
 
-### Backend Verification Sources
+### Identification-Only Brands
 
-By default a submitted token is only **format-checked** (e.g. "PIN is ≥ 4 digits"). To additionally verify a token against a real backend system of record, bind it to a **lookup service** in the brand config (optional, per token):
+Some brands don't need authentication at all — the goal is simply to **identify** which single party is calling. Set `"identificationOnly": true` on the brand config to enable this mode:
 
 ```json
 {
-  "brandId": "BRAND_A",
-  "verificationSources": {
-    "SSN_LAST4":      { "serviceId": "stub-verify", "params": { "region": "US" }, "failClosed": true },
-    "ACCOUNT_NUMBER": { "serviceId": "stub-verify" }
-  },
-  "levelRules": { ... }
+  "brandId": "ID_ONLY_BRAND",
+  "identificationOnly": true
 }
 ```
 
-- **`serviceId`** — id of a registered `TokenLookupService` (list them via `GET /api/lookup-services`)
-- **`params`** *(optional)* — per-brand params passed to the service (e.g. region/dataset). **Never store secrets here**; reference them by alias
+In this mode:
+- The flow runs party lookup (and disambiguation, if the ANI maps to multiple parties) exactly as usual, then **stops as soon as a single party is resolved**.
+- No authentication tokens are collected. `levelRules` are not required (and are ignored if present).
+- The result is reported as `status: AUTHENTICATED` with **`currentLevel: NONE`** and `matchedPartyId` set to the identified party.
+- **Escalation is rejected** (`400`) — there is no auth level to escalate to.
+
+A brand-level toggle in the Brand Editor UI sets this flag, and the Dashboard renders the result as **"Identified"** rather than "Verified".
+
+### Backend Verification Sources
+
+By default a submitted token is only **format-checked** (e.g. "PIN is ≥ 4 digits"). To additionally verify a token against a real backend system of record, bind it to a **lookup service** in code via `DefaultVerificationBindings`:
+
+```java
+// src/main/java/com/yourco/ivr/lookup/DefaultVerificationBindings.java
+m.put(TokenType.SSN_LAST4,
+    new VerificationBinding("stub-verify", Collections.singletonMap("region", "US"), true));
+```
+
+Each binding carries:
+
+- **`serviceId`** — id of a registered `TokenLookupService`
+- **`params`** *(optional)* — params passed to the service (e.g. region/dataset). **Never store secrets here**; reference them by alias
 - **`failClosed`** *(default `true`)* — when the backend is unavailable, fail the token (`true`) or fall back to format-only (`false`)
 
-When a binding is present, the engine runs the format validator **then** calls the service; both must pass. Tokens with no binding behave exactly as before. **Adding a backend integration is just dropping a new `@Component implements TokenLookupService`** — no per-brand code. A configurable `stub-verify` service ships for development. Full design: [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md).
+When a binding is present, the engine runs the format validator **then** calls the service; both must pass. Tokens with no binding behave exactly as before (format check only — the default for every token). **Adding a backend integration is just dropping a new `@Component implements TokenLookupService`**, then wiring it to a token in `DefaultVerificationBindings`. There is no per-brand config or UI for this. A configurable `stub-verify` service ships for development. Full design: [`LOOKUP_SERVICE_DESIGN.md`](LOOKUP_SERVICE_DESIGN.md).
 
 ### Party Disambiguation & Customer Preferences
 
@@ -257,25 +272,11 @@ Party disambiguation is always-on for all brands. On session start, the engine c
 **How it works:**
 1. 0 parties → **400 error** (unknown caller)
 2. 1 party → skips disambiguation, loads `CustomerPreferenceProvider.getPreferences(partyId)`, proceeds to auth
-3. N parties → applies configured rules from `DisambiguationConfig`, then asks for differentiating tokens to resolve to a single party
+3. N parties → applies the fixed pre-filter rules, then asks for differentiating tokens to resolve to a single party
 
-The `DisambiguationConfig` is a Java class with defaults (`maxDisambiguationTokens=3`, no rules). Brands can add a `"disambiguation"` block to their JSON to override these defaults.
-
-```json
-{
-  "brandId": "BRAND_A",
-  "disambiguation": {
-    "maxDisambiguationTokens": 5,
-    "rules": [
-      { "type": "EXCLUDE_INACTIVE" },
-      { "type": "PREFER_PRIMARY_ANI" }
-    ]
-  },
-  "levelRules": { ... }
-}
-```
-
-**Rule types:** `EXCLUDE_INACTIVE` (filters !active), `PREFER_PRIMARY_ANI` (keeps primaryAni=true).
+Disambiguation is **not configurable** — there is no per-brand setting. The behavior is fixed in `DisambiguationEngine`: a maximum of **3** token-collection rounds, and a fixed pre-filter rule chain applied in order:
+- `EXCLUDE_INACTIVE` — removes parties where `active == false`
+- `PREFER_PRIMARY_ANI` — keeps parties where `primaryAni == true` (falls back to all if none are flagged)
 
 **Customer Preferences** control which tokens are offered:
 - `blockedTokens` — tokens excluded from prompts; engine tries backups or advances to next path
@@ -347,7 +348,6 @@ src/main/java/com/yourco/ivr/
 │   ├── ValidationResult.java       # Generic validation result
 │   └── config/                     # Brand config model + transfer policy
 │       ├── BrandAuthConfig.java
-│       ├── DisambiguationConfig.java
 │       ├── LevelRule.java
 │       ├── TokenPath.java
 │       ├── TransferPolicy.java
@@ -376,6 +376,7 @@ src/main/java/com/yourco/ivr/
 ├── lookup/                 # Backend token verification
 │   ├── TokenLookupService.java     # SPI — pluggable backend verifier
 │   ├── LookupServiceRegistry.java  # Auto-built registry of all services
+│   ├── VerificationBindings.java   # In-code token→service binding (DefaultVerificationBindings)
 │   ├── LookupRequest.java / LookupResult.java
 │   └── impl/StubLookupService.java # Configurable dev stub
 ├── registry/

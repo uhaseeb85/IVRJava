@@ -5,7 +5,6 @@ import { cn } from '../lib/utils'
 interface Brand {
   brandId: string
   levelRules?: Record<string, unknown>
-  disambiguation?: Record<string, unknown>
 }
 
 const LEVEL_BADGE: Record<string, string> = {
@@ -78,10 +77,7 @@ function BrandCard({ brand, onEdit, onDelete }: { brand: Brand; onEdit: () => vo
         <div className="pt-3 border-t border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-1.5 text-xs text-slate-400">
             <Layers size={11} />
-            {brand.disambiguation
-              ? <span className="text-emerald-600 font-medium">Disambiguation on</span>
-              : 'No disambiguation'
-            }
+            {totalPaths} auth path{totalPaths !== 1 ? 's' : ''}
           </div>
           <span className="text-xs text-indigo-600 font-semibold flex items-center gap-1 group-hover:underline">
             <Pencil size={11} />Edit

@@ -8,12 +8,16 @@ import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
-import com.yourco.ivr.domain.config.VerificationBinding;
+import com.yourco.ivr.lookup.VerificationBinding;
+import com.yourco.ivr.lookup.VerificationBindings;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
@@ -24,13 +28,14 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Exercises the configurable backend lookup/verification feature end-to-end:
- * brand config binds a token to a {@code TokenLookupService}, and the engine runs it after
- * the format check. Uses the shipped {@code stub-verify} service whose outcome is driven by
- * binding params. Brands are registered directly in the registry (no file writes).
+ * Exercises the backend verification gate end-to-end. Backend verification is now wired in code
+ * via {@link VerificationBindings} (no per-brand config, no UI). The {@link TestBindings}
+ * configuration below binds {@link TokenType#ACCOUNT_NUMBER} to the shipped {@code stub-verify}
+ * service, varying the stub outcome by brand id so each scenario (pass / reject / unavailable)
+ * can be exercised with a format-valid account number.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-class LookupServiceIntegrationTest {
+class BackendVerificationIntegrationTest {
 
     @Autowired
     private TestRestTemplate rest;
@@ -38,7 +43,31 @@ class LookupServiceIntegrationTest {
     @Autowired
     private BrandRulesRegistry rulesRegistry;
 
-    private void registerBrand(String brandId, String stubOutcome) {
+    /**
+     * In-code bindings for the test: ACCOUNT_NUMBER → stub-verify, with the stub outcome chosen
+     * by brand id. {@code @Primary} so it wins over the empty production
+     * {@code DefaultVerificationBindings} when the engine injects {@link VerificationBindings}.
+     */
+    @TestConfiguration
+    static class TestBindings {
+        @Bean
+        @Primary
+        VerificationBindings testVerificationBindings() {
+            Map<String, String> outcomeByBrand = new HashMap<>();
+            outcomeByBrand.put("LOOKUP_PASS", "pass");
+            outcomeByBrand.put("LOOKUP_FAIL", "fail");
+            outcomeByBrand.put("LOOKUP_DOWN", "unavailable");
+            return (brandId, tokenType) -> {
+                if (tokenType != TokenType.ACCOUNT_NUMBER) return null;
+                String outcome = outcomeByBrand.get(brandId);
+                if (outcome == null) return null;
+                return new VerificationBinding(
+                    "stub-verify", Collections.singletonMap("outcome", outcome), true);
+            };
+        }
+    }
+
+    private void registerBrand(String brandId) {
         TokenPath path = new TokenPath();
         path.setPathIndex(0);
         path.setDescription("Account lookup");
@@ -48,19 +77,11 @@ class LookupServiceIntegrationTest {
         rule.setPaths(Collections.singletonList(path));
         rule.setMaxRetriesPerToken(3);
 
-        VerificationBinding binding = new VerificationBinding();
-        binding.setServiceId("stub-verify");
-        binding.setParams(Collections.singletonMap("outcome", stubOutcome));
-
-        Map<TokenType, VerificationBinding> sources = new HashMap<>();
-        sources.put(TokenType.ACCOUNT_NUMBER, binding);
-
         BrandAuthConfig cfg = new BrandAuthConfig();
         cfg.setBrandId(brandId);
         Map<AuthLevel, LevelRule> levels = new HashMap<>();
         levels.put(AuthLevel.BASIC, rule);
         cfg.setLevelRules(levels);
-        cfg.setVerificationSources(sources);
 
         rulesRegistry.register(cfg);
     }
@@ -90,7 +111,7 @@ class LookupServiceIntegrationTest {
 
     @Test
     void backendVerificationPass_authenticates() {
-        registerBrand("LOOKUP_PASS", "pass");
+        registerBrand("LOOKUP_PASS");
         String sessionId = startSession("LOOKUP_PASS", "5551110001");
 
         ResponseEntity<AuthenticateResponse> resp = submitAccount(sessionId);
@@ -102,7 +123,7 @@ class LookupServiceIntegrationTest {
 
     @Test
     void backendVerificationFail_doesNotAuthenticate() {
-        registerBrand("LOOKUP_FAIL", "fail");
+        registerBrand("LOOKUP_FAIL");
         String sessionId = startSession("LOOKUP_FAIL", "5551110002");
 
         ResponseEntity<AuthenticateResponse> resp = submitAccount(sessionId);
@@ -114,59 +135,12 @@ class LookupServiceIntegrationTest {
 
     @Test
     void unavailableBackend_failsClosed() {
-        registerBrand("LOOKUP_DOWN", "unavailable");
+        registerBrand("LOOKUP_DOWN");
         String sessionId = startSession("LOOKUP_DOWN", "5551110003");
 
         ResponseEntity<AuthenticateResponse> resp = submitAccount(sessionId);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(resp.getBody().getStatus()).isNotEqualTo(SessionStatus.AUTHENTICATED);
-    }
-
-    @Test
-    void discoveryEndpoint_listsStubService() {
-        ResponseEntity<String> resp = rest.getForEntity("/api/lookup-services", String.class);
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody()).contains("stub-verify");
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void validateRejectsUnknownService() {
-        BrandAuthConfig cfg = brandReferencing("nope-service");
-        ResponseEntity<Map> resp = rest.postForEntity("/api/brands/validate", cfg, Map.class);
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().get("valid")).isEqualTo(Boolean.FALSE);
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void validateAcceptsKnownService() {
-        BrandAuthConfig cfg = brandReferencing("stub-verify");
-        ResponseEntity<Map> resp = rest.postForEntity("/api/brands/validate", cfg, Map.class);
-        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().get("valid")).isEqualTo(Boolean.TRUE);
-    }
-
-    private BrandAuthConfig brandReferencing(String serviceId) {
-        TokenPath path = new TokenPath();
-        path.setPathIndex(0);
-        path.setRequiredTokens(Collections.singletonList(TokenType.SSN_LAST4));
-        LevelRule rule = new LevelRule();
-        rule.setPaths(Collections.singletonList(path));
-        rule.setMaxRetriesPerToken(3);
-
-        VerificationBinding binding = new VerificationBinding();
-        binding.setServiceId(serviceId);
-        Map<TokenType, VerificationBinding> sources = new HashMap<>();
-        sources.put(TokenType.SSN_LAST4, binding);
-
-        BrandAuthConfig cfg = new BrandAuthConfig();
-        cfg.setBrandId("VALIDATE_ONLY");
-        Map<AuthLevel, LevelRule> levels = new HashMap<>();
-        levels.put(AuthLevel.STANDARD, rule);
-        cfg.setLevelRules(levels);
-        cfg.setVerificationSources(sources);
-        return cfg;
     }
 }

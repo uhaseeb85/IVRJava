@@ -10,13 +10,13 @@ import {
   LEVELS, LEVEL_ORDER, TOKEN_DEFAULTS, LEVEL_BLURB, SAMPLE_CALLERS, tokenLabel,
 } from '../lib/ivrMeta'
 
-interface BrandSummary { brandId: string; levelRules?: Record<string, unknown> }
+interface BrandSummary { brandId: string; levelRules?: Record<string, unknown>; identificationOnly?: boolean }
 
 function statusStyle(status: string) {
   const s = status.toUpperCase()
   if (s === 'AUTHENTICATED') return 'text-emerald-700 bg-emerald-50 border-emerald-200'
   if (s === 'FAILED') return 'text-red-600 bg-red-50 border-red-200'
-  if (s === 'LOCKED') return 'text-orange-600 bg-orange-50 border-orange-200'
+  if (s === 'REDIRECT_TO_AGENT') return 'text-orange-600 bg-orange-50 border-orange-200'
   if (s === 'COLLECTING') return 'text-amber-700 bg-amber-50 border-amber-200'
   return 'text-slate-500 bg-slate-100 border-slate-200'
 }
@@ -283,7 +283,7 @@ export default function Dashboard() {
   }
 
   const currentStatus = session?.finalStatus?.toUpperCase() ?? 'IDLE'
-  const isDone = ['AUTHENTICATED', 'FAILED', 'LOCKED'].includes(currentStatus)
+  const isDone = ['AUTHENTICATED', 'FAILED', 'REDIRECT_TO_AGENT'].includes(currentStatus)
   const sessionActive = !!session && !isDone
 
   // Drive the token input from the server: auto-select the token it's asking for
@@ -311,6 +311,7 @@ export default function Dashboard() {
 
   const selectedBrand = stats.brands.find(b => b.brandId === form.brandId)
   const brandLevels = levelsForBrand(selectedBrand)
+  const idOnly = !!selectedBrand?.identificationOnly
   const canPlaceCall = !!form.brandId && !!form.targetLevel && !loading
 
   const acceptedTokens = (response?.acceptedTokens as string[] | undefined) ?? []
@@ -319,6 +320,8 @@ export default function Dashboard() {
 
   const currentLevel = String(response?.currentLevel ?? 'NONE')
   const higherLevels = brandLevels.filter(l => LEVEL_ORDER.indexOf(l as typeof LEVEL_ORDER[number]) > LEVEL_ORDER.indexOf(currentLevel.toUpperCase() as typeof LEVEL_ORDER[number]))
+  // Identification-only result: the caller was resolved to a single party, no auth level granted.
+  const identified = currentStatus === 'AUTHENTICATED' && (idOnly || currentLevel.toUpperCase() === 'NONE')
 
   const responseSummary = response ? (
     <div className="space-y-1.5">
@@ -417,7 +420,7 @@ export default function Dashboard() {
                       return (
                         <button
                           key={b.brandId}
-                          onClick={() => setForm(f => ({ ...f, brandId: b.brandId, targetLevel: '' }))}
+                          onClick={() => setForm(f => ({ ...f, brandId: b.brandId, targetLevel: b.identificationOnly ? 'NONE' : '' }))}
                           className={cn(
                             'text-left rounded-xl border p-3 transition-all',
                             selected
@@ -430,9 +433,11 @@ export default function Dashboard() {
                             <span className="text-sm font-bold text-slate-800 truncate">{b.brandId}</span>
                           </div>
                           <div className="flex flex-wrap gap-1 mt-2">
-                            {levels.map(l => (
-                              <span key={l} className="bg-slate-100 text-slate-500 rounded px-1.5 py-0.5 text-[10px] font-semibold">{l}</span>
-                            ))}
+                            {b.identificationOnly
+                              ? <span className="bg-sky-100 text-sky-600 rounded px-1.5 py-0.5 text-[10px] font-semibold">ID ONLY</span>
+                              : levels.map(l => (
+                                  <span key={l} className="bg-slate-100 text-slate-500 rounded px-1.5 py-0.5 text-[10px] font-semibold">{l}</span>
+                                ))}
                           </div>
                         </button>
                       )
@@ -441,8 +446,18 @@ export default function Dashboard() {
                 )}
               </div>
 
+              {/* Identification-only note (replaces the level chooser) */}
+              {form.brandId && idOnly && (
+                <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3">
+                  <p className="text-xs font-bold text-sky-700 uppercase tracking-wider mb-1">2 · Identification only</p>
+                  <p className="text-sm text-sky-700">
+                    This brand just identifies the caller — no auth level is granted. The call ends once a single party is resolved (access level stays NONE).
+                  </p>
+                </div>
+              )}
+
               {/* Level chooser */}
-              {form.brandId && (
+              {form.brandId && !idOnly && (
                 <div>
                   <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">2 · What do they need to do?</p>
                   <div className="space-y-2">
@@ -557,10 +572,12 @@ export default function Dashboard() {
           {/* ─────────────── STAGE 2 — On the call ─────────────── */}
           {session && (
             <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
-              {/* Progress ladder */}
-              <div className="flex items-center justify-between gap-4">
-                <LevelLadder current={currentLevel} target={session.targetLevel} />
-              </div>
+              {/* Progress ladder (authentication brands only) */}
+              {!idOnly && (
+                <div className="flex items-center justify-between gap-4">
+                  <LevelLadder current={currentLevel} target={session.targetLevel} />
+                </div>
+              )}
 
               {/* Spoken prompt bubble */}
               {response?.prompt ? (
@@ -635,8 +652,21 @@ export default function Dashboard() {
                 </div>
               )}
 
+              {/* Terminal: identified (identification-only brands) */}
+              {identified && (
+                <div className="rounded-xl bg-sky-50 border border-sky-200 p-4">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 size={18} className="text-sky-600" />
+                    <p className="text-sm font-bold text-sky-800">
+                      Identified{response?.matchedPartyId ? ` — party ${String(response.matchedPartyId)}` : ''}
+                    </p>
+                  </div>
+                  <p className="text-xs text-sky-700 mt-1">Access level: NONE (identification only).</p>
+                </div>
+              )}
+
               {/* Terminal: authenticated */}
-              {currentStatus === 'AUTHENTICATED' && (
+              {currentStatus === 'AUTHENTICATED' && !identified && (
                 <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-4">
                   <div className="flex items-center gap-2">
                     <CheckCircle2 size={18} className="text-emerald-600" />
@@ -662,17 +692,17 @@ export default function Dashboard() {
                 </div>
               )}
 
-              {/* Terminal: locked / failed */}
-              {(currentStatus === 'LOCKED' || currentStatus === 'FAILED') && (
+              {/* Terminal: redirect to agent / failed */}
+              {(currentStatus === 'REDIRECT_TO_AGENT' || currentStatus === 'FAILED') && (
                 <div className="rounded-xl bg-red-50 border border-red-200 p-4">
                   <div className="flex items-center gap-2">
                     <Lock size={17} className="text-red-600" />
                     <p className="text-sm font-bold text-red-700">
-                      {currentStatus === 'LOCKED' ? 'Caller locked out' : 'Verification failed'}
+                      {currentStatus === 'REDIRECT_TO_AGENT' ? 'Redirect to Agent' : 'Verification failed'}
                     </p>
                   </div>
-                  {response?.lockedUntil != null && (
-                    <p className="text-xs text-red-500 mt-1">Locked until {new Date(String(response.lockedUntil)).toLocaleTimeString()}</p>
+                  {typeof response?.lockedUntil === 'string' && (
+                    <p className="text-xs text-red-500 mt-1">Redirecting until {new Date(response.lockedUntil).toLocaleTimeString()}</p>
                   )}
                   <button
                     onClick={reset}
@@ -710,7 +740,7 @@ export default function Dashboard() {
                         {session.steps.map((step, i) => {
                           const s = step.status.toUpperCase()
                           const isAuth = s === 'AUTHENTICATED'
-                          const isBad = s === 'FAILED' || s === 'LOCKED'
+                          const isBad = s === 'FAILED' || s === 'REDIRECT_TO_AGENT'
                           return (
                             <div key={i} className={cn(
                               'flex items-center gap-3 rounded-lg px-3 py-2.5 border',

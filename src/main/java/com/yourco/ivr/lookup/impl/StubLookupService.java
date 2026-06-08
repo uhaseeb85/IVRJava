@@ -34,15 +34,6 @@ public class StubLookupService implements TokenLookupService {
     public String id() { return "stub-verify"; }
 
     @Override
-    public String displayName() { return "Stub Verifier (configurable)"; }
-
-    @Override
-    public String description() {
-        return "Development stub. Returns a configurable outcome via the 'outcome' param "
-            + "(pass | fail | unavailable). Does not call any real backend.";
-    }
-
-    @Override
     public Set<TokenType> supportedTokens() {
         return EnumSet.allOf(TokenType.class);
     }

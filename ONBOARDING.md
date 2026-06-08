@@ -35,9 +35,8 @@ BrandAuthConfig
 │       │       └── backupTokens     # optional: required token -> alternatives
 │       ├── maxRetriesPerToken       # failed attempts allowed before fallback
 │       └── lockoutSeconds           # lockout duration after exhausting retries
-└── disambiguation (optional)        # how to resolve one ANI -> many parties
-    ├── maxDisambiguationTokens
-    └── rules                        # EXCLUDE_INACTIVE, PREFER_PRIMARY_ANI
+└── (disambiguation is always-on and not configurable — fixed 3-round limit +
+     EXCLUDE_INACTIVE / PREFER_PRIMARY_ANI rule chain, applied to every brand)
 ```
 
 **Auth levels** ([`AuthLevel`](src/main/java/com/yourco/ivr/domain/AuthLevel.java)): `NONE`, `BASIC`, `STANDARD`, `ELEVATED`, `ADMIN` (ranked 0–4). You only define rules for the levels a brand actually offers.
@@ -115,14 +114,7 @@ Copy this, rename `brandId`, and trim to the levels you need. (JSON has no comme
 ```jsonc
 {
   "brandId": "BRAND_C",                       // unique id; filename becomes brand_c.json
-
-  "disambiguation": {                          // OPTIONAL — omit entirely if one ANI = one party
-    "maxDisambiguationTokens": 3,              // max differentiating-token rounds before giving up
-    "rules": [
-      { "type": "EXCLUDE_INACTIVE" },          // drop parties where active == false
-      { "type": "PREFER_PRIMARY_ANI" }         // keep parties flagged primaryAni == true
-    ]
-  },
+  // Note: disambiguation is always-on and not configurable — no block to add here.
 
   "levelRules": {
     "BASIC": {                                 // simplest level: identify by account number only

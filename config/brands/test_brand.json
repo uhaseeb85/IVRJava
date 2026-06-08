@@ -1,12 +1,5 @@
 {
   "brandId" : "TEST_BRAND",
-  "disambiguation" : {
-    "maxDisambiguationTokens" : 3,
-    "rules" : [
-      { "type" : "EXCLUDE_INACTIVE" },
-      { "type" : "PREFER_PRIMARY_ANI" }
-    ]
-  },
   "levelRules" : {
     "BASIC" : {
       "paths" : [ {

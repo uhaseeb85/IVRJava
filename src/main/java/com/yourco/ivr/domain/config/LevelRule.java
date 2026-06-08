@@ -1,8 +1,10 @@
 package com.yourco.ivr.domain.config;
 
+import com.yourco.ivr.domain.TokenType;
 import lombok.Data;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Authentication rules for a single target {@link com.yourco.ivr.domain.AuthLevel}.
@@ -19,6 +21,7 @@ import java.util.List;
  *     { "pathIndex": 1, "requiredTokens": ["ACCOUNT_NUMBER", "SSN_LAST4"] }
  *   ],
  *   "maxRetriesPerToken": 3,
+ *   "tokenRetryLimits": { "PIN": 2, "ACCOUNT_NUMBER": 5 },
  *   "lockoutSeconds": 300
  * }
  * </pre>
@@ -32,12 +35,26 @@ public class LevelRule {
     private List<TokenPath> paths;
 
     /**
-     * Maximum number of failed attempts allowed per required-token slot before the engine
-     * either switches to the next fallback path (if {@code allowPathSwitch} applies) or
-     * locks the session.
+     * Default maximum failed attempts allowed per required-token slot. Applied to any token
+     * type not listed in {@link #tokenRetryLimits}.
      */
     private int maxRetriesPerToken;
 
+    /**
+     * Per-token retry overrides. When present, the value here takes precedence over
+     * {@link #maxRetriesPerToken} for that specific token type. Tokens not listed here
+     * fall back to {@code maxRetriesPerToken}.
+     */
+    private Map<TokenType, Integer> tokenRetryLimits;
+
     /** Duration in seconds the session stays locked after all retry paths are exhausted. */
     private int lockoutSeconds;
+
+    /** Returns the retry limit for {@code tokenType}, using the per-token override if configured. */
+    public int getMaxRetriesFor(TokenType tokenType) {
+        if (tokenRetryLimits != null && tokenRetryLimits.containsKey(tokenType)) {
+            return tokenRetryLimits.get(tokenType);
+        }
+        return maxRetriesPerToken;
+    }
 }

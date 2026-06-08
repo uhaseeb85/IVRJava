@@ -45,6 +45,6 @@ public final class LookupRequest {
     /** Tokens already collected this session (e.g. account number), usable as lookup keys. */
     public Map<TokenType, String> getSessionTokens() { return sessionTokens; }
 
-    /** Per-brand binding params from config (e.g. region, dataset). Never null. */
+    /** Binding params from {@link VerificationBinding} (e.g. region, dataset). Never null. */
     public Map<String, String> getParams() { return params; }
 }

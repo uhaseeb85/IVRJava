@@ -4,14 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
-import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
-import com.yourco.ivr.domain.config.VerificationBinding;
 import com.yourco.ivr.exception.BrandConfigException;
 import com.yourco.ivr.exception.UnknownBrandException;
-import com.yourco.ivr.lookup.LookupServiceRegistry;
-import com.yourco.ivr.lookup.TokenLookupService;
 import com.yourco.ivr.registry.BrandRulesRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,8 +30,8 @@ import java.util.Map;
  * read/write/delete operations on those files and keeps the registry in sync.
  *
  * <p>All writes go through {@link #validate} first, which checks structural correctness
- * (required fields, non-empty paths) and verifies that any referenced lookup service IDs
- * are registered. Never bypass this by calling {@link BrandRulesRegistry#register} directly.
+ * (required fields, non-empty paths). Never bypass this by calling
+ * {@link BrandRulesRegistry#register} directly.
  *
  * <p><strong>Known issue:</strong> {@link #refreshRegistry()} clears the registry before
  * reloading, creating a brief window where all brands are absent. Fix with an atomic swap.
@@ -47,15 +43,13 @@ public class BrandService {
     private static final String JSON_EXT = ".json";
 
     private final BrandRulesRegistry registry;
-    private final LookupServiceRegistry lookupRegistry;
     private final ObjectMapper mapper;
     private final String configDir;
 
-    public BrandService(BrandRulesRegistry registry, LookupServiceRegistry lookupRegistry,
+    public BrandService(BrandRulesRegistry registry,
                         ObjectMapper mapper,
                         @Value("${ivr.brands.config-dir:./config/brands}") String configDir) {
         this.registry = registry;
-        this.lookupRegistry = lookupRegistry;
         this.mapper = mapper;
         this.configDir = configDir;
     }
@@ -174,15 +168,16 @@ public class BrandService {
         if (config.getBrandId() == null || config.getBrandId().trim().isEmpty()) {
             return ValidationResult.error("Brand ID is required");
         }
-        if (config.getLevelRules() == null || config.getLevelRules().isEmpty()) {
+        boolean hasLevelRules = config.getLevelRules() != null && !config.getLevelRules().isEmpty();
+        // Identification-only brands resolve to a party and stop; they need no level rules.
+        if (!config.isIdentificationOnly() && !hasLevelRules) {
             return ValidationResult.error("At least one level rule is required");
         }
-        ValidationResult levelCheck = validateLevelRules(config.getLevelRules());
-        if (!levelCheck.isValid()) {
-            return levelCheck;
-        }
-        if (config.getVerificationSources() != null) {
-            return validateVerificationSources(config.getVerificationSources());
+        if (hasLevelRules) {
+            ValidationResult levelCheck = validateLevelRules(config.getLevelRules());
+            if (!levelCheck.isValid()) {
+                return levelCheck;
+            }
         }
         return ValidationResult.ok();
     }
@@ -226,29 +221,6 @@ public class BrandService {
                     return ValidationResult.error(
                         "Path " + i + " in level " + entry.getKey() + " must have required tokens");
                 }
-            }
-        }
-        return ValidationResult.ok();
-    }
-
-    private ValidationResult validateVerificationSources(Map<TokenType, VerificationBinding> sources) {
-        for (Map.Entry<TokenType, VerificationBinding> entry : sources.entrySet()) {
-            TokenType token = entry.getKey();
-            VerificationBinding binding = entry.getValue();
-            if (binding == null || binding.getServiceId() == null
-                    || binding.getServiceId().trim().isEmpty()) {
-                return ValidationResult.error(
-                    "Verification source for " + token + " must specify a serviceId");
-            }
-            if (!lookupRegistry.contains(binding.getServiceId())) {
-                return ValidationResult.error(
-                    "Unknown lookup service '" + binding.getServiceId() + "' for token " + token);
-            }
-            TokenLookupService service = lookupRegistry.get(binding.getServiceId());
-            if (service.supportedTokens() == null || !service.supportedTokens().contains(token)) {
-                return ValidationResult.error(
-                    "Lookup service '" + binding.getServiceId()
-                    + "' does not support token " + token);
             }
         }
         return ValidationResult.ok();

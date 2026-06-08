@@ -1,11 +1,8 @@
 package com.yourco.ivr.lookup;
 
-import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.exception.UnknownLookupServiceException;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
-import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -48,21 +45,5 @@ public class LookupServiceRegistry {
 
     public boolean contains(String id) {
         return byId.containsKey(id);
-    }
-
-    /** All registered services, in discovery order. */
-    public Collection<TokenLookupService> all() {
-        return byId.values();
-    }
-
-    /** Services able to verify the given token type. */
-    public List<TokenLookupService> forToken(TokenType type) {
-        List<TokenLookupService> result = new ArrayList<>();
-        for (TokenLookupService svc : byId.values()) {
-            if (svc.supportedTokens() != null && svc.supportedTokens().contains(type)) {
-                result.add(svc);
-            }
-        }
-        return result;
     }
 }
