@@ -25,6 +25,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.EnumSet;
@@ -194,11 +195,21 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setSessionId(rs.getString("session_id"));
         s.setBrandId(rs.getString("brand_id"));
         s.setCallerId(rs.getString("caller_id"));
-        s.setCurrentLevel(AuthLevel.valueOf(rs.getString("current_level")));
-        s.setTargetLevel(AuthLevel.valueOf(rs.getString("target_level")));
-        s.setStatus(SessionStatus.valueOf(rs.getString("status")));
-        String phaseStr = rs.getString("phase");
-        s.setPhase(phaseStr != null ? SessionPhase.valueOf(phaseStr) : SessionPhase.AUTHENTICATING);
+        try {
+            s.setCurrentLevel(AuthLevel.valueOf(rs.getString("current_level")));
+            s.setTargetLevel(AuthLevel.valueOf(rs.getString("target_level")));
+            s.setStatus(SessionStatus.valueOf(rs.getString("status")));
+            String phaseStr = rs.getString("phase");
+            s.setPhase(phaseStr != null ? SessionPhase.valueOf(phaseStr) : SessionPhase.AUTHENTICATING);
+            s.setLockedUntil(fromIso(rs.getString("locked_until")));
+            s.setCreatedAt(fromIso(rs.getString("created_at")));
+            s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));
+        } catch (IllegalArgumentException | DateTimeParseException e) {
+            // Corrupted enum name or timestamp in the row — surface as a serialization
+            // error (consistent with the JSON helpers) instead of a raw 500.
+            throw new SessionSerializationException(
+                "Failed to map session row " + s.getSessionId(), e);
+        }
         s.setCollectedTokens(fromJsonEnumMap(rs.getString("collected_tokens"), TokenType.class, String.class));
         s.setValidatedTokens(fromJsonEnumSet(rs.getString("validated_tokens"), TokenType.class));
         s.setAttemptCounts(fromJsonEnumMap(rs.getString("attempt_counts"), TokenType.class, Integer.class));
@@ -209,9 +220,6 @@ public class SqliteSessionRepository implements SessionRepository {
         s.setDisambiguationAttemptCount(rs.getInt("disambiguation_attempt"));
         s.setVersion(rs.getInt("version"));
         s.setTransferredFrom(rs.getString("transferred_from"));
-        s.setLockedUntil(fromIso(rs.getString("locked_until")));
-        s.setCreatedAt(fromIso(rs.getString("created_at")));
-        s.setLastActivityAt(fromIso(rs.getString("last_activity_at")));
         return s;
     }
 
@@ -242,7 +250,7 @@ public class SqliteSessionRepository implements SessionRepository {
             return (Set<T>) mapper.readValue(json,
                 mapper.getTypeFactory().constructCollectionType(EnumSet.class, elementType));
         } catch (IOException e) {
-            throw new SessionSerializationException("Failed to deserializing enum set", e);
+            throw new SessionSerializationException("Failed to deserialize enum set", e);
         }
     }
 

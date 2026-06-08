@@ -15,7 +15,12 @@ const LEVEL_BADGE: Record<string, string> = {
 }
 
 const API = {
-  list: (): Promise<Brand[]> => fetch('/api/brands').then(r => r.json()),
+  list: async (): Promise<Brand[]> => {
+    const res = await fetch('/api/brands')
+    if (!res.ok) throw new Error(`Failed to load brands (${res.status})`)
+    const data = await res.json()
+    return Array.isArray(data) ? data : []
+  },
   del: (id: string) => fetch('/api/brands/' + id, { method: 'DELETE' }),
 }
 

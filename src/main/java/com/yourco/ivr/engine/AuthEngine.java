@@ -217,9 +217,6 @@ public class AuthEngine {
                 "Collecting: " + nextRequired + " | Accepted alternatives: " + acceptedForSlot);
         }
 
-        // ── Store collected token (value never logged) ──────────────────────
-        session.getCollectedTokens().put(tokenType, tokenValue);
-
         // Guard: reject token types not accepted at the current step.
         // Wrong-type submissions decrement the required slot's retry budget but do NOT
         // trigger a path switch — path switching is reserved for genuine validation failures
@@ -813,7 +810,7 @@ public class AuthEngine {
         String expectedValue = extractor.apply(party);
         if (expectedValue == null) return ValidationResult.ok();
 
-        if (tokenValue.equals(expectedValue)) {
+        if (expectedValue.equals(tokenValue)) {
             return ValidationResult.ok();
         }
         log.info("PARTY_VERIFY [{}] token={} value mismatch for party={}",

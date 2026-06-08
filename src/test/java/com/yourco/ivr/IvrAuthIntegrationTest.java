@@ -455,4 +455,37 @@ class IvrAuthIntegrationTest {
         assertThat(r3.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
         assertThat(r3.getBody().getRemainingAttempts()).isEqualTo(3);
     }
+
+    /**
+     * Regression test: submitting a DATE_OF_BIRTH token with a missing (null) value must be
+     * handled as a graceful validation failure (200 / COLLECTING), not crash the format
+     * validator with an NPE that surfaces as HTTP 500. DATE_OF_BIRTH is an accepted backup
+     * for the PIN slot on BRAND_A STANDARD path0, so the value reaches DateOfBirthValidator.
+     */
+    @Test
+    void testNullDateOfBirthValueIsRejectedGracefully() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5551239999");
+        start.setTargetLevel(AuthLevel.STANDARD);
+
+        String sessionId = post(start).getBody().getSessionId();
+
+        // Advance past ACCOUNT_NUMBER to the PIN slot (DATE_OF_BIRTH is an accepted backup)
+        AuthenticateRequest token = req();
+        token.setSessionId(sessionId);
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        post(token);
+
+        // Submit DATE_OF_BIRTH with no tokenValue (null) — must not 500
+        token.setTokenType(TokenType.DATE_OF_BIRTH);
+        token.setTokenValue(null);
+        ResponseEntity<AuthenticateResponse> resp = post(token);
+
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+    }
 }

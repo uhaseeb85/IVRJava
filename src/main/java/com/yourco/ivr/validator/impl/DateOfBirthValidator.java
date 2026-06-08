@@ -23,6 +23,9 @@ public class DateOfBirthValidator implements TokenValidator {
 
     @Override
     public ValidationResult validate(TokenValidationContext ctx) {
+        if (ctx.getTokenValue() == null) {
+            return ValidationResult.fail(ValidationErrorCode.INVALID);
+        }
         try {
             LocalDate.parse(ctx.getTokenValue(), DateTimeFormatter.ISO_LOCAL_DATE);
             return ValidationResult.ok();
