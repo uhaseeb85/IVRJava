@@ -97,8 +97,10 @@ class BackendVerificationIntegrationTest {
         start.setTargetLevel(AuthLevel.BASIC);
         ResponseEntity<AuthenticateResponse> resp = post(start);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
-        return resp.getBody().getSessionId();
+        AuthenticateResponse body = resp.getBody();
+        assertThat(body).isNotNull();
+        assertThat(body.getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        return body.getSessionId();
     }
 
     private ResponseEntity<AuthenticateResponse> submitAccount(String sessionId) {
@@ -117,8 +119,10 @@ class BackendVerificationIntegrationTest {
         ResponseEntity<AuthenticateResponse> resp = submitAccount(sessionId);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+        AuthenticateResponse body = resp.getBody();
+        assertThat(body).isNotNull();
+        assertThat(body.getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body.getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
     }
 
     @Test
@@ -129,8 +133,10 @@ class BackendVerificationIntegrationTest {
         ResponseEntity<AuthenticateResponse> resp = submitAccount(sessionId);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        AuthenticateResponse body = resp.getBody();
+        assertThat(body).isNotNull();
         // A well-formed account number that the backend rejects must NOT authenticate.
-        assertThat(resp.getBody().getStatus()).isNotEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body.getStatus()).isNotEqualTo(SessionStatus.AUTHENTICATED);
     }
 
     @Test
@@ -141,6 +147,8 @@ class BackendVerificationIntegrationTest {
         ResponseEntity<AuthenticateResponse> resp = submitAccount(sessionId);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isNotEqualTo(SessionStatus.AUTHENTICATED);
+        AuthenticateResponse body = resp.getBody();
+        assertThat(body).isNotNull();
+        assertThat(body.getStatus()).isNotEqualTo(SessionStatus.AUTHENTICATED);
     }
 }

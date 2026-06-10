@@ -27,6 +27,12 @@ class IvrAuthIntegrationTest {
         return rest.postForEntity("/ivr/authenticate", req, AuthenticateResponse.class);
     }
 
+    private static AuthenticateResponse body(ResponseEntity<AuthenticateResponse> response) {
+        AuthenticateResponse b = response.getBody();
+        assertThat(b).isNotNull();
+        return b;
+    }
+
     @Test
     void testFullAuthFlow() {
         AuthenticateRequest start = req();
@@ -36,10 +42,10 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> startResp = post(start);
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(startResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(startResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        assertThat(body(startResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(startResp).getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
 
-        String sessionId = startResp.getBody().getSessionId();
+        String sessionId = body(startResp).getSessionId();
         assertThat(sessionId).isNotNull();
 
         AuthenticateRequest token = req();
@@ -49,16 +55,16 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> tokenResp = post(token);
         assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(tokenResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(tokenResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(tokenResp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
 
         token.setTokenType(TokenType.PIN);
         token.setTokenValue("1234");
 
         tokenResp = post(token);
         assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(tokenResp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
+        assertThat(body(tokenResp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(tokenResp).getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
     }
 
     @Test
@@ -68,7 +74,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5557654321");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         AuthenticateRequest token = req();
         token.setSessionId(sessionId);
@@ -81,8 +87,8 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> tokenResp = post(token);
         assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(tokenResp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
+        assertThat(body(tokenResp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(tokenResp).getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
     }
 
     @Test
@@ -92,7 +98,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5551112222");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         AuthenticateRequest token = req();
         token.setSessionId(sessionId);
@@ -109,16 +115,16 @@ class IvrAuthIntegrationTest {
         }
 
         assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(tokenResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
+        assertThat(body(tokenResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(tokenResp).getNextRequiredToken()).isEqualTo(TokenType.OTP);
 
         token.setTokenType(TokenType.OTP);
         token.setTokenValue("123456");
 
         tokenResp = post(token);
         assertThat(tokenResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(tokenResp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(tokenResp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
+        assertThat(body(tokenResp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(tokenResp).getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
     }
 
     @Test
@@ -128,7 +134,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5553334444");
         start.setTargetLevel(AuthLevel.BASIC);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         ResponseEntity<AuthenticateResponse> statusResp = rest.getForEntity(
             "/ivr/authenticate/" + sessionId + "/status", AuthenticateResponse.class);
@@ -142,7 +148,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5555555555");
         start.setTargetLevel(AuthLevel.BASIC);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         rest.delete("/ivr/authenticate/" + sessionId);
 
@@ -162,8 +168,8 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> startResp = post(start);
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(startResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(startResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(startResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(startResp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
     }
 
     @Test
@@ -190,9 +196,9 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(req);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
     }
 
     @Test
@@ -207,8 +213,8 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(req);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(resp).getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
     }
 
     @Test
@@ -223,7 +229,7 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(req);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
     }
 
     @Test
@@ -238,7 +244,7 @@ class IvrAuthIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(req);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
+        assertThat(body(resp).getCurrentLevel()).isEqualTo(AuthLevel.BASIC);
     }
 
     /**
@@ -252,7 +258,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5551230001");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         // Advance past ACCOUNT_NUMBER
         AuthenticateRequest token = req();
@@ -260,17 +266,17 @@ class IvrAuthIntegrationTest {
         token.setTokenType(TokenType.ACCOUNT_NUMBER);
         token.setTokenValue("123456789");
         ResponseEntity<AuthenticateResponse> resp = post(token);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(3);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(3);
 
         // Submit OTP — not in acceptedTokens [PIN, SSN_LAST4, DATE_OF_BIRTH] for this step
         token.setTokenType(TokenType.OTP);
         token.setTokenValue("123456");
         resp = post(token);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(2);
     }
 
     /**
@@ -287,7 +293,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5551230002");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         // First step expects ACCOUNT_NUMBER — submit PIN instead
         AuthenticateRequest token = req();
@@ -297,22 +303,22 @@ class IvrAuthIntegrationTest {
         ResponseEntity<AuthenticateResponse> resp = post(token);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
         // Must still ask for ACCOUNT_NUMBER, not PIN
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
         // Must decrement: 3 - 1 = 2 remaining
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(2);
         // Must not have added PIN to validatedTokens (verify by checking accepted list)
-        assertThat(resp.getBody().getAcceptedTokens()).containsExactly(TokenType.ACCOUNT_NUMBER);
+        assertThat(body(resp).getAcceptedTokens()).containsExactly(TokenType.ACCOUNT_NUMBER);
 
         // Second wrong-type submission: count must continue decrementing
         resp = post(token);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(1);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(1);
 
         // Third wrong-type exhausts retries → redirect to agent immediately (no path switch).
         // Wrong-type submissions do not earn a fresh retry budget on an alternative path.
         resp = post(token);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.REDIRECT_TO_AGENT);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.REDIRECT_TO_AGENT);
     }
 
     /**
@@ -329,7 +335,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5559991111");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         AuthenticateRequest token = req();
         token.setSessionId(sessionId);
@@ -341,18 +347,18 @@ class IvrAuthIntegrationTest {
         token.setTokenType(TokenType.PIN);
         token.setTokenValue("12");
         ResponseEntity<AuthenticateResponse> resp = post(token);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(2);
 
         // Failure 2: SSN_LAST4 "12" is too short (fails SsnLast4Validator)
         // → 2 failures on PIN slot (SSN_LAST4 is a backup for PIN)
         token.setTokenType(TokenType.SSN_LAST4);
         token.setTokenValue("12");
         resp = post(token);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(1);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(1);
 
         // Failure 3: DATE_OF_BIRTH "bad-date" fails format validation
         // → 3 failures on PIN slot (DATE_OF_BIRTH is also a backup for PIN)
@@ -361,8 +367,8 @@ class IvrAuthIntegrationTest {
         token.setTokenValue("bad-date");
         resp = post(token);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.OTP);
     }
 
     /**
@@ -378,7 +384,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5558882222");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         AuthenticateRequest token = req();
         token.setSessionId(sessionId);
@@ -393,12 +399,12 @@ class IvrAuthIntegrationTest {
         ResponseEntity<AuthenticateResponse> resp = post(token);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
         // Must ask for PIN (the required slot), not SSN_LAST4 (the submitted backup)
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
         // Must expose backup alternatives so the caller can offer them to the customer
-        assertThat(resp.getBody().getAcceptedTokens()).contains(TokenType.SSN_LAST4);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(resp).getAcceptedTokens()).contains(TokenType.SSN_LAST4);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(2);
     }
 
     @Test
@@ -425,7 +431,7 @@ class IvrAuthIntegrationTest {
         start.setBrandId("BRAND_A");
         start.setCallerId("5550000099");
         start.setTargetLevel(AuthLevel.STANDARD);
-        String sid = post(start).getBody().getSessionId();
+        String sid = body(post(start)).getSessionId();
 
         // Advance past ACCOUNT_NUMBER slot
         AuthenticateRequest token = req();
@@ -439,20 +445,20 @@ class IvrAuthIntegrationTest {
         token.setTokenValue("12"); // too short, always fails
 
         ResponseEntity<AuthenticateResponse> r1 = post(token);
-        assertThat(r1.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(r1.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(r1.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(r1).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(r1).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(r1).getRemainingAttempts()).isEqualTo(2);
 
         ResponseEntity<AuthenticateResponse> r2 = post(token);
-        assertThat(r2.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(r2.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(r2.getBody().getRemainingAttempts()).isEqualTo(1);
+        assertThat(body(r2).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(r2).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(r2).getRemainingAttempts()).isEqualTo(1);
 
         // Third failure exhausts path0 PIN slot -> switch to path1 = [ACCOUNT_NUMBER, OTP]
         // ACCOUNT_NUMBER is already validated so path1 advances immediately to OTP
         ResponseEntity<AuthenticateResponse> r3 = post(token);
-        assertThat(r3.getBody().getNextRequiredToken()).isEqualTo(TokenType.OTP);
-        assertThat(r3.getBody().getRemainingAttempts()).isEqualTo(3);
+        assertThat(body(r3).getNextRequiredToken()).isEqualTo(TokenType.OTP);
+        assertThat(body(r3).getRemainingAttempts()).isEqualTo(3);
     }
 
     /**
@@ -468,7 +474,7 @@ class IvrAuthIntegrationTest {
         start.setCallerId("5551239999");
         start.setTargetLevel(AuthLevel.STANDARD);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         // Advance past ACCOUNT_NUMBER to the PIN slot (DATE_OF_BIRTH is an accepted backup)
         AuthenticateRequest token = req();
@@ -483,8 +489,8 @@ class IvrAuthIntegrationTest {
         ResponseEntity<AuthenticateResponse> resp = post(token);
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
-        assertThat(resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getRemainingAttempts()).isEqualTo(2);
     }
 }

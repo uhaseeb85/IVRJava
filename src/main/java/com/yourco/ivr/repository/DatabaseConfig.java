@@ -6,6 +6,7 @@ import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 
 import javax.annotation.PostConstruct;
 import javax.sql.DataSource;
+import java.util.Objects;
 
 @Configuration
 public class DatabaseConfig {
@@ -13,7 +14,7 @@ public class DatabaseConfig {
     private final DataSource dataSource;
 
     public DatabaseConfig(DataSource dataSource) {
-        this.dataSource = dataSource;
+        this.dataSource = Objects.requireNonNull(dataSource, "dataSource must not be null");
     }
 
     @PostConstruct

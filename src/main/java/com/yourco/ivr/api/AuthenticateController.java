@@ -3,13 +3,11 @@ package com.yourco.ivr.api;
 import com.yourco.ivr.api.action.RequestAction;
 import com.yourco.ivr.api.action.RequestActionDiscriminator;
 import com.yourco.ivr.api.dto.AuthenticateRequest;
-import com.yourco.ivr.api.dto.AuthenticateRequestMapper;
 import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.service.AuthenticateService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
-import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -31,12 +29,10 @@ public class AuthenticateController {
     }
 
     @Operation(summary = "Unified authentication action", description = "Handles all authentication actions. Discriminated by payload fields: no sessionId + no sourceSystemId = START, no sessionId + sourceSystemId = TRANSFER, sessionId + tokenType = TOKEN, sessionId + no tokenType + targetLevel = ESCALATE")
-    @ApiResponses({
-        @ApiResponse(responseCode = "200", description = "Action processed"),
-        @ApiResponse(responseCode = "400", description = "Invalid request, unknown brand, or unknown caller"),
-        @ApiResponse(responseCode = "403", description = "Transfer source not allowed or disabled"),
-        @ApiResponse(responseCode = "404", description = "Session not found")
-    })
+    @ApiResponse(responseCode = "200", description = "Action processed")
+    @ApiResponse(responseCode = "400", description = "Invalid request, unknown brand, or unknown caller")
+    @ApiResponse(responseCode = "403", description = "Transfer source not allowed or disabled")
+    @ApiResponse(responseCode = "404", description = "Session not found")
     @PostMapping
     public ResponseEntity<AuthenticateResponse> handle(@Valid @RequestBody AuthenticateRequest req) {
         RequestAction action = RequestActionDiscriminator.classify(req);

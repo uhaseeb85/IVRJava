@@ -161,6 +161,9 @@ public class SqliteSessionRepository implements SessionRepository {
         String sql = "SELECT * FROM ivr_session WHERE session_id = ?";
         try {
             IvrSession session = jdbc.queryForObject(sql, this::mapRow, sessionId);
+            if (session == null) {
+                throw new SessionNotFoundException(sessionId);
+            }
             if (session.getLastActivityAt().plus(sessionTtl).isBefore(Instant.now())) {
                 delete(sessionId);
                 throw new SessionNotFoundException(sessionId);

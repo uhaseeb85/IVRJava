@@ -49,6 +49,12 @@ class IdentificationOnlyIntegrationTest {
         return rest.postForEntity("/ivr/authenticate", req, AuthenticateResponse.class);
     }
 
+    private static AuthenticateResponse body(ResponseEntity<AuthenticateResponse> response) {
+        AuthenticateResponse b = response.getBody();
+        assertThat(b).isNotNull();
+        return b;
+    }
+
     private Party party(String id, String account) {
         Party p = new Party();
         p.setPartyId(id);
@@ -73,10 +79,10 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(start);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
 
-        String sessionId = resp.getBody().getSessionId();
+        String sessionId = body(resp).getSessionId();
 
         AuthenticateRequest token1 = new AuthenticateRequest();
         token1.setSessionId(sessionId);
@@ -85,8 +91,8 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> t1Resp = post(token1);
         assertThat(t1Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(t1Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(t1Resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(t1Resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(t1Resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
 
         AuthenticateRequest token2 = new AuthenticateRequest();
         token2.setSessionId(sessionId);
@@ -95,9 +101,9 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> t2Resp = post(token2);
         assertThat(t2Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(t2Resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(t2Resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
-        assertThat(t2Resp.getBody().getMatchedPartyId()).isEqualTo("P-001");
+        assertThat(body(t2Resp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(t2Resp).getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(body(t2Resp).getMatchedPartyId()).isEqualTo("P-001");
     }
 
     @Test
@@ -110,7 +116,7 @@ class IdentificationOnlyIntegrationTest {
         start.setCallerId("4440004444");
         start.setTargetLevel(AuthLevel.NONE);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         AuthenticateRequest token1 = new AuthenticateRequest();
         token1.setSessionId(sessionId);
@@ -119,8 +125,8 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> t1Resp = post(token1);
         assertThat(t1Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(t1Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(t1Resp.getBody().getRemainingAttempts()).isEqualTo(2);
+        assertThat(body(t1Resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(t1Resp).getRemainingAttempts()).isEqualTo(2);
 
         AuthenticateRequest token2 = new AuthenticateRequest();
         token2.setSessionId(sessionId);
@@ -128,8 +134,8 @@ class IdentificationOnlyIntegrationTest {
         token2.setTokenValue("WRONG2");
 
         ResponseEntity<AuthenticateResponse> t2Resp = post(token2);
-        assertThat(t2Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(t2Resp.getBody().getRemainingAttempts()).isEqualTo(1);
+        assertThat(body(t2Resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(t2Resp).getRemainingAttempts()).isEqualTo(1);
 
         AuthenticateRequest token3 = new AuthenticateRequest();
         token3.setSessionId(sessionId);
@@ -137,7 +143,7 @@ class IdentificationOnlyIntegrationTest {
         token3.setTokenValue("WRONG3");
 
         ResponseEntity<AuthenticateResponse> t3Resp = post(token3);
-        assertThat(t3Resp.getBody().getStatus()).isEqualTo(SessionStatus.REDIRECT_TO_AGENT);
+        assertThat(body(t3Resp).getStatus()).isEqualTo(SessionStatus.REDIRECT_TO_AGENT);
     }
 
     @Test
@@ -150,7 +156,7 @@ class IdentificationOnlyIntegrationTest {
         start.setCallerId("5550005555");
         start.setTargetLevel(AuthLevel.NONE);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         AuthenticateRequest token1 = new AuthenticateRequest();
         token1.setSessionId(sessionId);
@@ -158,8 +164,8 @@ class IdentificationOnlyIntegrationTest {
         token1.setTokenValue("555000");
 
         ResponseEntity<AuthenticateResponse> t1Resp = post(token1);
-        assertThat(t1Resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(t1Resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(t1Resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(t1Resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
 
         AuthenticateRequest token2 = new AuthenticateRequest();
         token2.setSessionId(sessionId);
@@ -168,8 +174,8 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> t2Resp = post(token2);
         assertThat(t2Resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(t2Resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(t2Resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(body(t2Resp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(t2Resp).getCurrentLevel()).isEqualTo(AuthLevel.NONE);
     }
 
     @Test
@@ -186,10 +192,10 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> startResp = post(start);
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(startResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(startResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+        assertThat(body(startResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(startResp).getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
 
-        String sessionId = startResp.getBody().getSessionId();
+        String sessionId = body(startResp).getSessionId();
 
         AuthenticateRequest disToken = new AuthenticateRequest();
         disToken.setSessionId(sessionId);
@@ -198,8 +204,8 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> disResp = post(disToken);
         assertThat(disResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(disResp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(disResp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(disResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(disResp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
 
         AuthenticateRequest pinToken = new AuthenticateRequest();
         pinToken.setSessionId(sessionId);
@@ -208,9 +214,9 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> pinResp = post(pinToken);
         assertThat(pinResp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(pinResp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(pinResp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
-        assertThat(pinResp.getBody().getMatchedPartyId()).isEqualTo("P-200");
+        assertThat(body(pinResp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(pinResp).getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(body(pinResp).getMatchedPartyId()).isEqualTo("P-200");
     }
 
     @Test
@@ -229,8 +235,8 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(start);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.COLLECTING);
-        assertThat(resp.getBody().getNextRequiredToken()).isEqualTo(TokenType.PIN);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.PIN);
     }
 
     @Test
@@ -243,7 +249,7 @@ class IdentificationOnlyIntegrationTest {
         start.setCallerId("3330003333");
         start.setTargetLevel(AuthLevel.NONE);
 
-        String sessionId = post(start).getBody().getSessionId();
+        String sessionId = body(post(start)).getSessionId();
 
         // Complete identification first
         AuthenticateRequest token1 = new AuthenticateRequest();
@@ -279,10 +285,10 @@ class IdentificationOnlyIntegrationTest {
 
         ResponseEntity<AuthenticateResponse> resp = post(start);
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(resp.getBody().getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
-        assertThat(resp.getBody().getCurrentLevel()).isEqualTo(AuthLevel.NONE);
-        assertThat(resp.getBody().getMatchedPartyId()).isEqualTo("P-700");
-        assertThat(resp.getBody().getNextRequiredToken()).isNull();
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(resp).getCurrentLevel()).isEqualTo(AuthLevel.NONE);
+        assertThat(body(resp).getMatchedPartyId()).isEqualTo("P-700");
+        assertThat(body(resp).getNextRequiredToken()).isNull();
     }
 
     @Test

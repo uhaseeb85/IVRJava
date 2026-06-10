@@ -201,7 +201,7 @@ public class AuthEngine {
 
         logContext(procLog, session, active, nextRequired, acceptedForSlot);
 
-        if (nextRequired != null && !acceptedForSlot.contains(tokenType)) {
+        if (nextRequired != null && acceptedForSlot != null && !acceptedForSlot.contains(tokenType)) {
             return handleWrongTypeFailure(session, config, nextRequired, procLog);
         }
 
