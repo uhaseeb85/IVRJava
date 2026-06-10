@@ -9,7 +9,7 @@ import java.util.List;
 /**
  * Generates human-readable IVR prompt strings for token collection steps.
  *
- * <p>Called by {@link AuthEngine#evaluateProgress} and {@link AuthEngine#handleFailure} to
+ * <p>Called by {@link AuthEngine#evaluateProgress} and the engine's failure handlers to
  * produce the {@code prompt} field in {@link com.yourco.ivr.api.dto.AuthenticateResponse}.
  * The prompt names the required token, lists any backup alternatives, and states how many
  * attempts remain.

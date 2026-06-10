@@ -143,25 +143,8 @@ public class AuthEngine {
                                         String callerId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
 
-        // Redirect-to-agent guard: auto-reset once the delay window has elapsed
-        if (session.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
-            if (session.getLockedUntil() != null
-                    && Instant.now().isAfter(session.getLockedUntil())) {
-                session.setStatus(SessionStatus.COLLECTING);
-                session.getAttemptCounts().clear();
-                session.setLockedUntil(null);
-                sessionRepo.save(session);
-            } else {
-                throw new SessionLockedException(sessionId, session.getLockedUntil());
-            }
-        }
-
-        // Optional session ownership validation
-        if (callerId != null && !callerId.equals(session.getCallerId())) {
-            log.warn("CallerId mismatch for session {}: expected {}, got {}",
-                sessionId, session.getCallerId(), callerId);
-            throw new SessionNotFoundException(sessionId);
-        }
+        resetExpiredRedirectOrThrow(session);
+        verifyCallerOwnership(session, callerId);
 
         if (session.getStatus() == SessionStatus.AUTHENTICATED
                 || session.getStatus() == SessionStatus.FAILED) {
@@ -174,79 +157,45 @@ public class AuthEngine {
 
         // Route to disambiguation if session is still resolving parties
         if (session.getPhase() == SessionPhase.DISAMBIGUATION) {
-            AuthenticateResponse disResp = disambiguationEngine.handleToken(
-                session, tokenType, tokenValue);
-            if (session.getPhase() == SessionPhase.AUTHENTICATING) {
-                log.info("AUTH [{}] brand={} caller={} disambiguation resolved party={}",
-                    sessionId, session.getBrandId(), session.getCallerId(),
-                    session.getMatchedParty() != null ? session.getMatchedParty().getPartyId() : "null");
-                return onPartyResolved(session, config);
-            }
-            return disResp;
+            return handleDisambiguationPhase(session, config, tokenType, tokenValue);
         }
 
         // ── Build per-request processing log ────────────────────────────────
         List<ProcessingEvent> procLog = new ArrayList<>();
 
         ActivePath active = resolveActivePath(session, config);
-        int pathIdxCtx = active.index;
-        TokenPath activePathCtx = active.path;
+        TokenType nextRequired = active.path != null
+            ? findNextRequired(session.getValidatedTokens(), active.path) : null;
+        List<TokenType> acceptedForSlot = nextRequired != null
+            ? buildAcceptedTokens(session, active.path, nextRequired, nextRequired) : null;
 
-        addEntry(procLog, "INFO",
-            "Brand: " + session.getBrandId()
-            + " | Target: " + session.getTargetLevel()
-            + " | Phase: AUTHENTICATING");
-
-        if (activePathCtx != null) {
-            addEntry(procLog, "INFO",
-                "Active path: path" + pathIdxCtx + " → " + activePathCtx.getRequiredTokens());
-        }
-
-        Set<TokenType> validatedSoFar = session.getValidatedTokens();
-        addEntry(procLog, "INFO",
-            "Validated tokens: " + (validatedSoFar.isEmpty() ? "[none]" : validatedSoFar));
-
-        // Compute next required once — used for both the log entry and the wrong-type guard below
-        TokenType nextRequired = activePathCtx != null
-            ? findNextRequired(validatedSoFar, activePathCtx) : null;
-        if (nextRequired != null) {
-            List<TokenType> acceptedForSlot = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
-            addEntry(procLog, "INFO",
-                "Collecting: " + nextRequired + " | Accepted alternatives: " + acceptedForSlot);
-        }
+        logCollectionContext(procLog, session, active, nextRequired, acceptedForSlot);
 
         // Guard: reject token types not accepted at the current step.
         // Wrong-type submissions decrement the required slot's retry budget but do NOT
         // trigger a path switch — path switching is reserved for genuine validation failures
         // (correct type, wrong value). Exhausting retries on wrong-type locks the session.
-        if (nextRequired != null) {
-            List<TokenType> acceptedNow = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
-            if (!acceptedNow.contains(tokenType)) {
-                addEntry(procLog, "WARN",
-                    "WRONG_TYPE: submitted " + tokenType + " but expected one of " + acceptedNow);
-                AuthenticateResponse wrongTypeResp = handleFailure(session, config, nextRequired, procLog, false);
-                wrongTypeResp.setProcessingLog(procLog);
-                return wrongTypeResp;
-            }
+        if (nextRequired != null && !acceptedForSlot.contains(tokenType)) {
+            addEntry(procLog, "WARN",
+                "WRONG_TYPE: submitted " + tokenType + " but expected one of " + acceptedForSlot);
+            AuthenticateResponse wrongTypeResp = handleWrongTypeFailure(session, config, nextRequired, procLog);
+            wrongTypeResp.setProcessingLog(procLog);
+            return wrongTypeResp;
         }
 
         // 1. Validate externally
         ValidationResult validationResult = validateExternally(session, tokenType, tokenValue);
         boolean valid = validationResult.isValid();
-        String validationDetail = valid ? "PASS"
-            : (validationResult.getErrorCode() != null
-                ? validationResult.getErrorCode().name() : "FAIL");
 
         addEntry(procLog, valid ? "PASS" : "FAIL",
-            "External validation: " + tokenType + " → " + validationDetail);
+            "External validation: " + tokenType + " → " + describeValidationOutcome(validationResult));
 
         log.info("AUTH [{}] brand={} caller={} token={} result={}",
             sessionId, session.getBrandId(), session.getCallerId(), tokenType,
             valid ? "PASS" : "FAIL");
 
         if (!valid) {
-            // Genuine validation failure (correct type, wrong value) — path switch allowed.
-            AuthenticateResponse failResp = handleFailure(session, config, tokenType, procLog, true);
+            AuthenticateResponse failResp = handleValidationFailure(session, config, tokenType, procLog);
             failResp.setProcessingLog(procLog);
             return failResp;
         }
@@ -277,16 +226,94 @@ public class AuthEngine {
         if (evalResp.getStatus() == SessionStatus.AUTHENTICATED) {
             addEntry(procLog, "PASS",
                 "Path complete → " + session.getTargetLevel() + " achieved");
-        } else if (evalResp.getNextRequiredToken() != null) {
-            addEntry(procLog, "INFO",
-                "Next required: " + evalResp.getNextRequiredToken());
-            if (evalResp.getAcceptedTokens() != null && !evalResp.getAcceptedTokens().isEmpty()) {
-                addEntry(procLog, "INFO",
-                    "Accepted for next slot: " + evalResp.getAcceptedTokens());
-            }
+        } else {
+            logNextRequired(procLog, evalResp);
         }
         evalResp.setProcessingLog(procLog);
         return evalResp;
+    }
+
+    /** Auto-resets an expired redirect-to-agent lock, or throws if it is still active. */
+    private void resetExpiredRedirectOrThrow(IvrSession session) {
+        if (session.getStatus() != SessionStatus.REDIRECT_TO_AGENT) {
+            return;
+        }
+        if (session.getLockedUntil() == null || !Instant.now().isAfter(session.getLockedUntil())) {
+            throw new SessionLockedException(session.getSessionId(), session.getLockedUntil());
+        }
+        session.setStatus(SessionStatus.COLLECTING);
+        session.getAttemptCounts().clear();
+        session.setLockedUntil(null);
+        sessionRepo.save(session);
+    }
+
+    /** Optional session ownership validation: a mismatched callerId may not act on the session. */
+    private static void verifyCallerOwnership(IvrSession session, String callerId) {
+        if (callerId != null && !callerId.equals(session.getCallerId())) {
+            log.warn("CallerId mismatch for session {}: expected {}, got {}",
+                session.getSessionId(), session.getCallerId(), callerId);
+            throw new SessionNotFoundException(session.getSessionId());
+        }
+    }
+
+    /** Forwards the token to the disambiguation round; hands off to auth once a party resolves. */
+    private AuthenticateResponse handleDisambiguationPhase(IvrSession session,
+                                                           BrandAuthConfig config,
+                                                           TokenType tokenType,
+                                                           String tokenValue) {
+        AuthenticateResponse disResp = disambiguationEngine.handleToken(session, tokenType, tokenValue);
+        if (session.getPhase() == SessionPhase.AUTHENTICATING) {
+            log.info("AUTH [{}] brand={} caller={} disambiguation resolved party={}",
+                session.getSessionId(), session.getBrandId(), session.getCallerId(),
+                session.getMatchedParty() != null ? session.getMatchedParty().getPartyId() : "null");
+            return onPartyResolved(session, config);
+        }
+        return disResp;
+    }
+
+    /** Logs where the session stands before processing the submitted token. */
+    private static void logCollectionContext(List<ProcessingEvent> procLog,
+                                             IvrSession session,
+                                             ActivePath active,
+                                             TokenType nextRequired,
+                                             List<TokenType> acceptedForSlot) {
+        addEntry(procLog, "INFO",
+            "Brand: " + session.getBrandId()
+            + " | Target: " + session.getTargetLevel()
+            + " | Phase: AUTHENTICATING");
+
+        if (active.path != null) {
+            addEntry(procLog, "INFO",
+                "Active path: path" + active.index + " → " + active.path.getRequiredTokens());
+        }
+
+        Set<TokenType> validatedSoFar = session.getValidatedTokens();
+        addEntry(procLog, "INFO",
+            "Validated tokens: " + (validatedSoFar.isEmpty() ? "[none]" : validatedSoFar));
+
+        if (nextRequired != null) {
+            addEntry(procLog, "INFO",
+                "Collecting: " + nextRequired + " | Accepted alternatives: " + acceptedForSlot);
+        }
+    }
+
+    /** PASS, the specific error code when present, or FAIL. Never includes the token value. */
+    private static String describeValidationOutcome(ValidationResult result) {
+        if (result.isValid()) {
+            return "PASS";
+        }
+        return result.getErrorCode() != null ? result.getErrorCode().name() : "FAIL";
+    }
+
+    /** Logs the next required slot and its accepted alternatives, when present. */
+    private static void logNextRequired(List<ProcessingEvent> procLog, AuthenticateResponse resp) {
+        if (resp.getNextRequiredToken() == null) {
+            return;
+        }
+        addEntry(procLog, "INFO", "Next required: " + resp.getNextRequiredToken());
+        if (resp.getAcceptedTokens() != null && !resp.getAcceptedTokens().isEmpty()) {
+            addEntry(procLog, "INFO", "Accepted for next slot: " + resp.getAcceptedTokens());
+        }
     }
 
     /**
@@ -397,48 +424,12 @@ public class AuthEngine {
         }
 
         LevelRule rule = active.rule;
-        int activePathIdx = active.index;
         TokenPath activePath = active.path;
 
-        // Check if active path is fully satisfied (each required token must be directly validated)
-        boolean pathComplete = true;
-        for (TokenType required : activePath.getRequiredTokens()) {
-            if (!session.getValidatedTokens().contains(required)) {
-                pathComplete = false;
-                break;
-            }
-        }
-
-        if (pathComplete) {
-            if (config.isIdentificationOnly() && session.getTargetLevel() == AuthLevel.NONE) {
-                return finalizeIdentification(session);
-            }
-            session.setCurrentLevel(session.getTargetLevel());
-            session.setStatus(SessionStatus.AUTHENTICATED);
-            sessionRepo.save(session);
-            return baseResponse(session)
-                .status(SessionStatus.AUTHENTICATED)
-                .prompt("Authentication successful. You are now at " + session.getCurrentLevel() + " level.")
-                .build();
-        }
-
-        // Find next missing token on this path (required tokens not yet validated)
-        TokenType nextToken = null;
-        for (TokenType required : activePath.getRequiredTokens()) {
-            if (!session.getValidatedTokens().contains(required)) {
-                nextToken = required;
-                break;
-            }
-        }
-
+        // Next missing required token on this path; null means the path is fully satisfied
+        TokenType nextToken = findNextRequired(session.getValidatedTokens(), activePath);
         if (nextToken == null) {
-            // Should not happen given pathComplete check above, but guard anyway
-            session.setCurrentLevel(session.getTargetLevel());
-            session.setStatus(SessionStatus.AUTHENTICATED);
-            sessionRepo.save(session);
-            return baseResponse(session)
-                .status(SessionStatus.AUTHENTICATED)
-                .build();
+            return completeAuthentication(session, config);
         }
 
         // Remember the original required token before preference filtering replaces it.
@@ -450,7 +441,7 @@ public class AuthEngine {
         if (isBlocked(session, nextToken)) {
             nextToken = findAlternativeToken(session, activePath, nextToken);
             if (nextToken == null) {
-                return advanceToNextPathOrFail(session, config, rule, activePathIdx);
+                return advanceToNextPathOrFail(session, config, rule, active.index);
             }
         }
 
@@ -467,6 +458,20 @@ public class AuthEngine {
             .remainingAttempts(rule.getMaxRetriesFor(nextToken))
             .acceptedTokens(acceptedTokens)
             .prompt(prompt)
+            .build();
+    }
+
+    /** Active path fully satisfied — mark the session authenticated at its target level. */
+    private AuthenticateResponse completeAuthentication(IvrSession session, BrandAuthConfig config) {
+        if (config.isIdentificationOnly() && session.getTargetLevel() == AuthLevel.NONE) {
+            return finalizeIdentification(session);
+        }
+        session.setCurrentLevel(session.getTargetLevel());
+        session.setStatus(SessionStatus.AUTHENTICATED);
+        sessionRepo.save(session);
+        return baseResponse(session)
+            .status(SessionStatus.AUTHENTICATED)
+            .prompt("Authentication successful. You are now at " + session.getCurrentLevel() + " level.")
             .build();
     }
 
@@ -540,7 +545,7 @@ public class AuthEngine {
      * returned unchanged. If it is a backup alternative for a required slot, the
      * required-slot token type is returned instead.
      * <p>
-     * This is used by {@link #handleFailure} to ensure failure counts are always
+     * This is used by the failure handlers to ensure failure counts are always
      * accumulated at the required-token level so the retry limit cannot be bypassed
      * by cycling across backup token types (e.g., failing PIN, then SSN_LAST4, then
      * DATE_OF_BIRTH each counts against the same PIN slot).
@@ -562,112 +567,150 @@ public class AuthEngine {
     }
 
     /**
-     * Handle a token submission failure.
-     *
-     * @param allowPathSwitch when {@code true} (genuine validation failure — correct type, wrong
-     *        value) the engine may switch to the next fallback path when retries are exhausted.
-     *        When {@code false} (wrong token type submitted) the session is locked immediately
-     *        on retry exhaustion — path switching is NOT offered, because presenting a fresh
-     *        retry budget for an alternative credential method rewards the wrong behaviour.
+     * Handle a genuine validation failure (correct type, wrong value). When the retry
+     * budget for the required slot is exhausted, the engine may switch to the next
+     * fallback path before locking the session.
      */
-    private AuthenticateResponse handleFailure(IvrSession session,
-                                           BrandAuthConfig config,
-                                           TokenType tokenType,
-                                           List<ProcessingEvent> procLog,
-                                            boolean allowPathSwitch) {
-        LevelRule rule = config.getLevelRules() != null
-            ? config.getLevelRules().get(session.getTargetLevel()) : null;
-        Map<TokenType, Integer> counts = session.getAttemptCounts();
-
-        // Bug 1 fix: track attempts against the required-token slot, not the submitted
-        // backup type. This prevents bypassing retry limits by cycling across backup types
-        // (e.g., failing PIN once + SSN_LAST4 once + DATE_OF_BIRTH once = 3 total failures
-        // that should trigger a path switch, not three independent 1-failure counters).
+    private AuthenticateResponse handleValidationFailure(IvrSession session,
+                                                         BrandAuthConfig config,
+                                                         TokenType tokenType,
+                                                         List<ProcessingEvent> procLog) {
+        LevelRule rule = levelRule(config, session);
         TokenType requiredToken = findRequiredTokenForSlot(session, config, tokenType);
-        int attempts = counts.containsKey(requiredToken)
-            ? counts.get(requiredToken) + 1
-            : 1;
+        int remaining = recordFailedAttempt(session, rule, requiredToken, procLog);
+        if (remaining > 0) {
+            return repromptForSlot(session, rule, requiredToken, remaining, procLog);
+        }
+
+        addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
+        AuthenticateResponse switched = switchToFallbackPath(session, config, rule, procLog);
+        if (switched != null) {
+            return switched;
+        }
+        return redirectToAgent(session, rule, procLog);
+    }
+
+    /**
+     * Handle a wrong-token-type submission. Retry exhaustion locks the session
+     * immediately — path switching is NOT offered, because presenting a fresh retry
+     * budget for an alternative credential method rewards the wrong behaviour.
+     */
+    private AuthenticateResponse handleWrongTypeFailure(IvrSession session,
+                                                        BrandAuthConfig config,
+                                                        TokenType tokenType,
+                                                        List<ProcessingEvent> procLog) {
+        LevelRule rule = levelRule(config, session);
+        TokenType requiredToken = findRequiredTokenForSlot(session, config, tokenType);
+        int remaining = recordFailedAttempt(session, rule, requiredToken, procLog);
+        if (remaining > 0) {
+            return repromptForSlot(session, rule, requiredToken, remaining, procLog);
+        }
+
+        addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
+        addEntry(procLog, "FAIL",
+            "Wrong token type exhausted retries — redirecting to agent (no path switch)");
+        return redirectToAgent(session, rule, procLog);
+    }
+
+    /** The level rule for the session's current target level. */
+    private static LevelRule levelRule(BrandAuthConfig config, IvrSession session) {
+        return config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
+    }
+
+    /**
+     * Record a failed attempt against the required-token slot and return the remaining
+     * retry budget. Attempts are tracked per required slot (not per submitted type) so
+     * the limit cannot be bypassed by cycling across backup alternatives.
+     */
+    private static int recordFailedAttempt(IvrSession session,
+                                           LevelRule rule,
+                                           TokenType requiredToken,
+                                           List<ProcessingEvent> procLog) {
+        Map<TokenType, Integer> counts = session.getAttemptCounts();
+        int attempts = counts.containsKey(requiredToken) ? counts.get(requiredToken) + 1 : 1;
         counts.put(requiredToken, attempts);
         int maxRetries = rule.getMaxRetriesFor(requiredToken);
-        int remaining = maxRetries - attempts;
 
         addEntry(procLog, "WARN",
             "Attempt " + attempts + " of " + maxRetries
             + " for " + requiredToken + " slot");
+        return maxRetries - attempts;
+    }
 
-        if (remaining > 0) {
-            addEntry(procLog, "WARN",
-                remaining + " attempt" + (remaining == 1 ? "" : "s")
-                + " remaining — still collecting " + requiredToken);
+    /**
+     * Re-prompt for the same required slot with the remaining retry budget.
+     * The response carries the required-token slot (not the submitted backup type) as
+     * nextRequiredToken, plus acceptedTokens so the caller knows all valid alternatives.
+     */
+    private AuthenticateResponse repromptForSlot(IvrSession session,
+                                                 LevelRule rule,
+                                                 TokenType requiredToken,
+                                                 int remaining,
+                                                 List<ProcessingEvent> procLog) {
+        addEntry(procLog, "WARN",
+            remaining + " attempt" + (remaining == 1 ? "" : "s")
+            + " remaining — still collecting " + requiredToken);
 
-            int activePathIdx = session.getActivePathIndexByLevel()
-                .getOrDefault(session.getTargetLevel(), 0);
-            TokenPath activePath = rule.getPaths().get(activePathIdx);
+        int activePathIdx = session.getActivePathIndexByLevel()
+            .getOrDefault(session.getTargetLevel(), 0);
+        TokenPath activePath = rule.getPaths().get(activePathIdx);
 
-            // Bug 2 fix: return the required-token slot (PIN) as nextRequiredToken,
-            //   not the submitted backup type (SSN_LAST4).
-            // Bug 3 fix: include acceptedTokens so the caller knows all valid alternatives.
-            List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, requiredToken, requiredToken);
-            String prompt = promptResolver.resolvePrompt(requiredToken, activePath, remaining);
-            sessionRepo.save(session);
-            return baseResponse(session)
-                .status(SessionStatus.COLLECTING)
-                .nextRequiredToken(requiredToken)
-                .remainingAttempts(remaining)
-                .acceptedTokens(acceptedTokens)
-                .prompt(prompt)
-                .build();
+        List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, requiredToken, requiredToken);
+        String prompt = promptResolver.resolvePrompt(requiredToken, activePath, remaining);
+        sessionRepo.save(session);
+        return baseResponse(session)
+            .status(SessionStatus.COLLECTING)
+            .nextRequiredToken(requiredToken)
+            .remainingAttempts(remaining)
+            .acceptedTokens(acceptedTokens)
+            .prompt(prompt)
+            .build();
+    }
+
+    /**
+     * Advance to the next fallback path, if one exists, and re-evaluate progress on it.
+     * Returns {@code null} when all paths are exhausted — the caller falls through to lockout.
+     */
+    private AuthenticateResponse switchToFallbackPath(IvrSession session,
+                                                      BrandAuthConfig config,
+                                                      LevelRule rule,
+                                                      List<ProcessingEvent> procLog) {
+        Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
+        int nextPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0) + 1;
+        if (nextPathIdx >= rule.getPaths().size()) {
+            return null;
         }
+        TokenPath newPath = rule.getPaths().get(nextPathIdx);
 
-        // Retry limit exhausted
-        addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
-
-        if (allowPathSwitch) {
-            // Genuine validation failure — try advancing to the next fallback path
-            Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
-            int currentPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
-            int nextPathIdx = currentPathIdx + 1;
-
-            if (nextPathIdx < rule.getPaths().size()) {
-                TokenPath newPath = rule.getPaths().get(nextPathIdx);
-
-                // List tokens in the new path already validated so the log shows what carries over
-                List<TokenType> alreadyValid = new ArrayList<>();
-                for (TokenType t : newPath.getRequiredTokens()) {
-                    if (session.getValidatedTokens().contains(t)) {
-                        alreadyValid.add(t);
-                    }
-                }
-                addEntry(procLog, "WARN",
-                    "Switching to fallback: path" + nextPathIdx + " → " + newPath.getRequiredTokens());
-                if (!alreadyValid.isEmpty()) {
-                    addEntry(procLog, "INFO",
-                        "Pre-validated tokens retained in new path: " + alreadyValid);
-                }
-
-                pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
-                session.getAttemptCounts().clear();
-                sessionRepo.save(session);
-                // Bug 4 fix: delegate to evaluateProgress() so the isBlocked /
-                // findAlternativeToken checks are applied correctly on the new path,
-                // instead of duplicating that logic here without the blocked-token guard.
-                AuthenticateResponse switchResp = evaluateProgress(session, config);
-                if (switchResp.getNextRequiredToken() != null) {
-                    addEntry(procLog, "INFO",
-                        "Next required: " + switchResp.getNextRequiredToken());
-                    if (switchResp.getAcceptedTokens() != null && !switchResp.getAcceptedTokens().isEmpty()) {
-                        addEntry(procLog, "INFO",
-                            "Accepted for next slot: " + switchResp.getAcceptedTokens());
-                    }
-                }
-                return switchResp;
+        // List tokens in the new path already validated so the log shows what carries over
+        List<TokenType> alreadyValid = new ArrayList<>();
+        for (TokenType t : newPath.getRequiredTokens()) {
+            if (session.getValidatedTokens().contains(t)) {
+                alreadyValid.add(t);
             }
-        } else {
-            addEntry(procLog, "FAIL",
-                "Wrong token type exhausted retries — redirecting to agent (no path switch)");
+        }
+        addEntry(procLog, "WARN",
+            "Switching to fallback: path" + nextPathIdx + " → " + newPath.getRequiredTokens());
+        if (!alreadyValid.isEmpty()) {
+            addEntry(procLog, "INFO",
+                "Pre-validated tokens retained in new path: " + alreadyValid);
         }
 
-        // All paths exhausted (or wrong-type exhaustion) — lock the session
+        pathIndexMap.put(session.getTargetLevel(), nextPathIdx);
+        session.getAttemptCounts().clear();
+        sessionRepo.save(session);
+        // Delegate to evaluateProgress() so the isBlocked / findAlternativeToken checks
+        // are applied correctly on the new path.
+        AuthenticateResponse switchResp = evaluateProgress(session, config);
+        logNextRequired(procLog, switchResp);
+        return switchResp;
+    }
+
+    /** All retries exhausted with no path remaining — lock the session and redirect to agent. */
+    private AuthenticateResponse redirectToAgent(IvrSession session,
+                                                 LevelRule rule,
+                                                 List<ProcessingEvent> procLog) {
         addEntry(procLog, "FAIL", "Redirect to agent after " + rule.getLockoutSeconds() + " seconds");
 
         session.setStatus(SessionStatus.REDIRECT_TO_AGENT);
