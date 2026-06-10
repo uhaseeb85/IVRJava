@@ -55,3 +55,10 @@ export function tokenLabel(t?: string | null): string {
   if (!t) return 'token'
   return TOKEN_LABEL[t] ?? t.toLowerCase().replace(/_/g, ' ')
 }
+
+// Levels a brand supports, in canonical order. Falls back to all levels if unknown.
+export function levelsForBrand(brand?: { levelRules?: Record<string, unknown> }): string[] {
+  const keys = brand?.levelRules ? Object.keys(brand.levelRules) : []
+  const supported = keys.length > 0 ? keys.map(k => k.toUpperCase()) : [...LEVELS]
+  return LEVEL_ORDER.filter(l => l !== 'NONE' && supported.includes(l))
+}

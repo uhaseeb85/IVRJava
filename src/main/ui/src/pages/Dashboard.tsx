@@ -1,42 +1,18 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { cn } from '../lib/utils'
-import {
-  Send, Loader2, XCircle, Copy, Check, RotateCcw, ChevronDown, ChevronUp, Clock,
-  Eye, EyeOff, Layers, Phone, PhoneCall, Volume2, Lock, CheckCircle2,
-  ShieldCheck, Wrench, ArrowUpRight,
-} from 'lucide-react'
+import { Copy, Check, RotateCcw } from 'lucide-react'
 import { type SessionRecord, type SessionStep, upsertSession, loadSessions } from '../lib/sessions'
-import {
-  LEVELS, LEVEL_ORDER, TOKEN_DEFAULTS, LEVEL_BLURB, SAMPLE_CALLERS, tokenLabel,
-} from '../lib/ivrMeta'
+import { LEVEL_ORDER, TOKEN_DEFAULTS, SAMPLE_CALLERS, tokenLabel, levelsForBrand } from '../lib/ivrMeta'
 import { type BrandSummary, getBrands } from '../lib/api'
-import { inputCls } from '../lib/styles'
 import StatusBadge from '../components/StatusBadge'
-import LevelLadder from '../components/LevelLadder'
-import ProcessingLog from '../components/ProcessingLog'
+import CallSetupCard from '../components/dashboard/CallSetupCard'
+import ErrorBanner from '../components/dashboard/ErrorBanner'
+import OnCallCard from '../components/dashboard/OnCallCard'
+import DevDetailsPanel from '../components/dashboard/DevDetailsPanel'
+import RecentSessionsList from '../components/dashboard/RecentSessionsList'
 
-function msToText(ms: number) {
-  if (ms < 1000) return `${Math.round(ms)}ms`
-  return `${(ms / 1000).toFixed(1)}s`
-}
-
-// Levels a brand supports, in canonical order. Falls back to all levels if unknown.
-function levelsForBrand(brand?: BrandSummary): string[] {
-  const keys = brand?.levelRules ? Object.keys(brand.levelRules) : []
-  const supported = keys.length > 0 ? keys.map(k => k.toUpperCase()) : [...LEVELS]
-  return LEVEL_ORDER.filter(l => l !== 'NONE' && supported.includes(l))
-}
-
-// Visual tone for a timeline step, derived from its status (+ soft-fail flag).
-// `icon` is null for in-progress steps so the caller can fall back to the step number.
-function stepTone(status: string, failed?: boolean): { row: string; badge: string; icon: string | null } {
-  const s = status.toUpperCase()
-  if (s === 'AUTHENTICATED') return { row: 'bg-emerald-50 border-emerald-100', badge: 'bg-emerald-200 text-emerald-800', icon: '✓' }
-  if (s === 'FAILED' || s === 'REDIRECT_TO_AGENT') return { row: 'bg-red-50 border-red-100', badge: 'bg-red-200 text-red-700', icon: '✗' }
-  if (failed) return { row: 'bg-amber-50 border-amber-100', badge: 'bg-amber-200 text-amber-800', icon: '✗' }
-  return { row: 'bg-slate-50 border-slate-100', badge: 'bg-slate-200 text-slate-600', icon: null }
-}
-
+// Test Console orchestrator: owns all session/form/UI state and the API
+// handlers, and composes the three stages (setup → on-call → dev details)
+// from components/dashboard/.
 export default function Dashboard() {
   const [session, setSession] = useState<SessionRecord | null>(null)
   const [response, setResponse] = useState<Record<string, unknown> | null>(null)
@@ -283,30 +259,6 @@ export default function Dashboard() {
 
   const procLog = response?.processingLog as Array<{ level: string; message: string }> | undefined
 
-  const responseSummary = response ? (
-    <div className="space-y-1.5">
-      {['status', 'currentLevel', 'targetLevel', 'nextRequiredToken', 'prompt', 'phase', 'matchedPartyId', 'remainingAttempts', 'acceptedTokens'].map(k => {
-        const v = response[k]
-        if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return null
-        return (
-          <div key={k} className="flex items-baseline gap-2 text-xs">
-            <span className="text-slate-400 font-mono shrink-0 w-36">{k}</span>
-            <span className="text-slate-300 shrink-0">→</span>
-            {Array.isArray(v) ? (
-              <div className="flex flex-wrap gap-1">
-                {(v as string[]).map(t => (
-                  <span key={t} className="bg-slate-200 text-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono">{t}</span>
-                ))}
-              </div>
-            ) : (
-              <span className="text-slate-800 font-mono">{String(v)}</span>
-            )}
-          </div>
-        )
-      })}
-    </div>
-  ) : null
-
   return (
     <div className="flex flex-col min-h-full">
       {/* Page header */}
@@ -354,497 +306,78 @@ export default function Dashboard() {
       <div className="flex-1 p-8 overflow-auto">
         <div className="max-w-3xl mx-auto space-y-5">
 
-          {/* ─────────────── STAGE 1 — Who's calling? ─────────────── */}
+          {/* STAGE 1 — Who's calling? */}
           {!session && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-6">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center">
-                  <Phone size={18} className="text-indigo-600" />
-                </div>
-                <div>
-                  <h2 className="text-base font-bold text-slate-900">Start a call</h2>
-                  <p className="text-sm text-slate-500">Pick who's calling and what they want to do.</p>
-                </div>
-              </div>
-
-              {/* Brand picker */}
-              <div>
-                <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">1 · Which brand are they calling?</p>
-                {stats.brands.length === 0 ? (
-                  <p className="text-sm text-slate-400 italic">No brands configured yet — add one on the Brands page first.</p>
-                ) : (
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
-                    {stats.brands.map(b => {
-                      const levels = levelsForBrand(b)
-                      const selected = form.brandId === b.brandId
-                      return (
-                        <button
-                          key={b.brandId}
-                          onClick={() => setForm(f => ({ ...f, brandId: b.brandId, targetLevel: b.identificationOnly ? 'NONE' : '' }))}
-                          className={cn(
-                            'text-left rounded-xl border p-3 transition-all',
-                            selected
-                              ? 'border-indigo-400 bg-indigo-50/60 ring-1 ring-indigo-200'
-                              : 'border-slate-200 bg-white hover:border-indigo-200 hover:bg-slate-50'
-                          )}
-                        >
-                          <div className="flex items-center gap-1.5">
-                            <ShieldCheck size={14} className={selected ? 'text-indigo-600' : 'text-slate-400'} />
-                            <span className="text-sm font-bold text-slate-800 truncate">{b.brandId}</span>
-                          </div>
-                          <div className="flex flex-wrap gap-1 mt-2">
-                            {b.identificationOnly
-                              ? <span className="bg-sky-100 text-sky-600 rounded px-1.5 py-0.5 text-[10px] font-semibold">ID ONLY</span>
-                              : levels.map(l => (
-                                  <span key={l} className="bg-slate-100 text-slate-500 rounded px-1.5 py-0.5 text-[10px] font-semibold">{l}</span>
-                                ))}
-                          </div>
-                        </button>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* Identification-only note (replaces the level chooser) */}
-              {form.brandId && idOnly && (
-                <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3">
-                  <p className="text-xs font-bold text-sky-700 uppercase tracking-wider mb-1">2 · Identification only</p>
-                  <p className="text-sm text-sky-700">
-                    This brand just identifies the caller — no auth level is granted. The call ends once a single party is resolved (access level stays NONE).
-                  </p>
-                </div>
-              )}
-
-              {/* Level chooser */}
-              {form.brandId && !idOnly && (
-                <div>
-                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">2 · What do they need to do?</p>
-                  <div className="space-y-2">
-                    {brandLevels.map(l => {
-                      const selected = form.targetLevel === l
-                      return (
-                        <button
-                          key={l}
-                          onClick={() => setForm(f => ({ ...f, targetLevel: l }))}
-                          className={cn(
-                            'w-full text-left rounded-xl border p-3 flex items-center gap-3 transition-all',
-                            selected
-                              ? 'border-indigo-400 bg-indigo-50/60 ring-1 ring-indigo-200'
-                              : 'border-slate-200 bg-white hover:border-indigo-200 hover:bg-slate-50'
-                          )}
-                        >
-                          <span className={cn(
-                            'w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0',
-                            selected ? 'border-indigo-500 bg-indigo-500' : 'border-slate-300'
-                          )}>
-                            {selected && <Check size={11} className="text-white" />}
-                          </span>
-                          <span className="shrink-0 text-sm font-bold text-slate-800 w-24">{l}</span>
-                          <span className="text-sm text-slate-500">{LEVEL_BLURB[l]}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Caller */}
-              {form.targetLevel && (
-                <div>
-                  <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">3 · Calling from</p>
-                  <input
-                    className={inputCls}
-                    placeholder={SAMPLE_CALLERS[0].ani}
-                    value={form.callerId || ''}
-                    onChange={e => setForm({ ...form, callerId: e.target.value })}
-                  />
-                  <div className="flex flex-wrap items-center gap-1.5 mt-2">
-                    <span className="text-[11px] text-slate-400">any number works in test mode —</span>
-                    {SAMPLE_CALLERS.map(c => (
-                      <button
-                        key={c.ani}
-                        onClick={() => setForm(f => ({ ...f, callerId: c.ani }))}
-                        className="rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-slate-500 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
-                      >
-                        {c.ani}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Advanced: transfer */}
-              {form.targetLevel && (
-                <div className="border-t border-slate-100 pt-3">
-                  <button
-                    onClick={() => setShowAdvanced(v => !v)}
-                    className="flex items-center gap-1.5 text-xs font-semibold text-slate-500 hover:text-slate-800 transition-colors"
-                  >
-                    {showAdvanced ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-                    Advanced
-                  </button>
-                  {showAdvanced && (
-                    <label className="flex items-center gap-2 mt-2.5 text-sm text-slate-600 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={form.transfer === 'yes'}
-                        onChange={e => setForm(f => ({ ...f, transfer: e.target.checked ? 'yes' : '' }))}
-                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500/30"
-                      />
-                      Simulate a transfer from a legacy system (caller already verified their account number)
-                    </label>
-                  )}
-                </div>
-              )}
-
-              {/* Place call */}
-              <button
-                onClick={placeCall}
-                disabled={!canPlaceCall}
-                className="w-full rounded-xl bg-indigo-600 px-4 py-3 text-sm font-bold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 shadow-sm"
-              >
-                {loading ? <Loader2 size={16} className="animate-spin" /> : <PhoneCall size={16} />}
-                Place call
-              </button>
-            </div>
+            <CallSetupCard
+              brands={stats.brands}
+              form={form}
+              setForm={setForm}
+              idOnly={idOnly}
+              brandLevels={brandLevels}
+              canPlaceCall={canPlaceCall}
+              loading={loading}
+              showAdvanced={showAdvanced}
+              setShowAdvanced={setShowAdvanced}
+              onPlaceCall={placeCall}
+            />
           )}
 
           {/* Network / server error (always prominent) */}
           {error && (
-            <div className="bg-white rounded-xl border border-red-200 shadow-sm overflow-hidden">
-              <button
-                onClick={() => errorBody ? setErrorBody('') : setErrorBody('(no details)')}
-                className="w-full p-4 flex items-center gap-2 text-sm text-red-600 hover:bg-red-50 transition-colors text-left"
-              >
-                <XCircle size={15} className="shrink-0" />
-                <span className="flex-1 font-medium">{error}</span>
-                {errorBody && (errorBody === '(no details)' ? <ChevronUp size={14} /> : <ChevronDown size={14} />)}
-              </button>
-              {errorBody && errorBody !== '(no details)' && (
-                <pre className="bg-red-50 border-t border-red-100 text-red-800 p-4 text-xs font-mono overflow-auto max-h-44 leading-relaxed">
-                  {errorBody}
-                </pre>
-              )}
-            </div>
+            <ErrorBanner error={error} errorBody={errorBody} setErrorBody={setErrorBody} />
           )}
 
-          {/* ─────────────── STAGE 2 — On the call ─────────────── */}
+          {/* STAGE 2 — On the call */}
           {session && (
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
-              {/* Progress ladder (authentication brands only) */}
-              {!idOnly && (
-                <div className="flex items-center justify-between gap-4">
-                  <LevelLadder current={currentLevel} target={session.targetLevel} />
-                </div>
-              )}
-
-              {/* Spoken prompt bubble */}
-              {response?.prompt ? (
-                <div className="flex items-start gap-3 rounded-xl bg-slate-50 border border-slate-100 p-4">
-                  <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                    <Volume2 size={15} className="text-indigo-600" />
-                  </div>
-                  <div className="flex-1">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-0.5">The system says</p>
-                    <p className="text-sm text-slate-800 font-medium leading-relaxed">{String(response.prompt)}</p>
-                  </div>
-                </div>
-              ) : null}
-
-              {/* Active: token entry */}
-              {sessionActive && (
-                <div className="space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-slate-500 mb-1">
-                      Enter the caller's <span className="text-slate-800">{tokenLabel(activeToken)}</span>
-                    </label>
-                    <div className="flex gap-2">
-                      <input
-                        autoFocus
-                        className={inputCls}
-                        placeholder={TOKEN_DEFAULTS[activeToken] ?? ''}
-                        value={form.tokenValue || ''}
-                        onChange={e => setForm({ ...form, tokenValue: e.target.value })}
-                        onKeyDown={e => e.key === 'Enter' && submitToken()}
-                      />
-                      <button
-                        onClick={submitToken}
-                        disabled={loading}
-                        className="shrink-0 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-bold text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 shadow-sm"
-                      >
-                        {loading ? <Loader2 size={15} className="animate-spin" /> : <Send size={14} />}
-                        Submit
-                      </button>
-                    </div>
-                    <p className="text-[11px] text-slate-400 mt-1.5">
-                      Pre-filled with a valid sample value — just press Enter. (Clear it or change it to test a failure.)
-                    </p>
-                  </div>
-
-                  {/* Backup-token alternatives */}
-                  {alternatives.length > 0 && (
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11px] text-slate-400">Can't provide that? Use instead:</span>
-                      {alternatives.map(alt => (
-                        <button
-                          key={alt}
-                          onClick={() => setForm(f => ({ ...f, tokenType: alt, tokenValue: TOKEN_DEFAULTS[alt] ?? '' }))}
-                          className="rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
-                        >
-                          {tokenLabel(alt)}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Inline retry warning */}
-                  {response?.remainingAttempts != null && (
-                    <div className={cn(
-                      'rounded-lg border px-3 py-2 text-xs font-semibold',
-                      (response.remainingAttempts as number) <= 1
-                        ? 'bg-red-50 border-red-200 text-red-600'
-                        : 'bg-amber-50 border-amber-200 text-amber-700'
-                    )}>
-                      {response.remainingAttempts as number} {(response.remainingAttempts as number) === 1 ? 'try' : 'tries'} left for the {tokenLabel(activeToken)}.
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Terminal: identified (identification-only brands) */}
-              {identified && (
-                <div className="rounded-xl bg-sky-50 border border-sky-200 p-4">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 size={18} className="text-sky-600" />
-                    <p className="text-sm font-bold text-sky-800">
-                      Identified{response?.matchedPartyId ? ` — party ${String(response.matchedPartyId)}` : ''}
-                    </p>
-                  </div>
-                  <p className="text-xs text-sky-700 mt-1">Access level: NONE (identification only).</p>
-                </div>
-              )}
-
-              {/* Terminal: authenticated */}
-              {currentStatus === 'AUTHENTICATED' && !identified && (
-                <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-4">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle2 size={18} className="text-emerald-600" />
-                    <p className="text-sm font-bold text-emerald-800">Verified — reached {currentLevel} access</p>
-                  </div>
-                  {higherLevels.length > 0 && (
-                    <div className="mt-3">
-                      <p className="text-xs text-emerald-700 mb-1.5">Need to do more? Ask for higher access:</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {higherLevels.map(l => (
-                          <button
-                            key={l}
-                            onClick={() => escalate(l)}
-                            disabled={loading}
-                            className="rounded-full border border-emerald-300 bg-white px-3 py-1 text-xs font-semibold text-emerald-700 hover:bg-emerald-100 disabled:opacity-50 transition-colors flex items-center gap-1.5"
-                          >
-                            <ArrowUpRight size={12} />{l}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Terminal: redirect to agent / failed */}
-              {(currentStatus === 'REDIRECT_TO_AGENT' || currentStatus === 'FAILED') && (
-                <div className="rounded-xl bg-red-50 border border-red-200 p-4">
-                  <div className="flex items-center gap-2">
-                    <Lock size={17} className="text-red-600" />
-                    <p className="text-sm font-bold text-red-700">
-                      {currentStatus === 'REDIRECT_TO_AGENT' ? 'Redirect to Agent' : 'Verification failed'}
-                    </p>
-                  </div>
-                  {typeof response?.lockedUntil === 'string' && (
-                    <p className="text-xs text-red-500 mt-1">Redirecting until {new Date(response.lockedUntil).toLocaleTimeString()}</p>
-                  )}
-                  <button
-                    onClick={reset}
-                    className="mt-3 rounded-lg bg-red-600 px-3.5 py-1.5 text-xs font-bold text-white hover:bg-red-500 transition-colors flex items-center gap-1.5"
-                  >
-                    <RotateCcw size={12} />Start a new call
-                  </button>
-                </div>
-              )}
-            </div>
+            <OnCallCard
+              session={session}
+              response={response}
+              form={form}
+              setForm={setForm}
+              loading={loading}
+              idOnly={idOnly}
+              currentStatus={currentStatus}
+              currentLevel={currentLevel}
+              sessionActive={sessionActive}
+              identified={identified}
+              higherLevels={higherLevels}
+              activeToken={activeToken}
+              alternatives={alternatives}
+              onSubmitToken={submitToken}
+              onEscalate={escalate}
+              onReset={reset}
+            />
           )}
 
-          {/* ─────────────── STAGE 3 — Developer details ─────────────── */}
+          {/* STAGE 3 — Developer details */}
           {(session || response) && (
-            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-              <button
-                onClick={() => setShowDev(v => !v)}
-                className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 transition-colors"
-              >
-                <div className="flex items-center gap-2 text-sm font-bold text-slate-700">
-                  <Wrench size={13} className="text-slate-400" />
-                  Developer details
-                  <span className="text-[10px] font-normal text-slate-400 ml-1">timeline · request · response · log</span>
-                </div>
-                {showDev ? <ChevronUp size={14} className="text-slate-400" /> : <ChevronDown size={14} className="text-slate-400" />}
-              </button>
-
-              {showDev && (
-                <div className="border-t border-slate-100 p-5 space-y-4">
-                  {/* Auth Flow timeline */}
-                  {session && session.steps.length > 0 && (
-                    <div>
-                      <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Call timeline</h3>
-                      <div className="space-y-2">
-                        {session.steps.map((step, i) => {
-                          const s = step.status.toUpperCase()
-                          const tone = stepTone(s, step.failed)
-                          return (
-                            <div key={i} className={cn(
-                              'flex items-center gap-3 rounded-lg px-3 py-2.5 border', tone.row
-                            )}>
-                              <div className={cn(
-                                'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0', tone.badge
-                              )}>
-                                {tone.icon ?? i + 1}
-                              </div>
-                              <span className={cn(
-                                'flex-1 text-sm font-semibold',
-                                step.failed ? 'text-amber-800' : 'text-slate-700'
-                              )}>{step.label}</span>
-                              {step.failed && step.remainingAttempts != null && (
-                                <span className={cn(
-                                  'shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-black tabular-nums',
-                                  step.remainingAttempts <= 1
-                                    ? 'bg-red-100 border-red-200 text-red-700'
-                                    : 'bg-amber-100 border-amber-200 text-amber-700'
-                                )}>
-                                  {step.remainingAttempts} left
-                                </span>
-                              )}
-                              <StatusBadge status={s} />
-                              {step.timing != null && (
-                                <span className="flex items-center gap-1 text-[10px] text-slate-400 font-mono">
-                                  <Clock size={10} />{msToText(step.timing)}
-                                </span>
-                              )}
-                              <span className="text-[10px] text-slate-400 font-mono tabular-nums">
-                                {new Date(step.at).toLocaleTimeString()}
-                              </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Request preview */}
-                  {lastRequest && (
-                    <div className="rounded-lg border border-slate-200 overflow-hidden">
-                      <button
-                        onClick={() => setShowRequest(r => !r)}
-                        className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                      >
-                        <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                          <Eye size={12} />
-                          Request sent
-                          {lastTiming != null && (
-                            <span className="text-[10px] font-normal text-slate-400 ml-1">({msToText(lastTiming)})</span>
-                          )}
-                        </div>
-                        {showRequest ? <ChevronUp size={13} className="text-slate-400" /> : <ChevronDown size={13} className="text-slate-400" />}
-                      </button>
-                      {showRequest && (
-                        <pre className="bg-slate-50 border-t border-slate-100 text-slate-700 p-4 text-xs font-mono overflow-auto max-h-44 leading-relaxed">
-                          {JSON.stringify(lastRequest, null, 2)}
-                        </pre>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Response */}
-                  {response && (
-                    <div className="rounded-lg border border-slate-200 p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">Response</h3>
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => setShowRaw(r => !r)}
-                            className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-900 transition-colors font-semibold"
-                          >
-                            {showRaw ? <EyeOff size={12} /> : <Layers size={12} />}
-                            {showRaw ? 'Raw JSON' : 'Summary'}
-                          </button>
-                          <button
-                            onClick={copyJSON}
-                            className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-900 transition-colors font-semibold"
-                          >
-                            {copied ? <Check size={12} className="text-emerald-500" /> : <Copy size={12} />}
-                            {copied ? 'Copied!' : 'Copy JSON'}
-                          </button>
-                        </div>
-                      </div>
-                      {showRaw ? (
-                        <pre className="bg-slate-50 text-slate-700 border border-slate-100 rounded-lg p-4 text-xs font-mono overflow-auto max-h-72 leading-relaxed">
-                          {JSON.stringify(response, null, 2)}
-                        </pre>
-                      ) : (
-                        <div className="bg-slate-50 border border-slate-100 rounded-lg p-4 overflow-auto max-h-72">
-                          {responseSummary}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Processing Log */}
-                  {procLog && procLog.length > 0 && (
-                    <ProcessingLog
-                      log={procLog}
-                      open={showProcLog}
-                      onToggle={() => setShowProcLog(v => !v)}
-                    />
-                  )}
-                </div>
-              )}
-            </div>
+            <DevDetailsPanel
+              session={session}
+              response={response}
+              lastRequest={lastRequest}
+              lastTiming={lastTiming}
+              procLog={procLog}
+              showDev={showDev}
+              setShowDev={setShowDev}
+              showRequest={showRequest}
+              setShowRequest={setShowRequest}
+              showRaw={showRaw}
+              setShowRaw={setShowRaw}
+              showProcLog={showProcLog}
+              setShowProcLog={setShowProcLog}
+              copied={copied}
+              onCopyJSON={copyJSON}
+            />
           )}
 
           {/* Recent sessions (only on the setup stage) */}
           {!session && recentSessions.length > 0 && (
-            <div>
-              <button
-                onClick={() => setShowRecent(r => !r)}
-                className="flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-slate-900 transition-colors mb-3"
-              >
-                <Clock size={13} />
-                Recent calls ({recentSessions.length})
-                {showRecent ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-              </button>
-              {showRecent && (
-                <div className="space-y-2">
-                  {recentSessions.map(rec => (
-                    <div
-                      key={rec.id}
-                      onClick={() => restoreSession(rec)}
-                      className="bg-white rounded-lg border border-slate-200 px-4 py-3 flex items-center gap-4 cursor-pointer hover:border-indigo-200 hover:bg-indigo-50/30 transition-colors"
-                    >
-                      <div className="flex-1 min-w-0 flex items-center gap-3">
-                        <span className="text-sm font-bold text-slate-900 shrink-0">{rec.brandId}</span>
-                        <span className="text-slate-300">›</span>
-                        <span className="text-sm text-slate-500 font-medium">{rec.targetLevel}</span>
-                        <StatusBadge status={rec.finalStatus} />
-                      </div>
-                      <div className="text-xs text-slate-400 flex items-center gap-2">
-                        <span>{rec.steps.length} step{rec.steps.length !== 1 ? 's' : ''}</span>
-                        <span>·</span>
-                        <span>{new Date(rec.startedAt).toLocaleTimeString()}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
+            <RecentSessionsList
+              sessions={recentSessions}
+              show={showRecent}
+              setShow={setShowRecent}
+              onRestore={restoreSession}
+            />
           )}
         </div>
       </div>
