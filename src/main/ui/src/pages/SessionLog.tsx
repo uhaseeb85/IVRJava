@@ -2,22 +2,8 @@ import { useState, useEffect } from 'react'
 import { History, ChevronDown, ChevronUp, Trash2 } from 'lucide-react'
 import { loadSessions, clearSessions, type SessionRecord } from '../lib/sessions'
 import { cn } from '../lib/utils'
-
-function statusCls(status: string) {
-  const s = status.toUpperCase()
-  if (s === 'AUTHENTICATED') return 'text-emerald-700 bg-emerald-50 border-emerald-200'
-  if (s === 'FAILED') return 'text-red-600 bg-red-50 border-red-200'
-  if (s === 'REDIRECT_TO_AGENT') return 'text-orange-600 bg-orange-50 border-orange-200'
-  return 'text-amber-700 bg-amber-50 border-amber-200'
-}
-
-function StatusBadge({ status }: { status: string }) {
-  return (
-    <span className={cn('inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-bold tracking-wide', statusCls(status))}>
-      {status.toUpperCase()}
-    </span>
-  )
-}
+import StatusBadge from '../components/StatusBadge'
+import EmptyState from '../components/EmptyState'
 
 function stepIcon(status: string, index: number) {
   const s = status.toUpperCase()
@@ -161,13 +147,11 @@ export default function SessionLog() {
           )}
 
           {sessions.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-200 bg-white p-16 text-center">
-              <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center mx-auto mb-4">
-                <History size={20} className="text-slate-400" />
-              </div>
-              <p className="font-semibold text-slate-600">No session history yet</p>
-              <p className="text-sm text-slate-400 mt-1">Test sessions from the Dashboard will appear here automatically</p>
-            </div>
+            <EmptyState
+              icon={History}
+              title="No session history yet"
+              subtitle="Test sessions from the Dashboard will appear here automatically"
+            />
           ) : filtered.length === 0 ? (
             <p className="text-sm text-slate-400 text-center py-8">No sessions match your filter</p>
           ) : (

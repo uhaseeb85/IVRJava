@@ -2,32 +2,18 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { cn } from '../lib/utils'
 import {
   Send, Loader2, XCircle, Copy, Check, RotateCcw, ChevronDown, ChevronUp, Clock,
-  Eye, EyeOff, Layers, Activity, Phone, PhoneCall, Volume2, Lock, CheckCircle2,
+  Eye, EyeOff, Layers, Phone, PhoneCall, Volume2, Lock, CheckCircle2,
   ShieldCheck, Wrench, ArrowUpRight,
 } from 'lucide-react'
 import { type SessionRecord, type SessionStep, upsertSession, loadSessions } from '../lib/sessions'
 import {
   LEVELS, LEVEL_ORDER, TOKEN_DEFAULTS, LEVEL_BLURB, SAMPLE_CALLERS, tokenLabel,
 } from '../lib/ivrMeta'
-
-interface BrandSummary { brandId: string; levelRules?: Record<string, unknown>; identificationOnly?: boolean }
-
-function statusStyle(status: string) {
-  const s = status.toUpperCase()
-  if (s === 'AUTHENTICATED') return 'text-emerald-700 bg-emerald-50 border-emerald-200'
-  if (s === 'FAILED') return 'text-red-600 bg-red-50 border-red-200'
-  if (s === 'REDIRECT_TO_AGENT') return 'text-orange-600 bg-orange-50 border-orange-200'
-  if (s === 'COLLECTING') return 'text-amber-700 bg-amber-50 border-amber-200'
-  return 'text-slate-500 bg-slate-100 border-slate-200'
-}
-
-function StatusBadge({ status }: { status: string }) {
-  return (
-    <span className={cn('inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-bold tracking-wide', statusStyle(status))}>
-      {status.toUpperCase()}
-    </span>
-  )
-}
+import { type BrandSummary, getBrands } from '../lib/api'
+import { inputCls } from '../lib/styles'
+import StatusBadge from '../components/StatusBadge'
+import LevelLadder from '../components/LevelLadder'
+import ProcessingLog from '../components/ProcessingLog'
 
 function msToText(ms: number) {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -41,41 +27,6 @@ function levelsForBrand(brand?: BrandSummary): string[] {
   return LEVEL_ORDER.filter(l => l !== 'NONE' && supported.includes(l))
 }
 
-// ── Progress ladder: NONE → BASIC → … → ADMIN ──
-function LevelLadder({ current, target }: { current?: string; target?: string }) {
-  const cur = (current || 'NONE').toUpperCase()
-  const tgt = (target || '').toUpperCase()
-  const curIdx = LEVEL_ORDER.indexOf(cur as typeof LEVEL_ORDER[number])
-  const tgtIdx = LEVEL_ORDER.indexOf(tgt as typeof LEVEL_ORDER[number])
-  return (
-    <div className="flex items-center gap-1.5 flex-wrap">
-      {LEVEL_ORDER.map((lvl, i) => {
-        const reached = curIdx >= 0 && i <= curIdx
-        const isTarget = i === tgtIdx
-        return (
-          <div key={lvl} className="flex items-center gap-1.5">
-            {i > 0 && (
-              <span className={cn('h-px w-4', reached ? 'bg-emerald-300' : 'bg-slate-200')} />
-            )}
-            <span className={cn(
-              'inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-bold transition-colors',
-              reached
-                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
-                : isTarget
-                  ? 'bg-indigo-50 border-indigo-200 text-indigo-700 ring-1 ring-indigo-200'
-                  : 'bg-slate-50 border-slate-200 text-slate-400'
-            )}>
-              {reached && <Check size={11} />}
-              {lvl}
-              {isTarget && !reached && <span className="text-[9px] font-semibold opacity-70">goal</span>}
-            </span>
-          </div>
-        )
-      })}
-    </div>
-  )
-}
-
 // Visual tone for a timeline step, derived from its status (+ soft-fail flag).
 // `icon` is null for in-progress steps so the caller can fall back to the step number.
 function stepTone(status: string, failed?: boolean): { row: string; badge: string; icon: string | null } {
@@ -84,57 +35,6 @@ function stepTone(status: string, failed?: boolean): { row: string; badge: strin
   if (s === 'FAILED' || s === 'REDIRECT_TO_AGENT') return { row: 'bg-red-50 border-red-100', badge: 'bg-red-200 text-red-700', icon: '✗' }
   if (failed) return { row: 'bg-amber-50 border-amber-100', badge: 'bg-amber-200 text-amber-800', icon: '✗' }
   return { row: 'bg-slate-50 border-slate-100', badge: 'bg-slate-200 text-slate-600', icon: null }
-}
-
-// Badge + text colors for a processing-log entry, keyed by its level.
-function procLogTone(level: string): { badge: string; text: string } {
-  const l = level.toUpperCase()
-  if (l === 'PASS') return { badge: 'bg-emerald-100 text-emerald-700', text: 'text-emerald-800' }
-  if (l === 'FAIL') return { badge: 'bg-red-100 text-red-600',     text: 'text-red-700' }
-  if (l === 'WARN') return { badge: 'bg-amber-100 text-amber-700', text: 'text-amber-800' }
-  return              { badge: 'bg-slate-100 text-slate-500',  text: 'text-slate-600' }
-}
-
-// Collapsible per-request processing log emitted by the auth engine.
-function ProcessingLog({ log, open, onToggle }: {
-  log: Array<{ level: string; message: string }>
-  open: boolean
-  onToggle: () => void
-}) {
-  return (
-    <div className="rounded-lg border border-slate-200 overflow-hidden">
-      <button
-        onClick={onToggle}
-        className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 transition-colors"
-      >
-        <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-          <Activity size={12} className="text-indigo-500" />
-          Processing Log
-          <span className="text-[10px] font-normal text-slate-400 ml-1">
-            ({log.length} event{log.length !== 1 ? 's' : ''})
-          </span>
-        </div>
-        {open ? <ChevronUp size={13} className="text-slate-400" /> : <ChevronDown size={13} className="text-slate-400" />}
-      </button>
-      {open && (
-        <div className="border-t border-slate-100 divide-y divide-slate-50">
-          {log.map((entry, i) => {
-            const tone = procLogTone(entry.level)
-            return (
-              <div key={i} className="flex items-start gap-3 px-4 py-2.5">
-                <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px] font-black w-9 text-center mt-0.5', tone.badge)}>
-                  {entry.level.toUpperCase()}
-                </span>
-                <span className={cn('text-xs leading-relaxed font-mono', tone.text)}>
-                  {entry.message}
-                </span>
-              </div>
-            )
-          })}
-        </div>
-      )}
-    </div>
-  )
 }
 
 export default function Dashboard() {
@@ -164,9 +64,8 @@ export default function Dashboard() {
     const today = all.filter(s => new Date(s.startedAt).toDateString() === new Date().toDateString()).length
     setRecentSessions(all.slice(0, 5))
     setStats(s => ({ ...s, today, total: all.length }))
-    fetch('/api/brands')
-      .then(r => r.json())
-      .then(d => setStats(s => ({ ...s, brands: Array.isArray(d) ? d : [] })))
+    getBrands()
+      .then(brands => setStats(s => ({ ...s, brands })))
       .catch(() => {})
   }, [])
 
@@ -367,8 +266,6 @@ export default function Dashboard() {
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
   })
-
-  const inputCls = 'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition disabled:opacity-50 disabled:cursor-not-allowed'
 
   const selectedBrand = stats.brands.find(b => b.brandId === form.brandId)
   const brandLevels = levelsForBrand(selectedBrand)

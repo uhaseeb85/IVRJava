@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { Plus, Trash2, Shield, Search, Pencil, Layers } from 'lucide-react'
 import { cn } from '../lib/utils'
+import { getBrands, deleteBrand as apiDeleteBrand } from '../lib/api'
+import EmptyState from '../components/EmptyState'
 
 interface Brand {
   brandId: string
@@ -12,16 +14,6 @@ const LEVEL_BADGE: Record<string, string> = {
   STANDARD: 'text-blue-700 bg-blue-50 border-blue-200',
   ELEVATED: 'text-violet-700 bg-violet-50 border-violet-200',
   ADMIN:    'text-orange-700 bg-orange-50 border-orange-200',
-}
-
-const API = {
-  list: async (): Promise<Brand[]> => {
-    const res = await fetch('/api/brands')
-    if (!res.ok) throw new Error(`Failed to load brands (${res.status})`)
-    const data = await res.json()
-    return Array.isArray(data) ? data : []
-  },
-  del: (id: string) => fetch('/api/brands/' + id, { method: 'DELETE' }),
 }
 
 function LevelBadge({ level }: { level: string }) {
@@ -121,7 +113,7 @@ export default function Brands({ onEdit }: { onEdit: (b: Brand) => void }) {
 
   const load = async () => {
     setLoading(true)
-    try { setBrands(await API.list()) }
+    try { setBrands(await getBrands()) }
     catch { setError('Failed to load brands — is the backend running?') }
     finally { setLoading(false) }
   }
@@ -130,7 +122,7 @@ export default function Brands({ onEdit }: { onEdit: (b: Brand) => void }) {
 
   const deleteBrand = async (id: string) => {
     if (!confirm(`Delete brand "${id}"? This cannot be undone.`)) return
-    await API.del(id)
+    await apiDeleteBrand(id)
     setBrands(prev => prev.filter(b => b.brandId !== id))
   }
 
@@ -181,16 +173,11 @@ export default function Brands({ onEdit }: { onEdit: (b: Brand) => void }) {
               {[1, 2, 3].map(i => <SkeletonCard key={i} />)}
             </div>
           ) : filtered.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-slate-200 bg-white p-16 text-center">
-              <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center mx-auto mb-4">
-                <Shield size={20} className="text-slate-400" />
-              </div>
-              <p className="font-semibold text-slate-600">
-                {search ? `No brands match "${search}"` : 'No brands configured'}
-              </p>
-              <p className="text-sm text-slate-400 mt-1">
-                {search ? 'Try a different search term' : 'Create your first brand to get started'}
-              </p>
+            <EmptyState
+              icon={Shield}
+              title={search ? `No brands match "${search}"` : 'No brands configured'}
+              subtitle={search ? 'Try a different search term' : 'Create your first brand to get started'}
+            >
               {!search && (
                 <button
                   onClick={() => onEdit({ brandId: '', levelRules: {} })}
@@ -199,7 +186,7 @@ export default function Brands({ onEdit }: { onEdit: (b: Brand) => void }) {
                   <Plus size={15} />Create Brand
                 </button>
               )}
-            </div>
+            </EmptyState>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {filtered.map(b => (

@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
 import { cn } from '../lib/utils'
 import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2 } from 'lucide-react'
+import { getBrand, saveBrand } from '../lib/api'
+import { editorInputCls as inputCls } from '../lib/styles'
 
 const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
 const TYPES  = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
@@ -40,18 +42,6 @@ const LEVEL_LEFT: Record<string, string> = {
   STANDARD: 'border-l-blue-500',
   ELEVATED: 'border-l-violet-500',
   ADMIN:    'border-l-orange-500',
-}
-
-const API = {
-  get: (id: string): Promise<BrandConfig> => fetch('/api/brands/' + id).then(r => r.json()),
-  save: (cfg: BrandConfig) => {
-    const isNew = !cfg._existing
-    return fetch(isNew ? '/api/brands' : '/api/brands/' + cfg.brandId, {
-      method: isNew ? 'POST' : 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(cfg),
-    }).then(r => { if (!r.ok) throw new Error('Save failed'); return r.json() })
-  },
 }
 
 const freshRule = (): LevelRule => ({
@@ -308,7 +298,7 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
 
   useEffect(() => {
     if (isNew) return
-    API.get(brand.brandId)
+    getBrand<BrandConfig>(brand.brandId)
       .then(c => {
         c._existing = true
         setCfg(c)
@@ -417,7 +407,7 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
     if (!cfg.brandId.trim()) { showToast('Brand ID is required', false); return }
     setSaving(true)
     try {
-      await API.save(cfg)
+      await saveBrand(cfg)
       setCfg(c => ({ ...c, _existing: true }))
       showToast(`Brand "${cfg.brandId}" saved`, true)
     } catch {
@@ -428,8 +418,6 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
   }
 
   // ── Styles ───────────────────────────────────────────────────────────────────
-
-  const inputCls = 'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400 transition disabled:bg-slate-50 disabled:cursor-not-allowed'
 
   const tokenChip = (active: boolean) => cn(
     'inline-flex items-center rounded-lg px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors select-none border',
