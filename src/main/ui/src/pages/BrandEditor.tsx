@@ -5,7 +5,6 @@ import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2 } f
 const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
 const TYPES  = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
 type TokenType = typeof TYPES[number]
-type AuthLevel = typeof LEVELS[number] | 'NONE'
 
 interface AuthPath {
   pathIndex: number
@@ -138,6 +137,162 @@ function FlowVisualizer({ levelRules }: { levelRules: Record<string, LevelRule> 
   )
 }
 
+// ── Level rule editor (shared by the NONE / identification-only branch and the
+//    standard auth-level branch — only the labels differ) ──────────────────────
+
+interface LevelRuleCardLabels {
+  add: string      // button shown when the level has no rule yet
+  remove: string   // button shown when the level has a rule
+  lockout: string  // label for the second numeric field
+  paths: string    // heading above the path list
+}
+
+function LevelRuleCard({
+  level, rule, inputCls, tokenChip, labels,
+  onAddLevel, onRemoveLevel, setLevelField, addPath, removePath, setPathDesc, toggleToken, toggleBackup,
+}: {
+  level: string
+  rule: LevelRule | undefined
+  inputCls: string
+  tokenChip: (active: boolean) => string
+  labels: LevelRuleCardLabels
+  onAddLevel: (lvl: string) => void
+  onRemoveLevel: (lvl: string) => void
+  setLevelField: (lvl: string, field: 'maxRetriesPerToken' | 'lockoutSeconds', val: number) => void
+  addPath: (lvl: string) => void
+  removePath: (lvl: string, pi: number) => void
+  setPathDesc: (lvl: string, pi: number, desc: string) => void
+  toggleToken: (lvl: string, pi: number, tok: TokenType) => void
+  toggleBackup: (lvl: string, pi: number, req: TokenType, alt: TokenType) => void
+}) {
+  return (
+    <div className={cn(
+      'bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden',
+      rule ? `border-l-4 ${LEVEL_LEFT[level] ?? 'border-l-slate-400'}` : ''
+    )}>
+      <div className="px-5 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <span className={cn('inline-flex rounded-full border px-2.5 py-0.5 text-xs font-bold', LEVEL_COLOR[level] ?? LEVEL_COLOR.BASIC)}>
+            {level}
+          </span>
+          {rule && (
+            <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 uppercase tracking-wide">
+              active
+            </span>
+          )}
+        </div>
+        {rule
+          ? <button onClick={() => onRemoveLevel(level)} className="text-xs text-slate-400 hover:text-red-600 transition-colors font-semibold">{labels.remove}</button>
+          : <button onClick={() => onAddLevel(level)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold">{labels.add}</button>
+        }
+      </div>
+
+      {rule && (
+        <div className="border-t border-slate-100 px-5 pb-5 space-y-5 pt-4">
+          {/* Settings row */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Max Retries per Token</label>
+              <input
+                type="number" min={1}
+                className={inputCls}
+                value={rule.maxRetriesPerToken}
+                onChange={e => setLevelField(level, 'maxRetriesPerToken', parseInt(e.target.value) || 1)}
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-500 mb-1.5">{labels.lockout}</label>
+              <input
+                type="number" min={0}
+                className={inputCls}
+                value={rule.lockoutSeconds}
+                onChange={e => setLevelField(level, 'lockoutSeconds', parseInt(e.target.value) || 0)}
+              />
+            </div>
+          </div>
+
+          {/* Paths */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{labels.paths}</span>
+              <button onClick={() => addPath(level)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold flex items-center gap-1">
+                <Plus size={11} />Add Path
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {rule.paths.map((p, pi) => (
+                <div key={pi} className={cn(
+                  'rounded-xl border p-4 space-y-4',
+                  pi === 0 ? 'border-indigo-100 bg-indigo-50/30' : 'border-slate-100 bg-slate-50/40'
+                )}>
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">
+                      {pi === 0 ? 'Primary Path' : `Fallback ${pi}`}
+                    </span>
+                    {rule.paths.length > 1 && (
+                      <button onClick={() => removePath(level, pi)}
+                        className="text-slate-400 hover:text-red-600 transition-colors">
+                        <Trash2 size={13} />
+                      </button>
+                    )}
+                  </div>
+
+                  <input
+                    className={inputCls}
+                    placeholder="Description (e.g. Account + PIN)"
+                    value={p.description || ''}
+                    onChange={e => setPathDesc(level, pi, e.target.value)}
+                  />
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-500 mb-2">Required Tokens</label>
+                    <div className="flex flex-wrap gap-1.5">
+                      {TYPES.map(t => (
+                        <span
+                          key={t}
+                          className={tokenChip(p.requiredTokens.includes(t))}
+                          onClick={() => toggleToken(level, pi, t)}
+                        >
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  {p.requiredTokens.map(req => (
+                    <div key={req} className="border-t border-slate-100 pt-3">
+                      <label className="block text-xs font-semibold text-slate-500 mb-2">
+                        Backup tokens for <span className="text-slate-700">{req}</span>
+                      </label>
+                      <div className="flex flex-wrap gap-x-4 gap-y-2">
+                        {TYPES.filter(t => t !== req).map(t => {
+                          const checked = !!(p.backupTokens?.[req]?.includes(t))
+                          return (
+                            <label key={t} className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer hover:text-slate-800 select-none">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleBackup(level, pi, req, t)}
+                                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                              />
+                              {t}
+                            </label>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 export default function BrandEditor({ brand, onBack }: { brand: { brandId: string }; onBack: () => void }) {
@@ -169,7 +324,7 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
 
   // ── State helpers ────────────────────────────────────────────────────────────
 
-  const addLevel = (lvl: AuthLevel) => {
+  const addLevel = (lvl: string) => {
     setCfg(c => ({ ...c, levelRules: { ...c.levelRules, [lvl]: freshRule() } }))
   }
 
@@ -404,259 +559,53 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
                 </div>
 
                 {/* NONE level editor for identification-only brands */}
-                {(() => {
-                  const lvl = 'NONE'
-                  const rule = cfg.levelRules[lvl]
-                  return (
-                    <div className={cn(
-                      'bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden',
-                      rule ? 'border-l-4 border-l-emerald-500' : ''
-                    )}>
-                      <div className="px-5 py-4 flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          <span className="inline-flex rounded-full border px-2.5 py-0.5 text-xs font-bold text-emerald-700 bg-emerald-50 border-emerald-200">
-                            NONE
-                          </span>
-                          {rule && (
-                            <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 uppercase tracking-wide">
-                              active
-                            </span>
-                          )}
-                        </div>
-                        {rule
-                          ? <button onClick={() => removeLevel(lvl)} className="text-xs text-slate-400 hover:text-red-600 transition-colors font-semibold">Remove Rules</button>
-                          : <button onClick={() => addLevel(lvl)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold">+ Add Identity Tokens</button>
-                        }
-                      </div>
-
-                      {rule && (
-                        <div className="border-t border-slate-100 px-5 pb-5 space-y-5 pt-4">
-                          <div className="grid grid-cols-2 gap-3">
-                            <div>
-                              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Max Retries per Token</label>
-                              <input type="number" min={1} className={inputCls}
-                                value={rule.maxRetriesPerToken}
-                                onChange={e => setLevelField(lvl, 'maxRetriesPerToken', parseInt(e.target.value) || 1)}
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-xs font-semibold text-slate-500 mb-1.5">Lockout (sec)</label>
-                              <input type="number" min={0} className={inputCls}
-                                value={rule.lockoutSeconds}
-                                onChange={e => setLevelField(lvl, 'lockoutSeconds', parseInt(e.target.value) || 0)}
-                              />
-                            </div>
-                          </div>
-
-                          <div>
-                            <div className="flex items-center justify-between mb-3">
-                              <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Identity Paths</span>
-                              <button onClick={() => addPath(lvl)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold flex items-center gap-1">
-                                <Plus size={11} />Add Path
-                              </button>
-                            </div>
-
-                            <div className="space-y-3">
-                              {rule.paths.map((p, pi) => (
-                                <div key={pi} className={cn(
-                                  'rounded-xl border p-4 space-y-4',
-                                  pi === 0 ? 'border-indigo-100 bg-indigo-50/30' : 'border-slate-100 bg-slate-50/40'
-                                )}>
-                                  <div className="flex items-center justify-between">
-                                    <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">
-                                      {pi === 0 ? 'Primary Path' : `Fallback ${pi}`}
-                                    </span>
-                                    {rule.paths.length > 1 && (
-                                      <button onClick={() => removePath(lvl, pi)}
-                                        className="text-slate-400 hover:text-red-600 transition-colors">
-                                        <Trash2 size={13} />
-                                      </button>
-                                    )}
-                                  </div>
-
-                                  <input className={inputCls}
-                                    placeholder="Description (e.g. Account + PIN)"
-                                    value={p.description || ''}
-                                    onChange={e => setPathDesc(lvl, pi, e.target.value)}
-                                  />
-
-                                  <div>
-                                    <label className="block text-xs font-semibold text-slate-500 mb-2">Required Tokens</label>
-                                    <div className="flex flex-wrap gap-1.5">
-                                      {TYPES.map(t => (
-                                        <span key={t}
-                                          className={tokenChip(p.requiredTokens.includes(t))}
-                                          onClick={() => toggleToken(lvl, pi, t)}
-                                        >
-                                          {t}
-                                        </span>
-                                      ))}
-                                    </div>
-                                  </div>
-
-                                  {p.requiredTokens.map(req => (
-                                    <div key={req} className="border-t border-slate-100 pt-3">
-                                      <label className="block text-xs font-semibold text-slate-500 mb-2">
-                                        Backup tokens for <span className="text-slate-700">{req}</span>
-                                      </label>
-                                      <div className="flex flex-wrap gap-x-4 gap-y-2">
-                                        {TYPES.filter(t => t !== req).map(t => {
-                                          const checked = !!(p.backupTokens?.[req]?.includes(t))
-                                          return (
-                                            <label key={t} className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer hover:text-slate-800 select-none">
-                                              <input type="checkbox" checked={checked}
-                                                onChange={() => toggleBackup(lvl, pi, req, t)}
-                                                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                                              />
-                                              {t}
-                                            </label>
-                                          )
-                                        })}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )
-                })()}
+                <LevelRuleCard
+                  level="NONE"
+                  rule={cfg.levelRules['NONE']}
+                  inputCls={inputCls}
+                  tokenChip={tokenChip}
+                  labels={{
+                    add: '+ Add Identity Tokens',
+                    remove: 'Remove Rules',
+                    lockout: 'Lockout (sec)',
+                    paths: 'Identity Paths',
+                  }}
+                  onAddLevel={addLevel}
+                  onRemoveLevel={removeLevel}
+                  setLevelField={setLevelField}
+                  addPath={addPath}
+                  removePath={removePath}
+                  setPathDesc={setPathDesc}
+                  toggleToken={toggleToken}
+                  toggleBackup={toggleBackup}
+                />
                 </>
               ) : (
               <>
               {/* Levels */}
-              {LEVELS.map(lvl => {
-                const rule = cfg.levelRules[lvl]
-                return (
-                  <div key={lvl} className={cn(
-                    'bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden',
-                    rule ? `border-l-4 ${LEVEL_LEFT[lvl]}` : ''
-                  )}>
-                    <div className="px-5 py-4 flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        <span className={cn('inline-flex rounded-full border px-2.5 py-0.5 text-xs font-bold', LEVEL_COLOR[lvl])}>
-                          {lvl}
-                        </span>
-                        {rule && (
-                          <span className="text-[10px] font-bold text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 uppercase tracking-wide">
-                            active
-                          </span>
-                        )}
-                      </div>
-                      {rule
-                        ? <button onClick={() => removeLevel(lvl)} className="text-xs text-slate-400 hover:text-red-600 transition-colors font-semibold">Remove</button>
-                        : <button onClick={() => addLevel(lvl)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold">+ Add level</button>
-                      }
-                    </div>
-
-                    {rule && (
-                      <div className="border-t border-slate-100 px-5 pb-5 space-y-5 pt-4">
-                        {/* Settings row */}
-                        <div className="grid grid-cols-2 gap-3">
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-500 mb-1.5">Max Retries per Token</label>
-                            <input
-                              type="number" min={1}
-                              className={inputCls}
-                              value={rule.maxRetriesPerToken}
-                              onChange={e => setLevelField(lvl, 'maxRetriesPerToken', parseInt(e.target.value) || 1)}
-                            />
-                          </div>
-                          <div>
-                            <label className="block text-xs font-semibold text-slate-500 mb-1.5">Redirect to Agent after (sec)</label>
-                            <input
-                              type="number" min={0}
-                              className={inputCls}
-                              value={rule.lockoutSeconds}
-                              onChange={e => setLevelField(lvl, 'lockoutSeconds', parseInt(e.target.value) || 0)}
-                            />
-                          </div>
-                        </div>
-
-                        {/* Paths */}
-                        <div>
-                          <div className="flex items-center justify-between mb-3">
-                            <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Auth Paths</span>
-                            <button onClick={() => addPath(lvl)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold flex items-center gap-1">
-                              <Plus size={11} />Add Path
-                            </button>
-                          </div>
-
-                          <div className="space-y-3">
-                            {rule.paths.map((p, pi) => (
-                              <div key={pi} className={cn(
-                                'rounded-xl border p-4 space-y-4',
-                                pi === 0 ? 'border-indigo-100 bg-indigo-50/30' : 'border-slate-100 bg-slate-50/40'
-                              )}>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">
-                                    {pi === 0 ? 'Primary Path' : `Fallback ${pi}`}
-                                  </span>
-                                  {rule.paths.length > 1 && (
-                                    <button onClick={() => removePath(lvl, pi)}
-                                      className="text-slate-400 hover:text-red-600 transition-colors">
-                                      <Trash2 size={13} />
-                                    </button>
-                                  )}
-                                </div>
-
-                                <input
-                                  className={inputCls}
-                                  placeholder="Description (e.g. Account + PIN)"
-                                  value={p.description || ''}
-                                  onChange={e => setPathDesc(lvl, pi, e.target.value)}
-                                />
-
-                                <div>
-                                  <label className="block text-xs font-semibold text-slate-500 mb-2">Required Tokens</label>
-                                  <div className="flex flex-wrap gap-1.5">
-                                    {TYPES.map(t => (
-                                      <span
-                                        key={t}
-                                        className={tokenChip(p.requiredTokens.includes(t))}
-                                        onClick={() => toggleToken(lvl, pi, t)}
-                                      >
-                                        {t}
-                                      </span>
-                                    ))}
-                                  </div>
-                                </div>
-
-                                {p.requiredTokens.map(req => (
-                                  <div key={req} className="border-t border-slate-100 pt-3">
-                                    <label className="block text-xs font-semibold text-slate-500 mb-2">
-                                      Backup tokens for <span className="text-slate-700">{req}</span>
-                                    </label>
-                                    <div className="flex flex-wrap gap-x-4 gap-y-2">
-                                      {TYPES.filter(t => t !== req).map(t => {
-                                        const checked = !!(p.backupTokens?.[req]?.includes(t))
-                                        return (
-                                          <label key={t} className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer hover:text-slate-800 select-none">
-                                            <input
-                                              type="checkbox"
-                                              checked={checked}
-                                              onChange={() => toggleBackup(lvl, pi, req, t)}
-                                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
-                                            />
-                                            {t}
-                                          </label>
-                                        )
-                                      })}
-                                    </div>
-                                  </div>
-                                ))}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )
-              })}
+              {LEVELS.map(lvl => (
+                <LevelRuleCard
+                  key={lvl}
+                  level={lvl}
+                  rule={cfg.levelRules[lvl]}
+                  inputCls={inputCls}
+                  tokenChip={tokenChip}
+                  labels={{
+                    add: '+ Add level',
+                    remove: 'Remove',
+                    lockout: 'Redirect to Agent after (sec)',
+                    paths: 'Auth Paths',
+                  }}
+                  onAddLevel={addLevel}
+                  onRemoveLevel={removeLevel}
+                  setLevelField={setLevelField}
+                  addPath={addPath}
+                  removePath={removePath}
+                  setPathDesc={setPathDesc}
+                  toggleToken={toggleToken}
+                  toggleBackup={toggleBackup}
+                />
+              ))}
               </>
               )}
             </>

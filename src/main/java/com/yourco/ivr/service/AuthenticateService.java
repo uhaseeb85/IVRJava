@@ -115,27 +115,16 @@ public class AuthenticateService {
 
         if (parties.size() > 1) {
             AuthenticateResponse disResp = disambiguationEngine.start(session);
-            if (session.getPhase() == SessionPhase.AUTHENTICATING) {
-                if (config.isIdentificationOnly()) {
-                    boolean hasNoneRule = config.getLevelRules() != null
-                        && config.getLevelRules().containsKey(AuthLevel.NONE);
-                    if (hasNoneRule && req.getInitialTokens() != null
-                            && !req.getInitialTokens().isEmpty()) {
-                        for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
-                            AuthenticateResponse tokenResponse = engine.submitToken(
-                                session.getSessionId(), entry.getKey(), entry.getValue());
-                            if (tokenResponse.getStatus() == SessionStatus.FAILED
-                                    || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
-                                return tokenResponse;
-                            }
-                        }
-                        IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
-                        return engine.evaluateProgress(updatedSession, config);
-                    }
-                }
-                return engine.onPartyResolved(session, config);
+            if (session.getPhase() != SessionPhase.AUTHENTICATING) {
+                return disResp;  // still narrowing parties — return the disambiguation prompt
             }
-            return disResp;
+            // Disambiguation resolved to a single party. Identification-only brands with
+            // NONE-level rules collect the provided identity tokens; everything else proceeds
+            // straight to progress evaluation. (Normal brands do not consume initialTokens here.)
+            if (config.isIdentificationOnly() && hasNoneRule(config) && hasInitialTokens(req)) {
+                return processInitialTokens(session, config, req.getInitialTokens());
+            }
+            return engine.onPartyResolved(session, config);
         }
 
         // Single party — load preferences
@@ -145,40 +134,48 @@ public class AuthenticateService {
         session.setCustomerPreferences(prefs);
         sessionRepo.save(session);
 
+        // Identification-only brands collect tokens only when NONE-level rules define them.
         if (config.isIdentificationOnly()) {
-            boolean hasNoneRule = config.getLevelRules() != null
-                && config.getLevelRules().containsKey(AuthLevel.NONE);
-            if (hasNoneRule && req.getInitialTokens() != null
-                    && !req.getInitialTokens().isEmpty()) {
-                for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
-                    AuthenticateResponse tokenResponse = engine.submitToken(
-                        session.getSessionId(), entry.getKey(), entry.getValue());
-                    if (tokenResponse.getStatus() == SessionStatus.FAILED
-                            || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
-                        return tokenResponse;
-                    }
-                }
-                IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
-                return engine.evaluateProgress(updatedSession, config);
-            }
-            return engine.onPartyResolved(session, config);
+            return hasNoneRule(config) && hasInitialTokens(req)
+                ? processInitialTokens(session, config, req.getInitialTokens())
+                : engine.onPartyResolved(session, config);
         }
 
-        // Process any initial tokens provided at session start
-        if (req.getInitialTokens() != null && !req.getInitialTokens().isEmpty()) {
-            for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
-                AuthenticateResponse tokenResponse = engine.submitToken(
-                    session.getSessionId(), entry.getKey(), entry.getValue());
-                if (tokenResponse.getStatus() == SessionStatus.FAILED
-                        || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
-                    return tokenResponse;
-                }
-            }
-            IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
-            return engine.evaluateProgress(updatedSession, config);
-        }
+        // Standard brands process any initial tokens provided at session start.
+        return hasInitialTokens(req)
+            ? processInitialTokens(session, config, req.getInitialTokens())
+            : engine.onPartyResolved(session, config);
+    }
 
-        return engine.onPartyResolved(session, config);
+    /** True if the brand defines NONE-level rules (identification-token collection). */
+    private static boolean hasNoneRule(BrandAuthConfig config) {
+        return config.getLevelRules() != null
+            && config.getLevelRules().containsKey(AuthLevel.NONE);
+    }
+
+    /** True if the start request carried any initial tokens to pre-submit. */
+    private static boolean hasInitialTokens(StartAuthenticateRequest req) {
+        return req.getInitialTokens() != null && !req.getInitialTokens().isEmpty();
+    }
+
+    /**
+     * Submits each initial token through the engine, short-circuiting if any submission
+     * drives the session to a terminal {@link SessionStatus#FAILED} or
+     * {@link SessionStatus#REDIRECT_TO_AGENT} state. Once all tokens are accepted, the
+     * (re-read) session is evaluated for progress toward its target level.
+     */
+    private AuthenticateResponse processInitialTokens(IvrSession session, BrandAuthConfig config,
+                                                      Map<TokenType, String> initialTokens) {
+        for (Map.Entry<TokenType, String> entry : initialTokens.entrySet()) {
+            AuthenticateResponse tokenResponse = engine.submitToken(
+                session.getSessionId(), entry.getKey(), entry.getValue());
+            if (tokenResponse.getStatus() == SessionStatus.FAILED
+                    || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
+                return tokenResponse;
+            }
+        }
+        IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
+        return engine.evaluateProgress(updatedSession, config);
     }
 
     /**

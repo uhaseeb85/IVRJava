@@ -188,11 +188,9 @@ public class AuthEngine {
         // ── Build per-request processing log ────────────────────────────────
         List<ProcessingEvent> procLog = new ArrayList<>();
 
-        LevelRule ruleCtx = config.getLevelRules() != null
-            ? config.getLevelRules().get(session.getTargetLevel()) : null;
-        int pathIdxCtx = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
-        TokenPath activePathCtx = (ruleCtx != null && pathIdxCtx < ruleCtx.getPaths().size())
-            ? ruleCtx.getPaths().get(pathIdxCtx) : null;
+        ActivePath active = resolveActivePath(session, config);
+        int pathIdxCtx = active.index;
+        TokenPath activePathCtx = active.path;
 
         addEntry(procLog, "INFO",
             "Brand: " + session.getBrandId()
@@ -383,17 +381,13 @@ public class AuthEngine {
      * Evaluate whether the current validated tokens satisfy the target level.
      */
     public AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
-        LevelRule rule = config.getLevelRules() != null
-            ? config.getLevelRules().get(session.getTargetLevel()) : null;
-        if (rule == null) {
+        ActivePath active = resolveActivePath(session, config);
+        if (active.rule == null) {
             throw new IllegalArgumentException("No rule defined for level: " + session.getTargetLevel());
         }
 
-        Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
-        int activePathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0);
-
-        if (activePathIdx >= rule.getPaths().size()) {
-            // All paths exhausted — fail
+        if (active.path == null) {
+            // Active index points past the last path — all paths exhausted, fail.
             session.setStatus(SessionStatus.FAILED);
             sessionRepo.save(session);
             return baseResponse(session)
@@ -402,7 +396,9 @@ public class AuthEngine {
                 .build();
         }
 
-        TokenPath activePath = rule.getPaths().get(activePathIdx);
+        LevelRule rule = active.rule;
+        int activePathIdx = active.index;
+        TokenPath activePath = active.path;
 
         // Check if active path is fully satisfied (each required token must be directly validated)
         boolean pathComplete = true;
@@ -488,18 +484,44 @@ public class AuthEngine {
     }
 
     /**
+     * Snapshot of the path the engine is currently collecting against for a session's
+     * target level: the level's {@link LevelRule}, the active path index, and the
+     * {@link TokenPath} at that index.
+     *
+     * <p>Either reference may be {@code null}: {@code rule} is {@code null} when the brand
+     * defines no rule for the target level, and {@code path} is {@code null} when the active
+     * index points past the last path (i.e. all fallback paths are exhausted).
+     */
+    private static final class ActivePath {
+        final LevelRule rule;
+        final int index;
+        final TokenPath path;
+
+        ActivePath(LevelRule rule, int index, TokenPath path) {
+            this.rule = rule;
+            this.index = index;
+            this.path = path;
+        }
+    }
+
+    /** Resolves the {@link ActivePath} for the session's current target level. */
+    private ActivePath resolveActivePath(IvrSession session, BrandAuthConfig config) {
+        LevelRule rule = config.getLevelRules() != null
+            ? config.getLevelRules().get(session.getTargetLevel()) : null;
+        int index = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
+        TokenPath path = (rule != null && index < rule.getPaths().size())
+            ? rule.getPaths().get(index) : null;
+        return new ActivePath(rule, index, path);
+    }
+
+    /**
      * If the submitted token type matches a backup token for a required token
      * on the active path, map it to the required token so the path check passes.
      */
     private TokenType resolveBackupToken(IvrSession session, BrandAuthConfig config, TokenType submittedType) {
-        LevelRule rule = config.getLevelRules() != null
-            ? config.getLevelRules().get(session.getTargetLevel()) : null;
-        if (rule == null) return submittedType;
+        TokenPath activePath = resolveActivePath(session, config).path;
+        if (activePath == null) return submittedType;
 
-        int activePathIdx = session.getActivePathIndexByLevel().getOrDefault(session.getTargetLevel(), 0);
-        if (activePathIdx >= rule.getPaths().size()) return submittedType;
-
-        TokenPath activePath = rule.getPaths().get(activePathIdx);
         if (activePath.getBackupTokens() != null) {
             for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
                 TokenType required = entry.getKey();
@@ -526,15 +548,9 @@ public class AuthEngine {
     private TokenType findRequiredTokenForSlot(IvrSession session,
                                                 BrandAuthConfig config,
                                                 TokenType submittedType) {
-        LevelRule rule = config.getLevelRules() != null
-            ? config.getLevelRules().get(session.getTargetLevel()) : null;
-        if (rule == null) return submittedType;
+        TokenPath activePath = resolveActivePath(session, config).path;
+        if (activePath == null) return submittedType;
 
-        int activePathIdx = session.getActivePathIndexByLevel()
-            .getOrDefault(session.getTargetLevel(), 0);
-        if (activePathIdx >= rule.getPaths().size()) return submittedType;
-
-        TokenPath activePath = rule.getPaths().get(activePathIdx);
         if (activePath.getBackupTokens() != null) {
             for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
                 if (entry.getValue().contains(submittedType)) {

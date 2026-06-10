@@ -76,6 +76,67 @@ function LevelLadder({ current, target }: { current?: string; target?: string })
   )
 }
 
+// Visual tone for a timeline step, derived from its status (+ soft-fail flag).
+// `icon` is null for in-progress steps so the caller can fall back to the step number.
+function stepTone(status: string, failed?: boolean): { row: string; badge: string; icon: string | null } {
+  const s = status.toUpperCase()
+  if (s === 'AUTHENTICATED') return { row: 'bg-emerald-50 border-emerald-100', badge: 'bg-emerald-200 text-emerald-800', icon: '✓' }
+  if (s === 'FAILED' || s === 'REDIRECT_TO_AGENT') return { row: 'bg-red-50 border-red-100', badge: 'bg-red-200 text-red-700', icon: '✗' }
+  if (failed) return { row: 'bg-amber-50 border-amber-100', badge: 'bg-amber-200 text-amber-800', icon: '✗' }
+  return { row: 'bg-slate-50 border-slate-100', badge: 'bg-slate-200 text-slate-600', icon: null }
+}
+
+// Badge + text colors for a processing-log entry, keyed by its level.
+function procLogTone(level: string): { badge: string; text: string } {
+  const l = level.toUpperCase()
+  if (l === 'PASS') return { badge: 'bg-emerald-100 text-emerald-700', text: 'text-emerald-800' }
+  if (l === 'FAIL') return { badge: 'bg-red-100 text-red-600',     text: 'text-red-700' }
+  if (l === 'WARN') return { badge: 'bg-amber-100 text-amber-700', text: 'text-amber-800' }
+  return              { badge: 'bg-slate-100 text-slate-500',  text: 'text-slate-600' }
+}
+
+// Collapsible per-request processing log emitted by the auth engine.
+function ProcessingLog({ log, open, onToggle }: {
+  log: Array<{ level: string; message: string }>
+  open: boolean
+  onToggle: () => void
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 overflow-hidden">
+      <button
+        onClick={onToggle}
+        className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 transition-colors"
+      >
+        <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+          <Activity size={12} className="text-indigo-500" />
+          Processing Log
+          <span className="text-[10px] font-normal text-slate-400 ml-1">
+            ({log.length} event{log.length !== 1 ? 's' : ''})
+          </span>
+        </div>
+        {open ? <ChevronUp size={13} className="text-slate-400" /> : <ChevronDown size={13} className="text-slate-400" />}
+      </button>
+      {open && (
+        <div className="border-t border-slate-100 divide-y divide-slate-50">
+          {log.map((entry, i) => {
+            const tone = procLogTone(entry.level)
+            return (
+              <div key={i} className="flex items-start gap-3 px-4 py-2.5">
+                <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px] font-black w-9 text-center mt-0.5', tone.badge)}>
+                  {entry.level.toUpperCase()}
+                </span>
+                <span className={cn('text-xs leading-relaxed font-mono', tone.text)}>
+                  {entry.message}
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function Dashboard() {
   const [session, setSession] = useState<SessionRecord | null>(null)
   const [response, setResponse] = useState<Record<string, unknown> | null>(null)
@@ -322,6 +383,8 @@ export default function Dashboard() {
   const higherLevels = brandLevels.filter(l => LEVEL_ORDER.indexOf(l as typeof LEVEL_ORDER[number]) > LEVEL_ORDER.indexOf(currentLevel.toUpperCase() as typeof LEVEL_ORDER[number]))
   // Identification-only result: the caller was resolved to a single party, no auth level granted.
   const identified = currentStatus === 'AUTHENTICATED' && (idOnly || currentLevel.toUpperCase() === 'NONE')
+
+  const procLog = response?.processingLog as Array<{ level: string; message: string }> | undefined
 
   const responseSummary = response ? (
     <div className="space-y-1.5">
@@ -739,24 +802,15 @@ export default function Dashboard() {
                       <div className="space-y-2">
                         {session.steps.map((step, i) => {
                           const s = step.status.toUpperCase()
-                          const isAuth = s === 'AUTHENTICATED'
-                          const isBad = s === 'FAILED' || s === 'REDIRECT_TO_AGENT'
+                          const tone = stepTone(s, step.failed)
                           return (
                             <div key={i} className={cn(
-                              'flex items-center gap-3 rounded-lg px-3 py-2.5 border',
-                              isAuth      ? 'bg-emerald-50 border-emerald-100' :
-                              isBad       ? 'bg-red-50 border-red-100' :
-                              step.failed ? 'bg-amber-50 border-amber-100' :
-                                            'bg-slate-50 border-slate-100'
+                              'flex items-center gap-3 rounded-lg px-3 py-2.5 border', tone.row
                             )}>
                               <div className={cn(
-                                'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0',
-                                isAuth      ? 'bg-emerald-200 text-emerald-800' :
-                                isBad       ? 'bg-red-200 text-red-700' :
-                                step.failed ? 'bg-amber-200 text-amber-800' :
-                                              'bg-slate-200 text-slate-600'
+                                'w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0', tone.badge
                               )}>
-                                {isAuth ? '✓' : isBad ? '✗' : step.failed ? '✗' : i + 1}
+                                {tone.icon ?? i + 1}
                               </div>
                               <span className={cn(
                                 'flex-1 text-sm font-semibold',
@@ -847,51 +901,13 @@ export default function Dashboard() {
                   )}
 
                   {/* Processing Log */}
-                  {(() => {
-                    const procLog = response?.processingLog as Array<{ level: string; message: string }> | undefined
-                    if (!procLog || procLog.length === 0) return null
-                    const levelStyle = (level: string) => {
-                      const l = level.toUpperCase()
-                      if (l === 'PASS') return { badge: 'bg-emerald-100 text-emerald-700', text: 'text-emerald-800' }
-                      if (l === 'FAIL') return { badge: 'bg-red-100 text-red-600',     text: 'text-red-700' }
-                      if (l === 'WARN') return { badge: 'bg-amber-100 text-amber-700', text: 'text-amber-800' }
-                      return              { badge: 'bg-slate-100 text-slate-500',  text: 'text-slate-600' }
-                    }
-                    return (
-                      <div className="rounded-lg border border-slate-200 overflow-hidden">
-                        <button
-                          onClick={() => setShowProcLog(v => !v)}
-                          className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                        >
-                          <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                            <Activity size={12} className="text-indigo-500" />
-                            Processing Log
-                            <span className="text-[10px] font-normal text-slate-400 ml-1">
-                              ({procLog.length} event{procLog.length !== 1 ? 's' : ''})
-                            </span>
-                          </div>
-                          {showProcLog ? <ChevronUp size={13} className="text-slate-400" /> : <ChevronDown size={13} className="text-slate-400" />}
-                        </button>
-                        {showProcLog && (
-                          <div className="border-t border-slate-100 divide-y divide-slate-50">
-                            {procLog.map((entry, i) => {
-                              const st = levelStyle(entry.level)
-                              return (
-                                <div key={i} className="flex items-start gap-3 px-4 py-2.5">
-                                  <span className={cn('shrink-0 rounded px-1.5 py-0.5 text-[10px] font-black w-9 text-center mt-0.5', st.badge)}>
-                                    {entry.level.toUpperCase()}
-                                  </span>
-                                  <span className={cn('text-xs leading-relaxed font-mono', st.text)}>
-                                    {entry.message}
-                                  </span>
-                                </div>
-                              )
-                            })}
-                          </div>
-                        )}
-                      </div>
-                    )
-                  })()}
+                  {procLog && procLog.length > 0 && (
+                    <ProcessingLog
+                      log={procLog}
+                      open={showProcLog}
+                      onToggle={() => setShowProcLog(v => !v)}
+                    />
+                  )}
                 </div>
               )}
             </div>
