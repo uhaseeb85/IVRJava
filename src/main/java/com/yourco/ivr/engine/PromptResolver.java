@@ -66,15 +66,6 @@ public class PromptResolver {
     }
 
     private String tokenName(TokenType tokenType) {
-        switch (tokenType) {
-            case ACCOUNT_NUMBER: return "account number";
-            case PIN:            return "PIN";
-            case OTP:            return "one-time passcode";
-            case SSN_LAST4:      return "last 4 digits of your SSN";
-            case VOICE_PRINT:    return "voice verification";
-            case DATE_OF_BIRTH:  return "date of birth";
-            case CARD_LAST4:     return "last 4 digits of your card";
-            default:             return "authentication token";
-        }
+        return tokenType.getDisplayName();
     }
 }

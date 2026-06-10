@@ -14,17 +14,27 @@ package com.yourco.ivr.domain;
  */
 public enum TokenType {
     /** Customer's full account number. */
-    ACCOUNT_NUMBER,
+    ACCOUNT_NUMBER("account number"),
     /** Numeric personal identification number (minimum 4 digits). */
-    PIN,
+    PIN("PIN"),
     /** Time-limited one-time passcode (exactly 6 characters). */
-    OTP,
+    OTP("one-time passcode"),
     /** Last four digits of Social Security Number (exactly 4 characters). */
-    SSN_LAST4,
+    SSN_LAST4("last 4 digits of your SSN"),
     /** Voice biometric sample — format validation only checks for non-blank value. */
-    VOICE_PRINT,
+    VOICE_PRINT("voice verification"),
     /** Date of birth in ISO local date format (YYYY-MM-DD). */
-    DATE_OF_BIRTH,
+    DATE_OF_BIRTH("date of birth"),
     /** Last four digits of a payment card number (exactly 4 characters). */
-    CARD_LAST4
+    CARD_LAST4("last 4 digits of your card");
+
+    private final String displayName;
+
+    TokenType(String displayName) {
+        this.displayName = displayName;
+    }
+
+    public String getDisplayName() {
+        return displayName;
+    }
 }

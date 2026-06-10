@@ -1,6 +1,5 @@
 package com.yourco.ivr;
 
-import com.yourco.ivr.api.dto.CallTransferRequest;
 import com.yourco.ivr.api.dto.AuthenticateRequest;
 import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.domain.*;

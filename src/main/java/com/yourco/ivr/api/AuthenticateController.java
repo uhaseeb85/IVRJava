@@ -1,9 +1,10 @@
 package com.yourco.ivr.api;
 
+import com.yourco.ivr.api.action.RequestAction;
+import com.yourco.ivr.api.action.RequestActionDiscriminator;
 import com.yourco.ivr.api.dto.AuthenticateRequest;
+import com.yourco.ivr.api.dto.AuthenticateRequestMapper;
 import com.yourco.ivr.api.dto.AuthenticateResponse;
-import com.yourco.ivr.api.dto.CallTransferRequest;
-import com.yourco.ivr.api.dto.StartAuthenticateRequest;
 import com.yourco.ivr.service.AuthenticateService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
@@ -14,6 +15,9 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import javax.validation.Valid;
+
+import static com.yourco.ivr.api.action.RequestAction.*;
+import static com.yourco.ivr.api.dto.AuthenticateRequestMapper.*;
 
 @RestController
 @RequestMapping("/ivr/authenticate")
@@ -35,45 +39,24 @@ public class AuthenticateController {
     })
     @PostMapping
     public ResponseEntity<AuthenticateResponse> handle(@Valid @RequestBody AuthenticateRequest req) {
-        if (req.getSessionId() == null) {
-            if (req.getSourceSystemId() != null) {
+        RequestAction action = RequestActionDiscriminator.classify(req);
+        switch (action) {
+            case TRANSFER:
                 return ResponseEntity.ok(authenticateService.transfer(toTransferRequest(req)));
-            }
-            return ResponseEntity.ok(authenticateService.start(toStartRequest(req)));
+            case START:
+                return ResponseEntity.ok(authenticateService.start(toStartRequest(req)));
+            case SUBMIT_TOKEN:
+                return ResponseEntity.ok(
+                    authenticateService.submitTokenWithCaller(
+                        req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId())
+                );
+            case ESCALATE:
+                return ResponseEntity.ok(
+                    authenticateService.escalate(req.getSessionId(), req.getTargetLevel())
+                );
+            default:
+                throw new IllegalStateException("Unknown action: " + action);
         }
-        if (req.getTokenType() != null) {
-            return ResponseEntity.ok(
-                authenticateService.submitTokenWithCaller(
-                    req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId())
-            );
-        }
-        if (req.getTargetLevel() == null) {
-            throw new IllegalArgumentException(
-                "Escalate action requires targetLevel when sessionId is present and tokenType is absent");
-        }
-        return ResponseEntity.ok(
-            authenticateService.escalate(req.getSessionId(), req.getTargetLevel())
-        );
-    }
-
-    private static CallTransferRequest toTransferRequest(AuthenticateRequest req) {
-        CallTransferRequest transfer = new CallTransferRequest();
-        transfer.setSourceSystemId(req.getSourceSystemId());
-        transfer.setBrandId(req.getBrandId());
-        transfer.setCallerId(req.getCallerId());
-        transfer.setCurrentLevel(req.getCurrentLevel());
-        transfer.setTargetLevel(req.getTargetLevel());
-        transfer.setValidatedTokens(req.getValidatedTokens());
-        return transfer;
-    }
-
-    private static StartAuthenticateRequest toStartRequest(AuthenticateRequest req) {
-        StartAuthenticateRequest start = new StartAuthenticateRequest();
-        start.setBrandId(req.getBrandId());
-        start.setCallerId(req.getCallerId());
-        start.setTargetLevel(req.getTargetLevel());
-        start.setInitialTokens(req.getInitialTokens());
-        return start;
     }
 
     @Operation(summary = "Get session status", description = "Poll the current state of an authentication session.")

@@ -234,19 +234,11 @@ public class DisambiguationEngine {
         return result;
     }
 
-    String formatTokenName(TokenType tokenType) {
-        switch (tokenType) {
-            case ACCOUNT_NUMBER:
-                return "account number";
-            case DATE_OF_BIRTH:
-                return "date of birth (YYYY-MM-DD)";
-            case SSN_LAST4:
-                return "last 4 digits of your SSN";
-            case CARD_LAST4:
-                return "last 4 digits of your card";
-            default:
-                return tokenType.name().toLowerCase().replace('_', ' ');
+    private String formatTokenName(TokenType tokenType) {
+        if (tokenType == TokenType.DATE_OF_BIRTH) {
+            return "date of birth (YYYY-MM-DD)";
         }
+        return tokenType.getDisplayName();
     }
 
     private AuthenticateResponse resolveParty(IvrSession session, Party party) {
