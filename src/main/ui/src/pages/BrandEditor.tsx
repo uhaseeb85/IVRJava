@@ -3,9 +3,8 @@ import { cn } from '../lib/utils'
 import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2 } from 'lucide-react'
 import { getBrand, saveBrand } from '../lib/api'
 import { editorInputCls as inputCls } from '../lib/styles'
+import { LEVELS, TOKENS as TYPES } from '../lib/ivrMeta'
 
-const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
-const TYPES  = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
 type TokenType = typeof TYPES[number]
 
 interface AuthPath {
@@ -137,23 +136,31 @@ interface LevelRuleCardLabels {
   paths: string    // heading above the path list
 }
 
-function LevelRuleCard({
-  level, rule, inputCls, tokenChip, labels,
-  onAddLevel, onRemoveLevel, setLevelField, addPath, removePath, setPathDesc, toggleToken, toggleBackup,
-}: {
-  level: string
-  rule: LevelRule | undefined
-  inputCls: string
-  tokenChip: (active: boolean) => string
-  labels: LevelRuleCardLabels
-  onAddLevel: (lvl: string) => void
-  onRemoveLevel: (lvl: string) => void
+// All mutations a LevelRuleCard can make to its level's rule, bundled so the
+// card takes one prop instead of eight.
+interface LevelRuleActions {
+  addLevel: (lvl: string) => void
+  removeLevel: (lvl: string) => void
   setLevelField: (lvl: string, field: 'maxRetriesPerToken' | 'lockoutSeconds', val: number) => void
   addPath: (lvl: string) => void
   removePath: (lvl: string, pi: number) => void
   setPathDesc: (lvl: string, pi: number, desc: string) => void
   toggleToken: (lvl: string, pi: number, tok: TokenType) => void
   toggleBackup: (lvl: string, pi: number, req: TokenType, alt: TokenType) => void
+}
+
+const tokenChip = (active: boolean) => cn(
+  'inline-flex items-center rounded-lg px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors select-none border',
+  active
+    ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+    : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'
+)
+
+function LevelRuleCard({ level, rule, labels, actions }: {
+  level: string
+  rule: LevelRule | undefined
+  labels: LevelRuleCardLabels
+  actions: LevelRuleActions
 }) {
   return (
     <div className={cn(
@@ -172,8 +179,8 @@ function LevelRuleCard({
           )}
         </div>
         {rule
-          ? <button onClick={() => onRemoveLevel(level)} className="text-xs text-slate-400 hover:text-red-600 transition-colors font-semibold">{labels.remove}</button>
-          : <button onClick={() => onAddLevel(level)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold">{labels.add}</button>
+          ? <button onClick={() => actions.removeLevel(level)} className="text-xs text-slate-400 hover:text-red-600 transition-colors font-semibold">{labels.remove}</button>
+          : <button onClick={() => actions.addLevel(level)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold">{labels.add}</button>
         }
       </div>
 
@@ -187,7 +194,7 @@ function LevelRuleCard({
                 type="number" min={1}
                 className={inputCls}
                 value={rule.maxRetriesPerToken}
-                onChange={e => setLevelField(level, 'maxRetriesPerToken', parseInt(e.target.value) || 1)}
+                onChange={e => actions.setLevelField(level, 'maxRetriesPerToken', parseInt(e.target.value) || 1)}
               />
             </div>
             <div>
@@ -196,7 +203,7 @@ function LevelRuleCard({
                 type="number" min={0}
                 className={inputCls}
                 value={rule.lockoutSeconds}
-                onChange={e => setLevelField(level, 'lockoutSeconds', parseInt(e.target.value) || 0)}
+                onChange={e => actions.setLevelField(level, 'lockoutSeconds', parseInt(e.target.value) || 0)}
               />
             </div>
           </div>
@@ -205,7 +212,7 @@ function LevelRuleCard({
           <div>
             <div className="flex items-center justify-between mb-3">
               <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{labels.paths}</span>
-              <button onClick={() => addPath(level)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold flex items-center gap-1">
+              <button onClick={() => actions.addPath(level)} className="text-xs text-indigo-600 hover:text-indigo-800 transition-colors font-semibold flex items-center gap-1">
                 <Plus size={11} />Add Path
               </button>
             </div>
@@ -221,7 +228,7 @@ function LevelRuleCard({
                       {pi === 0 ? 'Primary Path' : `Fallback ${pi}`}
                     </span>
                     {rule.paths.length > 1 && (
-                      <button onClick={() => removePath(level, pi)}
+                      <button onClick={() => actions.removePath(level, pi)}
                         className="text-slate-400 hover:text-red-600 transition-colors">
                         <Trash2 size={13} />
                       </button>
@@ -232,7 +239,7 @@ function LevelRuleCard({
                     className={inputCls}
                     placeholder="Description (e.g. Account + PIN)"
                     value={p.description || ''}
-                    onChange={e => setPathDesc(level, pi, e.target.value)}
+                    onChange={e => actions.setPathDesc(level, pi, e.target.value)}
                   />
 
                   <div>
@@ -242,7 +249,7 @@ function LevelRuleCard({
                         <span
                           key={t}
                           className={tokenChip(p.requiredTokens.includes(t))}
-                          onClick={() => toggleToken(level, pi, t)}
+                          onClick={() => actions.toggleToken(level, pi, t)}
                         >
                           {t}
                         </span>
@@ -263,7 +270,7 @@ function LevelRuleCard({
                               <input
                                 type="checkbox"
                                 checked={checked}
-                                onChange={() => toggleBackup(level, pi, req, t)}
+                                onChange={() => actions.toggleBackup(level, pi, req, t)}
                                 className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
                               />
                               {t}
@@ -313,94 +320,56 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
   }
 
   // ── State helpers ────────────────────────────────────────────────────────────
+  // All rule mutations funnel through updateRule/updatePath, which own the
+  // immutable-spread plumbing so each action below stays a one-liner.
 
-  const addLevel = (lvl: string) => {
-    setCfg(c => ({ ...c, levelRules: { ...c.levelRules, [lvl]: freshRule() } }))
-  }
+  const updateRule = (lvl: string, fn: (r: LevelRule) => LevelRule) =>
+    setCfg(c => ({ ...c, levelRules: { ...c.levelRules, [lvl]: fn(c.levelRules[lvl]) } }))
 
-  const removeLevel = (lvl: string) => {
-    setCfg(c => {
+  const updatePath = (lvl: string, pi: number, fn: (p: AuthPath) => AuthPath) =>
+    updateRule(lvl, r => ({ ...r, paths: r.paths.map((p, i) => (i === pi ? fn(p) : p)) }))
+
+  const actions: LevelRuleActions = {
+    addLevel: lvl => updateRule(lvl, () => freshRule()),
+
+    removeLevel: lvl => setCfg(c => {
       const next = { ...c.levelRules }
       delete next[lvl]
       return { ...c, levelRules: next }
-    })
-  }
+    }),
 
-  const setLevelField = (lvl: string, field: 'maxRetriesPerToken' | 'lockoutSeconds', val: number) => {
-    setCfg(c => ({
-      ...c,
-      levelRules: { ...c.levelRules, [lvl]: { ...c.levelRules[lvl], [field]: val } },
-    }))
-  }
+    setLevelField: (lvl, field, val) => updateRule(lvl, r => ({ ...r, [field]: val })),
 
-  const addPath = (lvl: string) => {
-    setCfg(c => {
-      const paths = c.levelRules[lvl].paths
-      return {
-        ...c,
-        levelRules: {
-          ...c.levelRules,
-          [lvl]: {
-            ...c.levelRules[lvl],
-            paths: [...paths, { pathIndex: paths.length, description: '', requiredTokens: [], backupTokens: null }],
-          },
-        },
+    addPath: lvl => updateRule(lvl, r => ({
+      ...r,
+      paths: [...r.paths, { pathIndex: r.paths.length, description: '', requiredTokens: [], backupTokens: null }],
+    })),
+
+    removePath: (lvl, pi) => updateRule(lvl, r => ({ ...r, paths: r.paths.filter((_, i) => i !== pi) })),
+
+    setPathDesc: (lvl, pi, desc) => updatePath(lvl, pi, p => ({ ...p, description: desc })),
+
+    toggleToken: (lvl, pi, tok) => updatePath(lvl, pi, p => {
+      const has = p.requiredTokens.includes(tok)
+      const requiredTokens = has ? p.requiredTokens.filter(t => t !== tok) : [...p.requiredTokens, tok]
+      let backupTokens = p.backupTokens
+      if (has && backupTokens) {
+        // Removing a required token also drops its backup mapping.
+        const bt = { ...backupTokens }
+        delete bt[tok]
+        backupTokens = Object.keys(bt).length ? bt : null
       }
-    })
-  }
+      return { ...p, requiredTokens, backupTokens }
+    }),
 
-  const removePath = (lvl: string, pi: number) => {
-    setCfg(c => ({
-      ...c,
-      levelRules: {
-        ...c.levelRules,
-        [lvl]: {
-          ...c.levelRules[lvl],
-          paths: c.levelRules[lvl].paths.filter((_, i) => i !== pi),
-        },
-      },
-    }))
-  }
-
-  const setPathDesc = (lvl: string, pi: number, desc: string) => {
-    setCfg(c => {
-      const paths = c.levelRules[lvl].paths.map((p, i) => i === pi ? { ...p, description: desc } : p)
-      return { ...c, levelRules: { ...c.levelRules, [lvl]: { ...c.levelRules[lvl], paths } } }
-    })
-  }
-
-  const toggleToken = (lvl: string, pi: number, tok: TokenType) => {
-    setCfg(c => {
-      const paths = c.levelRules[lvl].paths.map((p, i) => {
-        if (i !== pi) return p
-        const has = p.requiredTokens.includes(tok)
-        const requiredTokens = has ? p.requiredTokens.filter(t => t !== tok) : [...p.requiredTokens, tok]
-        const backupTokens = has && p.backupTokens
-          ? (() => {
-              const bt = { ...p.backupTokens }
-              delete bt[tok]
-              return Object.keys(bt).length ? bt : null
-            })()
-          : p.backupTokens
-        return { ...p, requiredTokens, backupTokens }
-      })
-      return { ...c, levelRules: { ...c.levelRules, [lvl]: { ...c.levelRules[lvl], paths } } }
-    })
-  }
-
-  const toggleBackup = (lvl: string, pi: number, req: TokenType, alt: TokenType) => {
-    setCfg(c => {
-      const paths = c.levelRules[lvl].paths.map((p, i) => {
-        if (i !== pi) return p
-        const bt: Record<string, TokenType[]> = p.backupTokens ? { ...p.backupTokens } : {}
-        const list = bt[req] ? [...bt[req]] : []
-        const idx = list.indexOf(alt)
-        if (idx >= 0) list.splice(idx, 1); else list.push(alt)
-        if (list.length) bt[req] = list; else delete bt[req]
-        return { ...p, backupTokens: Object.keys(bt).length ? bt : null }
-      })
-      return { ...c, levelRules: { ...c.levelRules, [lvl]: { ...c.levelRules[lvl], paths } } }
-    })
+    toggleBackup: (lvl, pi, req, alt) => updatePath(lvl, pi, p => {
+      const bt: Record<string, TokenType[]> = p.backupTokens ? { ...p.backupTokens } : {}
+      const list = bt[req] ? [...bt[req]] : []
+      const idx = list.indexOf(alt)
+      if (idx >= 0) list.splice(idx, 1); else list.push(alt)
+      if (list.length) bt[req] = list; else delete bt[req]
+      return { ...p, backupTokens: Object.keys(bt).length ? bt : null }
+    }),
   }
 
   const save = async () => {
@@ -418,13 +387,6 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
   }
 
   // ── Styles ───────────────────────────────────────────────────────────────────
-
-  const tokenChip = (active: boolean) => cn(
-    'inline-flex items-center rounded-lg px-3 py-1.5 text-xs font-bold cursor-pointer transition-colors select-none border',
-    active
-      ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
-      : 'bg-white text-slate-500 border-slate-200 hover:border-indigo-300 hover:text-indigo-600'
-  )
 
   const tabBtn = (t: string) => cn(
     'flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold transition-colors',
@@ -550,22 +512,13 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
                 <LevelRuleCard
                   level="NONE"
                   rule={cfg.levelRules['NONE']}
-                  inputCls={inputCls}
-                  tokenChip={tokenChip}
                   labels={{
                     add: '+ Add Identity Tokens',
                     remove: 'Remove Rules',
                     lockout: 'Lockout (sec)',
                     paths: 'Identity Paths',
                   }}
-                  onAddLevel={addLevel}
-                  onRemoveLevel={removeLevel}
-                  setLevelField={setLevelField}
-                  addPath={addPath}
-                  removePath={removePath}
-                  setPathDesc={setPathDesc}
-                  toggleToken={toggleToken}
-                  toggleBackup={toggleBackup}
+                  actions={actions}
                 />
                 </>
               ) : (
@@ -576,22 +529,13 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
                   key={lvl}
                   level={lvl}
                   rule={cfg.levelRules[lvl]}
-                  inputCls={inputCls}
-                  tokenChip={tokenChip}
                   labels={{
                     add: '+ Add level',
                     remove: 'Remove',
                     lockout: 'Redirect to Agent after (sec)',
                     paths: 'Auth Paths',
                   }}
-                  onAddLevel={addLevel}
-                  onRemoveLevel={removeLevel}
-                  setLevelField={setLevelField}
-                  addPath={addPath}
-                  removePath={removePath}
-                  setPathDesc={setPathDesc}
-                  toggleToken={toggleToken}
-                  toggleBackup={toggleBackup}
+                  actions={actions}
                 />
               ))}
               </>
