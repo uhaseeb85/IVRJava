@@ -6,7 +6,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static java.util.stream.Collectors.groupingBy;
 import static java.util.stream.Collectors.toMap;
@@ -48,9 +47,14 @@ public class TokenValidatorRegistry {
      *         registered for {@code type} (neither override nor default)
      */
     public TokenValidator resolve(String brandId, TokenType type) {
-        return Optional.ofNullable(brandOverrides.get(brandId))
-            .map(m -> m.get(type))
-            .orElseGet(() -> Optional.ofNullable(defaults.get(type))
-                .orElseThrow(() -> new UnsupportedTokenTypeException(type)));
+        Map<TokenType, TokenValidator> overrides = brandOverrides.get(brandId);
+        TokenValidator validator = overrides != null ? overrides.get(type) : null;
+        if (validator == null) {
+            validator = defaults.get(type);
+        }
+        if (validator == null) {
+            throw new UnsupportedTokenTypeException(type);
+        }
+        return validator;
     }
 }

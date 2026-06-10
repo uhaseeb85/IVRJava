@@ -37,21 +37,9 @@ public class AuthenticateController {
     public ResponseEntity<AuthenticateResponse> handle(@Valid @RequestBody AuthenticateRequest req) {
         if (req.getSessionId() == null) {
             if (req.getSourceSystemId() != null) {
-                CallTransferRequest transfer = new CallTransferRequest();
-                transfer.setSourceSystemId(req.getSourceSystemId());
-                transfer.setBrandId(req.getBrandId());
-                transfer.setCallerId(req.getCallerId());
-                transfer.setCurrentLevel(req.getCurrentLevel());
-                transfer.setTargetLevel(req.getTargetLevel());
-                transfer.setValidatedTokens(req.getValidatedTokens());
-                return ResponseEntity.ok(authenticateService.transfer(transfer));
+                return ResponseEntity.ok(authenticateService.transfer(toTransferRequest(req)));
             }
-            StartAuthenticateRequest start = new StartAuthenticateRequest();
-            start.setBrandId(req.getBrandId());
-            start.setCallerId(req.getCallerId());
-            start.setTargetLevel(req.getTargetLevel());
-            start.setInitialTokens(req.getInitialTokens());
-            return ResponseEntity.ok(authenticateService.start(start));
+            return ResponseEntity.ok(authenticateService.start(toStartRequest(req)));
         }
         if (req.getTokenType() != null) {
             return ResponseEntity.ok(
@@ -66,6 +54,26 @@ public class AuthenticateController {
         return ResponseEntity.ok(
             authenticateService.escalate(req.getSessionId(), req.getTargetLevel())
         );
+    }
+
+    private static CallTransferRequest toTransferRequest(AuthenticateRequest req) {
+        CallTransferRequest transfer = new CallTransferRequest();
+        transfer.setSourceSystemId(req.getSourceSystemId());
+        transfer.setBrandId(req.getBrandId());
+        transfer.setCallerId(req.getCallerId());
+        transfer.setCurrentLevel(req.getCurrentLevel());
+        transfer.setTargetLevel(req.getTargetLevel());
+        transfer.setValidatedTokens(req.getValidatedTokens());
+        return transfer;
+    }
+
+    private static StartAuthenticateRequest toStartRequest(AuthenticateRequest req) {
+        StartAuthenticateRequest start = new StartAuthenticateRequest();
+        start.setBrandId(req.getBrandId());
+        start.setCallerId(req.getCallerId());
+        start.setTargetLevel(req.getTargetLevel());
+        start.setInitialTokens(req.getInitialTokens());
+        return start;
     }
 
     @Operation(summary = "Get session status", description = "Poll the current state of an authentication session.")

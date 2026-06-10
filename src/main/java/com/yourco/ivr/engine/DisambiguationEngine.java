@@ -90,9 +90,7 @@ public class DisambiguationEngine {
 
         // 2. Check result
         if (parties.isEmpty()) {
-            session.setStatus(SessionStatus.FAILED);
-            sessionRepo.save(session);
-            return buildResponse(session, "No matching parties found after applying disambiguation rules.", null);
+            return failDisambiguation(session, "No matching parties found after applying disambiguation rules.");
         }
 
         if (parties.size() == 1) {
@@ -106,16 +104,13 @@ public class DisambiguationEngine {
         TokenType nextToken = selectDisambiguationToken(parties);
 
         if (nextToken == null) {
-            session.setStatus(SessionStatus.FAILED);
-            sessionRepo.save(session);
-            return buildResponse(session, "Unable to disambiguate parties with available tokens.", null);
+            return failDisambiguation(session, "Unable to disambiguate parties with available tokens.");
         }
 
         session.setDisambiguationAttemptCount(1);
         sessionRepo.save(session);
 
-        String prompt = "Please provide your " + formatTokenName(nextToken) + " to verify your identity.";
-        return buildResponse(session, prompt, nextToken);
+        return promptForToken(session, nextToken);
     }
 
     /**
@@ -138,11 +133,9 @@ public class DisambiguationEngine {
                 selectDisambiguationToken(session.getCandidateParties()));
         }
 
-        // 2. Check max rounds
+        // 2. Check max rounds (re-entry guard for sessions already at the limit)
         if (session.getDisambiguationAttemptCount() >= MAX_DISAMBIGUATION_TOKENS) {
-            session.setStatus(SessionStatus.FAILED);
-            sessionRepo.save(session);
-            return buildResponse(session, "Maximum disambiguation attempts exceeded.", null);
+            return failDisambiguation(session, "Maximum disambiguation attempts exceeded.");
         }
 
         // 3. Match token value against remaining parties
@@ -170,20 +163,28 @@ public class DisambiguationEngine {
         session.setDisambiguationAttemptCount(session.getDisambiguationAttemptCount() + 1);
 
         if (session.getDisambiguationAttemptCount() >= MAX_DISAMBIGUATION_TOKENS) {
-            session.setStatus(SessionStatus.FAILED);
-            sessionRepo.save(session);
-            return buildResponse(session, "Maximum disambiguation attempts exceeded.", null);
+            return failDisambiguation(session, "Maximum disambiguation attempts exceeded.");
         }
 
         TokenType nextToken = selectDisambiguationToken(matching);
         if (nextToken == null) {
-            session.setStatus(SessionStatus.FAILED);
-            sessionRepo.save(session);
-            return buildResponse(session, "Unable to further disambiguate parties.", null);
+            return failDisambiguation(session, "Unable to further disambiguate parties.");
         }
 
         sessionRepo.save(session);
 
+        return promptForToken(session, nextToken);
+    }
+
+    /** Marks the session FAILED and returns a terminal response with the given message. */
+    private AuthenticateResponse failDisambiguation(IvrSession session, String message) {
+        session.setStatus(SessionStatus.FAILED);
+        sessionRepo.save(session);
+        return buildResponse(session, message, null);
+    }
+
+    /** Asks the caller for the next disambiguation token. */
+    private AuthenticateResponse promptForToken(IvrSession session, TokenType nextToken) {
         String prompt = "Please provide your " + formatTokenName(nextToken) + " to verify your identity.";
         return buildResponse(session, prompt, nextToken);
     }

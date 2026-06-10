@@ -47,52 +47,49 @@ public class IvrExceptionHandler {
 
     private static final Logger log = LoggerFactory.getLogger(IvrExceptionHandler.class);
 
+    /** Builds the uniform error body every handler returns. */
+    private static ResponseEntity<ErrorResponse> error(int status, String code, String message) {
+        return ResponseEntity.status(status).body(new ErrorResponse(code, message));
+    }
+
     @ExceptionHandler(SessionNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(SessionNotFoundException e) {
-        return ResponseEntity.status(404)
-            .body(new ErrorResponse("SESSION_NOT_FOUND", e.getMessage()));
+        return error(404, "SESSION_NOT_FOUND", e.getMessage());
     }
 
     @ExceptionHandler(SessionLockedException.class)
     public ResponseEntity<ErrorResponse> handleLocked(SessionLockedException e) {
-        return ResponseEntity.status(423)
-            .body(new ErrorResponse("SESSION_REDIRECT_TO_AGENT", e.getMessage()));
+        return error(423, "SESSION_REDIRECT_TO_AGENT", e.getMessage());
     }
 
     @ExceptionHandler(UnknownBrandException.class)
     public ResponseEntity<ErrorResponse> handleBrand(UnknownBrandException e) {
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("UNKNOWN_BRAND", e.getMessage()));
+        return error(400, "UNKNOWN_BRAND", e.getMessage());
     }
 
     @ExceptionHandler(UnsupportedTokenTypeException.class)
     public ResponseEntity<ErrorResponse> handleToken(UnsupportedTokenTypeException e) {
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("UNSUPPORTED_TOKEN", e.getMessage()));
+        return error(400, "UNSUPPORTED_TOKEN", e.getMessage());
     }
 
     @ExceptionHandler(UnknownLookupServiceException.class)
     public ResponseEntity<ErrorResponse> handleLookupService(UnknownLookupServiceException e) {
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("UNKNOWN_LOOKUP_SERVICE", e.getMessage()));
+        return error(400, "UNKNOWN_LOOKUP_SERVICE", e.getMessage());
     }
 
     @ExceptionHandler(TransferNotAllowedException.class)
     public ResponseEntity<ErrorResponse> handleTransferNotAllowed(TransferNotAllowedException e) {
-        return ResponseEntity.status(403)
-            .body(new ErrorResponse("TRANSFER_NOT_ALLOWED", e.getMessage()));
+        return error(403, "TRANSFER_NOT_ALLOWED", e.getMessage());
     }
 
     @ExceptionHandler(UnknownCallerException.class)
     public ResponseEntity<ErrorResponse> handleUnknownCaller(UnknownCallerException e) {
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("UNKNOWN_CALLER", e.getMessage()));
+        return error(400, "UNKNOWN_CALLER", e.getMessage());
     }
 
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<ErrorResponse> handleIllegal(IllegalArgumentException e) {
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("INVALID_REQUEST", e.getMessage()));
+        return error(400, "INVALID_REQUEST", e.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
@@ -100,35 +97,30 @@ public class IvrExceptionHandler {
         String message = e.getBindingResult().getFieldErrors().stream()
             .map(f -> f.getField() + ": " + f.getDefaultMessage())
             .collect(Collectors.joining(", "));
-        return ResponseEntity.status(400)
-            .body(new ErrorResponse("VALIDATION_ERROR", message));
+        return error(400, "VALIDATION_ERROR", message);
     }
 
     @ExceptionHandler(SessionSerializationException.class)
     public ResponseEntity<ErrorResponse> handleSerialization(SessionSerializationException e) {
         log.error("Session serialization failure", e);
-        return ResponseEntity.status(500)
-            .body(new ErrorResponse("INTERNAL_ERROR", "An internal error occurred"));
+        return error(500, "INTERNAL_ERROR", "An internal error occurred");
     }
 
     @ExceptionHandler(SessionConflictException.class)
     public ResponseEntity<ErrorResponse> handleConflict(SessionConflictException e) {
         log.warn("Session conflict: {}", e.getMessage());
-        return ResponseEntity.status(409)
-            .body(new ErrorResponse("SESSION_CONFLICT", e.getMessage()));
+        return error(409, "SESSION_CONFLICT", e.getMessage());
     }
 
     @ExceptionHandler(BrandConfigException.class)
     public ResponseEntity<ErrorResponse> handleBrandConfig(BrandConfigException e) {
         log.error("Brand config error", e);
-        return ResponseEntity.status(500)
-            .body(new ErrorResponse("BRAND_CONFIG_ERROR", e.getMessage()));
+        return error(500, "BRAND_CONFIG_ERROR", e.getMessage());
     }
 
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ErrorResponse> handleUnexpected(Exception e) {
         log.error("Unexpected error", e);
-        return ResponseEntity.status(500)
-            .body(new ErrorResponse("INTERNAL_ERROR", "An unexpected error occurred"));
+        return error(500, "INTERNAL_ERROR", "An unexpected error occurred");
     }
 }
