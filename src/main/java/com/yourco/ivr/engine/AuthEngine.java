@@ -125,22 +125,35 @@ public class AuthEngine {
     }
 
     public AuthenticateResponse onPartyResolved(IvrSession session, BrandAuthConfig config) {
-        if (config.isIdentificationOnly()) {
-            if (hasNoneRule(config)) {
-                LevelRule noneRule = config.getLevelRules().get(AuthLevel.NONE);
-                for (TokenType collected : session.getCollectedTokens().keySet()) {
-                    for (TokenPath path : noneRule.getPaths()) {
-                        if (path.getRequiredTokens().contains(collected)) {
-                            session.getValidatedTokens().add(collected);
-                            break;
-                        }
-                    }
-                }
-                return evaluateProgress(session, config);
-            }
+        if (config.isIdentificationOnly() && !hasNoneRule(config)) {
             return finalizeIdentification(session);
         }
+        if (config.isIdentificationOnly()) {
+            markCollectedTokensSatisfyingNoneRule(session, config);
+        }
         return evaluateProgress(session, config);
+    }
+
+    /**
+     * For identification-only brands with NONE-level rules: any already-collected token that a
+     * NONE path requires is promoted to a validated token, so progress evaluation can confirm it.
+     */
+    private static void markCollectedTokensSatisfyingNoneRule(IvrSession session, BrandAuthConfig config) {
+        LevelRule noneRule = config.getLevelRules().get(AuthLevel.NONE);
+        for (TokenType collected : session.getCollectedTokens().keySet()) {
+            if (isRequiredByAnyPath(noneRule, collected)) {
+                session.getValidatedTokens().add(collected);
+            }
+        }
+    }
+
+    private static boolean isRequiredByAnyPath(LevelRule rule, TokenType token) {
+        for (TokenPath path : rule.getPaths()) {
+            if (path.getRequiredTokens().contains(token)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
@@ -280,14 +293,11 @@ public class AuthEngine {
                                                           BrandAuthConfig config,
                                                           TokenType tokenType,
                                                           List<ProcessingEvent> procLog) {
-        LevelRule rule = ActivePathManager.levelRule(config, session);
-        TokenType requiredToken = slotResolver.findRequiredTokenForSlot(session, config, tokenType);
-        int remaining = recordFailedAttempt(session, rule, requiredToken, procLog);
-        if (remaining > 0) {
-            return repromptForSlot(session, rule, requiredToken, remaining, procLog);
-        }
+        AuthenticateResponse reprompt = recordAttemptOrExhaust(session, config, tokenType, procLog);
+        if (reprompt != null) return reprompt;
 
-        addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
+        // Retries exhausted: try the next fallback path before giving up to an agent.
+        LevelRule rule = ActivePathManager.levelRule(config, session);
         AuthenticateResponse switched = pathManager.switchToFallbackPath(session, config, rule, procLog,
             this::evaluateProgress);
         if (switched != null) return switched;
@@ -298,17 +308,31 @@ public class AuthEngine {
                                                          BrandAuthConfig config,
                                                          TokenType tokenType,
                                                          List<ProcessingEvent> procLog) {
+        AuthenticateResponse reprompt = recordAttemptOrExhaust(session, config, tokenType, procLog);
+        if (reprompt != null) return reprompt;
+
+        // Retries exhausted: a wrong token type never switches paths — go straight to an agent.
+        LevelRule rule = ActivePathManager.levelRule(config, session);
+        addEntry(procLog, "FAIL",
+            "Wrong token type exhausted retries — redirecting to agent (no path switch)");
+        return pathManager.handleRedirectToAgent(session, rule, procLog);
+    }
+
+    /**
+     * Records a failed attempt against the submitted token's required slot. Returns a "still
+     * collecting" reprompt response if attempts remain, or {@code null} once the retry limit is
+     * exhausted (leaving the caller to decide the terminal behavior).
+     */
+    private AuthenticateResponse recordAttemptOrExhaust(IvrSession session, BrandAuthConfig config,
+                                                        TokenType tokenType, List<ProcessingEvent> procLog) {
         LevelRule rule = ActivePathManager.levelRule(config, session);
         TokenType requiredToken = slotResolver.findRequiredTokenForSlot(session, config, tokenType);
         int remaining = recordFailedAttempt(session, rule, requiredToken, procLog);
         if (remaining > 0) {
             return repromptForSlot(session, rule, requiredToken, remaining, procLog);
         }
-
         addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
-        addEntry(procLog, "FAIL",
-            "Wrong token type exhausted retries — redirecting to agent (no path switch)");
-        return pathManager.handleRedirectToAgent(session, rule, procLog);
+        return null;
     }
 
     private static int recordFailedAttempt(IvrSession session, LevelRule rule,

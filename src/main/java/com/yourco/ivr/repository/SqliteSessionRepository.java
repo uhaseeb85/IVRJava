@@ -1,6 +1,7 @@
 package com.yourco.ivr.repository;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JavaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
 import com.yourco.ivr.domain.CustomerPreference;
@@ -32,6 +33,7 @@ import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 /**
  * SQLite-backed implementation of {@link SessionRepository} using Spring's {@link JdbcTemplate}.
@@ -94,28 +96,15 @@ public class SqliteSessionRepository implements SessionRepository {
             "disambiguation_attempt, version, transferred_from, locked_until, created_at, " +
             "last_activity_at) " +
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        jdbc.update(sql,
-            session.getSessionId(),
-            session.getBrandId(),
-            session.getCallerId(),
-            session.getCurrentLevel().name(),
-            session.getTargetLevel().name(),
-            session.getStatus().name(),
-            session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name(),
-            null,  // collected_tokens: never persisted — values are sensitive (PINs, SSNs)
-            toJson(session.getValidatedTokens()),
-            toJson(session.getAttemptCounts()),
-            toJson(session.getActivePathIndexByLevel()),
-            toJson(session.getCandidateParties()),
-            toJson(session.getMatchedParty()),
-            toJson(session.getCustomerPreferences()),
-            session.getDisambiguationAttemptCount(),
-            version,
-            session.getTransferredFrom(),
-            toIso(session.getLockedUntil()),
-            toIso(session.getCreatedAt()),
-            toIso(session.getLastActivityAt())
-        );
+
+        // Column order: session_id, <shared payload>, created_at, last_activity_at
+        List<Object> params = new ArrayList<>();
+        params.add(session.getSessionId());
+        params.addAll(sharedColumnValues(session, version));
+        params.add(toIso(session.getCreatedAt()));
+        params.add(toIso(session.getLastActivityAt()));
+
+        jdbc.update(sql, params.toArray());
     }
 
     private void update(IvrSession session) {
@@ -129,31 +118,44 @@ public class SqliteSessionRepository implements SessionRepository {
             "matched_party = ?, customer_preferences = ?, disambiguation_attempt = ?, " +
             "version = ?, transferred_from = ?, locked_until = ?, last_activity_at = ? " +
             "WHERE session_id = ? AND version = ?";
-        int rows = jdbc.update(sql,
-            session.getBrandId(),
-            session.getCallerId(),
-            session.getCurrentLevel().name(),
-            session.getTargetLevel().name(),
-            session.getStatus().name(),
-            session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name(),
-            null,  // collected_tokens: never persisted — values are sensitive (PINs, SSNs)
-            toJson(session.getValidatedTokens()),
-            toJson(session.getAttemptCounts()),
-            toJson(session.getActivePathIndexByLevel()),
-            toJson(session.getCandidateParties()),
-            toJson(session.getMatchedParty()),
-            toJson(session.getCustomerPreferences()),
-            session.getDisambiguationAttemptCount(),
-            newVersion,
-            session.getTransferredFrom(),
-            toIso(session.getLockedUntil()),
-            toIso(session.getLastActivityAt()),
-            session.getSessionId(),
-            expectedVersion
-        );
+
+        // Column order: <shared payload>, last_activity_at, then WHERE session_id, version
+        List<Object> params = new ArrayList<>(sharedColumnValues(session, newVersion));
+        params.add(toIso(session.getLastActivityAt()));
+        params.add(session.getSessionId());
+        params.add(expectedVersion);
+
+        int rows = jdbc.update(sql, params.toArray());
         if (rows == 0) {
             throw new SessionConflictException(session.getSessionId());
         }
+    }
+
+    /**
+     * The session payload columns shared by {@link #insert} and {@link #update}, in the order they
+     * appear in both statements: {@code brand_id} through {@code locked_until}. Both statements wrap
+     * this block with their own leading/trailing columns (session id, timestamps, version guard).
+     */
+    private List<Object> sharedColumnValues(IvrSession session, int version) {
+        List<Object> params = new ArrayList<>();
+        params.add(session.getBrandId());
+        params.add(session.getCallerId());
+        params.add(session.getCurrentLevel().name());
+        params.add(session.getTargetLevel().name());
+        params.add(session.getStatus().name());
+        params.add(session.getPhase() != null ? session.getPhase().name() : SessionPhase.AUTHENTICATING.name());
+        params.add(null);  // collected_tokens: never persisted — values are sensitive (PINs, SSNs)
+        params.add(toJson(session.getValidatedTokens()));
+        params.add(toJson(session.getAttemptCounts()));
+        params.add(toJson(session.getActivePathIndexByLevel()));
+        params.add(toJson(session.getCandidateParties()));
+        params.add(toJson(session.getMatchedParty()));
+        params.add(toJson(session.getCustomerPreferences()));
+        params.add(session.getDisambiguationAttemptCount());
+        params.add(version);
+        params.add(session.getTransferredFrom());
+        params.add(toIso(session.getLockedUntil()));
+        return params;
     }
 
     @Override
@@ -235,25 +237,35 @@ public class SqliteSessionRepository implements SessionRepository {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private <K extends Enum<K>, V> Map<K, V> fromJsonEnumMap(String json, Class<K> keyType, Class<V> valueType) {
-        if (json == null || json.isEmpty()) return new EnumMap<>(keyType);
-        try {
-            return (Map<K, V>) mapper.readValue(json,
-                mapper.getTypeFactory().constructMapType(EnumMap.class, keyType, valueType));
-        } catch (IOException e) {
-            throw new SessionSerializationException("Failed to deserialize map", e);
-        }
+        JavaType type = mapper.getTypeFactory().constructMapType(EnumMap.class, keyType, valueType);
+        return readJson(json, type, () -> new EnumMap<>(keyType));
     }
 
-    @SuppressWarnings("unchecked")
     private <T extends Enum<T>> Set<T> fromJsonEnumSet(String json, Class<T> elementType) {
-        if (json == null || json.isEmpty()) return EnumSet.noneOf(elementType);
+        JavaType type = mapper.getTypeFactory().constructCollectionType(EnumSet.class, elementType);
+        return readJson(json, type, () -> EnumSet.noneOf(elementType));
+    }
+
+    private List<Party> fromJsonPartyList(String json) {
+        JavaType type = mapper.getTypeFactory().constructCollectionType(List.class, Party.class);
+        return readJson(json, type, ArrayList::new);
+    }
+
+    private <T> T fromJsonSingle(String json, Class<T> clazz) {
+        return readJson(json, mapper.getTypeFactory().constructType(clazz), () -> null);
+    }
+
+    /**
+     * Deserializes a JSON column into the given {@link JavaType}, returning {@code emptyValue} for a
+     * null/blank column. Any Jackson failure is surfaced as a {@link SessionSerializationException}.
+     */
+    private <T> T readJson(String json, JavaType type, Supplier<T> emptyValue) {
+        if (json == null || json.isEmpty()) return emptyValue.get();
         try {
-            return (Set<T>) mapper.readValue(json,
-                mapper.getTypeFactory().constructCollectionType(EnumSet.class, elementType));
+            return mapper.readValue(json, type);
         } catch (IOException e) {
-            throw new SessionSerializationException("Failed to deserialize enum set", e);
+            throw new SessionSerializationException("Failed to deserialize " + type, e);
         }
     }
 
@@ -263,24 +275,5 @@ public class SqliteSessionRepository implements SessionRepository {
 
     private static Instant fromIso(String iso) {
         return iso != null ? Instant.parse(iso) : null;
-    }
-
-    private List<Party> fromJsonPartyList(String json) {
-        if (json == null || json.isEmpty()) return new ArrayList<>();
-        try {
-            return mapper.readValue(json,
-                mapper.getTypeFactory().constructCollectionType(List.class, Party.class));
-        } catch (IOException e) {
-            throw new SessionSerializationException("Failed to deserialize party list", e);
-        }
-    }
-
-    private <T> T fromJsonSingle(String json, Class<T> clazz) {
-        if (json == null || json.isEmpty()) return null;
-        try {
-            return mapper.readValue(json, clazz);
-        } catch (IOException e) {
-            throw new SessionSerializationException("Failed to deserialize " + clazz.getSimpleName(), e);
-        }
     }
 }

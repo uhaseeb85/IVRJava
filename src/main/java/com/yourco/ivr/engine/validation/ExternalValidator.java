@@ -4,6 +4,7 @@ import com.yourco.ivr.domain.IvrSession;
 import com.yourco.ivr.domain.Party;
 import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.engine.PartyTokenFields;
 import com.yourco.ivr.lookup.LookupRequest;
 import com.yourco.ivr.lookup.LookupResult;
 import com.yourco.ivr.lookup.LookupServiceRegistry;
@@ -20,9 +21,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
-import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -42,8 +40,6 @@ public class ExternalValidator {
     private final VerificationBindings verificationBindings;
     private final BrandRulesRegistry rulesRegistry;
 
-    private final Map<TokenType, Function<Party, String>> partyFieldMap;
-
     public ExternalValidator(TokenValidatorRegistry validatorRegistry,
                              LookupServiceRegistry lookupRegistry,
                              VerificationBindings verificationBindings,
@@ -52,16 +48,6 @@ public class ExternalValidator {
         this.lookupRegistry = lookupRegistry;
         this.verificationBindings = verificationBindings;
         this.rulesRegistry = rulesRegistry;
-        this.partyFieldMap = buildPartyFieldMap();
-    }
-
-    private static Map<TokenType, Function<Party, String>> buildPartyFieldMap() {
-        Map<TokenType, Function<Party, String>> map = new LinkedHashMap<>();
-        map.put(TokenType.ACCOUNT_NUMBER, Party::getAccountNumber);
-        map.put(TokenType.DATE_OF_BIRTH, Party::getDateOfBirth);
-        map.put(TokenType.SSN_LAST4, Party::getSsnLast4);
-        map.put(TokenType.CARD_LAST4, Party::getCardLast4);
-        return Collections.unmodifiableMap(map);
     }
 
     public ValidationResult validate(IvrSession session, TokenType tokenType, String tokenValue) {
@@ -98,7 +84,7 @@ public class ExternalValidator {
         Party party = session.getMatchedParty();
         if (party == null) return ValidationResult.ok();
 
-        Function<Party, String> extractor = partyFieldMap.get(tokenType);
+        Function<Party, String> extractor = PartyTokenFields.FIELD_ACCESSORS.get(tokenType);
         if (extractor == null) return ValidationResult.ok();
 
         String expectedValue = extractor.apply(party);

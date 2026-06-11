@@ -24,33 +24,44 @@ public class TokenSlotResolver {
         this.activePathResolver = activePathResolver;
     }
 
+    /**
+     * Resolves a submitted token to the required slot it satisfies as a backup, skipping slots
+     * already validated. Returns {@code submittedType} unchanged if it is not a backup for any
+     * unfilled slot.
+     */
     public TokenType resolveBackupToken(IvrSession session, BrandAuthConfig config, TokenType submittedType) {
-        ActivePath ap = activePathResolver.apply(session, config);
-        TokenPath activePath = ap.path();
-        if (activePath == null) return submittedType;
-        if (activePath.getBackupTokens() != null) {
-            for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
-                TokenType required = entry.getKey();
-                List<TokenType> backups = entry.getValue();
-                if (!session.getValidatedTokens().contains(required) && backups.contains(submittedType)) {
-                    return required;
-                }
-            }
-        }
-        return submittedType;
+        TokenPath activePath = activePathResolver.apply(session, config).path();
+        return findSlotForBackup(activePath, submittedType, session.getValidatedTokens());
     }
 
+    /**
+     * Resolves a submitted token to the required slot it backs, regardless of whether that slot is
+     * already validated. Returns {@code submittedType} unchanged if it backs no slot.
+     */
     public TokenType findRequiredTokenForSlot(IvrSession session,
                                                 BrandAuthConfig config,
                                                 TokenType submittedType) {
-        ActivePath ap = activePathResolver.apply(session, config);
-        TokenPath activePath = ap.path();
-        if (activePath == null) return submittedType;
-        if (activePath.getBackupTokens() != null) {
-            for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
-                if (entry.getValue().contains(submittedType)) {
-                    return entry.getKey();
-                }
+        TokenPath activePath = activePathResolver.apply(session, config).path();
+        return findSlotForBackup(activePath, submittedType, null);
+    }
+
+    /**
+     * Finds the required-token slot for which {@code submittedType} is configured as a backup.
+     * When {@code validatedToSkip} is non-null, slots it contains are ignored (already filled).
+     * Returns {@code submittedType} when no matching slot exists.
+     */
+    private static TokenType findSlotForBackup(TokenPath activePath, TokenType submittedType,
+                                               Set<TokenType> validatedToSkip) {
+        if (activePath == null || activePath.getBackupTokens() == null) {
+            return submittedType;
+        }
+        for (Map.Entry<TokenType, List<TokenType>> entry : activePath.getBackupTokens().entrySet()) {
+            TokenType required = entry.getKey();
+            if (validatedToSkip != null && validatedToSkip.contains(required)) {
+                continue;
+            }
+            if (entry.getValue().contains(submittedType)) {
+                return required;
             }
         }
         return submittedType;

@@ -29,7 +29,7 @@ import java.util.stream.Collectors;
  *       {@link com.yourco.ivr.domain.SessionPhase#AUTHENTICATING} and authentication begins.</li>
  * </ol>
  *
- * <p>Token-to-field mapping is fixed at construction ({@link #defaultTokenFieldMap}) and
+ * <p>Token-to-field mapping is shared via {@link PartyTokenFields#FIELD_ACCESSORS} and
  * covers the four PII fields most useful for disambiguation:
  * {@code ACCOUNT_NUMBER}, {@code DATE_OF_BIRTH}, {@code SSN_LAST4}, {@code CARD_LAST4}.
  *
@@ -50,8 +50,6 @@ public class DisambiguationEngine {
      */
     private static final int MAX_DISAMBIGUATION_TOKENS = 3;
 
-    private final Map<TokenType, Function<Party, String>> tokenFieldMap;
-
     /** Fixed pre-filter rule chain, applied in order at the start of disambiguation. */
     private final List<DisambiguationRule> rules;
 
@@ -62,17 +60,7 @@ public class DisambiguationEngine {
                                  CustomerPreferenceProvider preferenceProvider) {
         this.sessionRepo = sessionRepo;
         this.preferenceProvider = preferenceProvider;
-        this.tokenFieldMap = defaultTokenFieldMap();
         this.rules = Arrays.asList(new ExcludeInactiveRule(), new PrimaryAniRule());
-    }
-
-    private static Map<TokenType, Function<Party, String>> defaultTokenFieldMap() {
-        Map<TokenType, Function<Party, String>> map = new LinkedHashMap<>();
-        map.put(TokenType.ACCOUNT_NUMBER, Party::getAccountNumber);
-        map.put(TokenType.DATE_OF_BIRTH, Party::getDateOfBirth);
-        map.put(TokenType.SSN_LAST4, Party::getSsnLast4);
-        map.put(TokenType.CARD_LAST4, Party::getCardLast4);
-        return Collections.unmodifiableMap(map);
     }
 
     /**
@@ -127,7 +115,7 @@ public class DisambiguationEngine {
     public AuthenticateResponse handleToken(IvrSession session, TokenType tokenType,
                                         String tokenValue) {
         // 1. Verify token is usable for disambiguation
-        if (!tokenFieldMap.containsKey(tokenType)) {
+        if (!PartyTokenFields.FIELD_ACCESSORS.containsKey(tokenType)) {
             return buildResponse(session,
                 "The provided token type cannot be used for disambiguation. Please try another.",
                 selectDisambiguationToken(session.getCandidateParties()));
@@ -140,7 +128,7 @@ public class DisambiguationEngine {
 
         // 3. Match token value against remaining parties
         List<Party> remaining = session.getCandidateParties();
-        Function<Party, String> extractor = tokenFieldMap.get(tokenType);
+        Function<Party, String> extractor = PartyTokenFields.FIELD_ACCESSORS.get(tokenType);
 
         List<Party> matching = remaining.stream()
             .filter(p -> tokenValue.equals(extractor.apply(p)))
@@ -200,7 +188,7 @@ public class DisambiguationEngine {
         TokenType bestToken = null;
         int bestMaxGroupSize = Integer.MAX_VALUE;
 
-        for (Map.Entry<TokenType, Function<Party, String>> entry : tokenFieldMap.entrySet()) {
+        for (Map.Entry<TokenType, Function<Party, String>> entry : PartyTokenFields.FIELD_ACCESSORS.entrySet()) {
             TokenType tokenType = entry.getKey();
             Function<Party, String> extractor = entry.getValue();
 

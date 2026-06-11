@@ -118,13 +118,8 @@ public class AuthenticateService {
             if (session.getPhase() != SessionPhase.AUTHENTICATING) {
                 return disResp;  // still narrowing parties — return the disambiguation prompt
             }
-            // Disambiguation resolved to a single party. Identification-only brands with
-            // NONE-level rules collect the provided identity tokens; everything else proceeds
-            // straight to progress evaluation. (Normal brands do not consume initialTokens here.)
-            if (config.isIdentificationOnly() && hasNoneRule(config) && hasInitialTokens(req)) {
-                return processInitialTokens(session, config, req.getInitialTokens());
-            }
-            return engine.onPartyResolved(session, config);
+            // Disambiguation resolved to a single party; proceed as a resolved single-party session.
+            return proceedAfterPartyResolved(session, config, req);
         }
 
         // Single party — load preferences
@@ -134,15 +129,21 @@ public class AuthenticateService {
         session.setCustomerPreferences(prefs);
         sessionRepo.save(session);
 
-        // Identification-only brands collect tokens only when NONE-level rules define them.
-        if (config.isIdentificationOnly()) {
-            return hasNoneRule(config) && hasInitialTokens(req)
-                ? processInitialTokens(session, config, req.getInitialTokens())
-                : engine.onPartyResolved(session, config);
-        }
+        return proceedAfterPartyResolved(session, config, req);
+    }
 
-        // Standard brands process any initial tokens provided at session start.
-        return hasInitialTokens(req)
+    /**
+     * Continues a session whose party is now resolved. Submits any {@code initialTokens} when the
+     * brand should consume them at start — standard brands always do; identification-only brands
+     * only when they define NONE-level rules — otherwise hands off to progress evaluation.
+     */
+    private AuthenticateResponse proceedAfterPartyResolved(IvrSession session, BrandAuthConfig config,
+                                                           StartAuthenticateRequest req) {
+        boolean consumeInitialTokens = config.isIdentificationOnly()
+            ? hasNoneRule(config) && hasInitialTokens(req)
+            : hasInitialTokens(req);
+
+        return consumeInitialTokens
             ? processInitialTokens(session, config, req.getInitialTokens())
             : engine.onPartyResolved(session, config);
     }
