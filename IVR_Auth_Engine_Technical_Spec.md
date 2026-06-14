@@ -1,6 +1,6 @@
 # IVR Token Authentication Engine
 ### Multi-Brand | Progressive Auth Levels | Rule-Driven
-**Technical Implementation Document — Version 2.0 | Java 8 | Spring Boot 2.7.x**
+**Technical Implementation Document — Version 2.1 | Java 8 | Spring Boot 2.7.x**
 
 ---
 
@@ -31,7 +31,7 @@ This document specifies the design and implementation of a multi-brand IVR Token
 
 - **Multi-brand rule isolation** — each brand carries its own level definitions, token paths, retry limits, and lockout policies
 - **Shared token validators** — a global registry of validators (OTP, PIN, account number, voice, etc.) any brand can reference
-- **Backend verification** — a two-stage pipeline (format gate + optional backend lookup) verifies tokens against systems of record via pluggable `TokenLookupService`
+- **Backend verification** — a staged pipeline (format gate → optional party-field check for identification-only brands → optional backend lookup) verifies tokens against systems of record via pluggable `TokenLookupService`
 - **Progressive authentication** — a session starts at `NONE`, reaches targeted levels step by step, and can escalate further without restarting
 - **Identification-only mode** — brands that only need to identify the caller (no auth tokens) can set `identificationOnly: true`
 - **Declarative rules** — all brand behaviour is driven by JSON config; no logic changes require code deployments
@@ -41,8 +41,9 @@ This document specifies the design and implementation of a multi-brand IVR Token
 
 | Layer | Responsibility |
 |---|---|
-| REST API | Accepts IVR platform calls; maps HTTP to session commands |
-| Auth Engine | Core state machine; evaluates rules, drives path progression, runs backend verification |
+| REST API | Accepts IVR platform calls; classifies each payload into a `RequestAction` and maps HTTP to session commands |
+| Auth Engine | Core state machine; drives path progression and the token submission lifecycle. Delegates path navigation, slot resolution, preference filtering, validation, and response building to focused sub-components |
+| Engine sub-components | `ActivePathManager` (path resolution/switching), `TokenSlotResolver` (backup→slot mapping + accepted tokens), `PreferenceFilter` (blocked-token skipping), `ExternalValidator` (two/three-stage validation), `ResponseAssembler` (response construction), `PromptResolver` (caller-facing prompt text) |
 | Rules Registry | Loads and serves brand-specific `BrandAuthConfig` objects from external `./config/brands/` directory |
 | Validator Registry | Maps token types to their `TokenValidator` implementations |
 | Lookup Service Registry | Maps service IDs to `TokenLookupService` implementations for backend verification |
@@ -59,9 +60,19 @@ This document specifies the design and implementation of a multi-brand IVR Token
 ### 2.1 Core Enums
 
 ```java
-// TokenType.java
+// TokenType.java — each constant carries a human-readable display name used in IVR prompts
 public enum TokenType {
-    ACCOUNT_NUMBER, PIN, OTP, SSN_LAST4, VOICE_PRINT, DATE_OF_BIRTH, CARD_LAST4
+    ACCOUNT_NUMBER("account number"),
+    PIN("PIN"),
+    OTP("one-time passcode"),
+    SSN_LAST4("last 4 digits of your SSN"),
+    VOICE_PRINT("voice verification"),
+    DATE_OF_BIRTH("date of birth"),
+    CARD_LAST4("last 4 digits of your card");
+
+    private final String displayName;
+    TokenType(String displayName) { this.displayName = displayName; }
+    public String getDisplayName() { return displayName; }
 }
 
 // AuthLevel.java  — rank drives upgrade comparisons
@@ -118,7 +129,12 @@ public class TokenPath {
 }
 ```
 
-**Identification-only brands.** When `identificationOnly = true`, the brand's goal is identification rather than authentication. Party lookup and disambiguation run unchanged, but the moment a single party is resolved the engine finalizes the session via `AuthEngine.onPartyResolved()` → `finalizeIdentification()` instead of collecting auth tokens: it sets `currentLevel = NONE`, `status = AUTHENTICATED`, and returns the `matchedPartyId`. `levelRules` are not required for such brands (`BrandService.validate()` relaxes the check), and `escalate()` is rejected with an `IllegalArgumentException` (HTTP 400).
+**Identification-only brands.** When `identificationOnly = true`, the brand's goal is identification rather than authentication. Party lookup and disambiguation run unchanged. Two sub-modes are supported:
+
+- **No `NONE` rule (pure identify-and-stop).** The moment a single party is resolved, the engine finalizes the session via `AuthEngine.onPartyResolved()` → `finalizeIdentification()` without collecting any tokens: it sets `currentLevel = NONE`, `targetLevel = NONE`, `status = AUTHENTICATED`, and returns the `matchedPartyId`.
+- **With a `NONE`-level rule (identification-token collection).** The brand may define a `levelRules` entry keyed `NONE` whose paths list identification tokens (e.g. `ACCOUNT_NUMBER` + `PIN`). On party resolution the engine runs normal progress evaluation against the `NONE` rule, prompting for each token. These tokens are verified against the matched `Party`'s fields by `ExternalValidator` (see §4.4). Authentication completes (`status = AUTHENTICATED`, `currentLevel` stays `NONE`) once the `NONE` path is satisfied. Any `initialTokens` are consumed at start only when a `NONE` rule is present.
+
+For identification-only brands the `start` request always forces `targetLevel = NONE`, `levelRules` are not strictly required (`BrandService.validate()` relaxes the check), and `escalate()` is rejected with an `IllegalArgumentException` (HTTP 400).
 
 ### 2.3 Session State
 
@@ -265,6 +281,33 @@ Each brand's rule set lives in its own JSON file in the external directory (`./c
 }
 ```
 
+### 3.3 Identification-Only Brand with a `NONE` Rule
+
+An identification-only brand may carry a single `NONE`-level rule whose tokens are verified against the matched party's record (see §2.2 and §4.4). Authentication completes at `NONE` level once the path is satisfied.
+
+```json
+{
+  "brandId": "ID_ONLY_BRAND",
+  "identificationOnly": true,
+  "levelRules": {
+    "NONE": {
+      "paths": [
+        {
+          "pathIndex": 0,
+          "description": "Account + PIN identification",
+          "requiredTokens": ["ACCOUNT_NUMBER", "PIN"],
+          "backupTokens": { "PIN": ["SSN_LAST4"] }
+        }
+      ],
+      "maxRetriesPerToken": 3,
+      "lockoutSeconds": 0
+    }
+  }
+}
+```
+
+A pure identify-and-stop brand simply omits `levelRules` entirely (set `identificationOnly: true` with no rules); the caller is identified on party resolution with no token collection.
+
 ---
 
 ## 4. Auth Engine — Core Logic
@@ -273,123 +316,88 @@ The `AuthEngine` is the heart of the system. It is stateless itself; all state i
 
 ### 4.1 AuthEngine.java
 
+As of v2.1 the engine has been decomposed: `AuthEngine` orchestrates the token lifecycle and delegates the mechanics to focused collaborators. It is still stateless.
+
 Key design points in the actual implementation:
 
-- **7 constructor dependencies**: `BrandRulesRegistry`, `TokenValidatorRegistry`, `LookupServiceRegistry`, `VerificationBindings`, `SessionRepository`, `PromptResolver`, `DisambiguationEngine`
-- **Session status `REDIRECT_TO_AGENT`** replaces the former `LOCKED` — the session redirects to a live agent for the configured `lockoutSeconds` duration
-- **Two-stage validation pipeline**: format check (`TokenValidator`) → optional backend verification (`TokenLookupService`)
+- **7 constructor dependencies**: `BrandRulesRegistry`, `SessionRepository`, `PromptResolver`, `DisambiguationEngine`, `ActivePathManager`, `TokenSlotResolver`, `ExternalValidator`
+- **Delegated collaborators**:
+  - `ActivePathManager` — resolves the active `ActivePath` (rule + index + path), switches to fallback paths, advances/fails on exhaustion, and handles redirect-to-agent
+  - `TokenSlotResolver` — maps a submitted backup token to its required slot (`resolveBackupToken` / `findRequiredTokenForSlot`), computes `findNextRequired`, and builds the `acceptedTokens` list
+  - `PreferenceFilter` — static `isBlocked()` / `findAlternativeToken()` helpers for blocked-token skipping
+  - `ExternalValidator` — runs the format → (party-field) → backend validation pipeline (see §4.4)
+  - `ResponseAssembler` — static factory methods (`collecting`, `authenticated`, `failed`, `redirectToAgent`) that build `AuthenticateResponse` objects from a session
+- **Session status `REDIRECT_TO_AGENT`** replaces the former `LOCKED` — the session redirects to a live agent for the configured `lockoutSeconds` duration; once `lockedUntil` elapses the next submission auto-resets the session to `COLLECTING`
+- **Terminal short-circuit**: once a session is `AUTHENTICATED` or `FAILED`, further token submissions return the current snapshot via `AuthenticateResponse.fromSession()` without mutation
 - **Processing log**: every token submission returns a `processingLog` (list of `ProcessingEvent`) narrating the engine's decisions
-- **Wrong-type guard**: submitting a token type not in the accepted list decrements the required slot's retry budget but does NOT trigger a path switch — this prevents probing for valid token types
+- **Wrong-type guard**: submitting a token type not in the accepted list decrements the required slot's retry budget but does NOT trigger a path switch — this prevents probing for valid token types. Exhausting retries on a wrong type redirects straight to an agent
 - **Backup token resolution**: submitted backup tokens (e.g. SSN_LAST4 for PIN) are mapped to the required slot so session state always records the canonical type
 - **Failure tracking at required-slot level**: retry counts accumulate against the required-token slot (PIN), not the submitted backup type. Cycling across backups (PIN → SSN_LAST4 → DATE_OF_BIRTH) does not bypass the retry limit
-- **Customer preference filtering**: `isBlocked()` and `findAlternativeToken()` automatically skip blocked tokens and try backup alternatives before advancing to the next path
+- **Customer preference filtering**: `PreferenceFilter.isBlocked()` and `findAlternativeToken()` automatically skip blocked tokens and try backup alternatives before advancing to the next path
 - **`acceptedTokens` in responses**: each response carries the list of token types the client may submit at the current step (required token + unblocked backups)
+
+`TokenSlotResolver` is wired in `EngineConfig` because it needs a method-reference to `ActivePathManager.resolveActivePath` (a `BiFunction<IvrSession, BrandAuthConfig, ActivePath>`).
 
 ```java
 @Service
 public class AuthEngine {
 
-    private static final Logger log = LoggerFactory.getLogger(AuthEngine.class);
-
     private final BrandRulesRegistry rulesRegistry;
-    private final TokenValidatorRegistry validatorRegistry;
-    private final LookupServiceRegistry lookupRegistry;
-    private final VerificationBindings verificationBindings;
     private final SessionRepository sessionRepo;
     private final PromptResolver promptResolver;
     private final DisambiguationEngine disambiguationEngine;
+    private final ActivePathManager pathManager;
+    private final TokenSlotResolver slotResolver;
+    private final ExternalValidator externalValidator;
 
     public AuthEngine(BrandRulesRegistry rulesRegistry,
-                      TokenValidatorRegistry validatorRegistry,
-                      LookupServiceRegistry lookupRegistry,
-                      VerificationBindings verificationBindings,
                       SessionRepository sessionRepo,
                       PromptResolver promptResolver,
-                      DisambiguationEngine disambiguationEngine) {
+                      DisambiguationEngine disambiguationEngine,
+                      ActivePathManager pathManager,
+                      TokenSlotResolver slotResolver,
+                      ExternalValidator externalValidator) {
         this.rulesRegistry = rulesRegistry;
-        this.validatorRegistry = validatorRegistry;
-        this.lookupRegistry = lookupRegistry;
-        this.verificationBindings = verificationBindings;
         this.sessionRepo = sessionRepo;
         this.promptResolver = promptResolver;
         this.disambiguationEngine = disambiguationEngine;
+        this.pathManager = pathManager;
+        this.slotResolver = slotResolver;
+        this.externalValidator = externalValidator;
     }
 
-    public AuthenticateResponse submitTokenWithCaller(String sessionId,
-                                        TokenType tokenType,
-                                        String tokenValue,
-                                        String callerId) {
+    public AuthenticateResponse submitTokenWithCaller(String sessionId, TokenType tokenType,
+                                                      String tokenValue, String callerId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
+        resetExpiredRedirectOrThrow(session);   // REDIRECT_TO_AGENT guard + auto-reset
+        verifyCallerOwnership(session, callerId);
 
-        // Redirect-to-agent guard: auto-reset once the delay window has elapsed
-        if (session.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
-            if (session.getLockedUntil() != null
-                    && Instant.now().isAfter(session.getLockedUntil())) {
-                session.setStatus(SessionStatus.COLLECTING);
-                session.getAttemptCounts().clear();
-                session.setLockedUntil(null);
-                sessionRepo.save(session);
-            } else {
-                throw new SessionLockedException(sessionId, session.getLockedUntil());
-            }
-        }
-
-        // Optional session ownership validation
-        if (callerId != null && !callerId.equals(session.getCallerId())) {
-            throw new SessionNotFoundException(sessionId);
+        if (isTerminal(session)) {               // AUTHENTICATED / FAILED → return snapshot
+            return AuthenticateResponse.fromSession(session);
         }
 
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+        session.getCollectedTokens().put(tokenType, tokenValue);  // value never logged/persisted
 
-        // Route to disambiguation if session is still resolving parties
         if (session.getPhase() == SessionPhase.DISAMBIGUATION) {
-            AuthenticateResponse disResp = disambiguationEngine.handleToken(
-                session, tokenType, tokenValue);
-            if (session.getPhase() == SessionPhase.AUTHENTICATING) {
-                return onPartyResolved(session, config);
-            }
-            return disResp;
+            return handleDisambiguationPhase(session, config, tokenType, tokenValue);
         }
-
-        // ── Build per-request processing log ────────────────────────────────
-        List<ProcessingEvent> procLog = new ArrayList<>();
-        // ... log entries for brand, target, active path, validated tokens ...
-
-        // Store collected token (value never logged)
-        session.getCollectedTokens().put(tokenType, tokenValue);
-
-        // Wrong-type guard: reject token types not accepted at the current step.
-        // Exhausting retries on wrong-type locks the session (no path switch).
-        if (nextRequired != null) {
-            List<TokenType> acceptedNow = buildAcceptedTokens(session, activePathCtx, nextRequired, nextRequired);
-            if (!acceptedNow.contains(tokenType)) {
-                return handleFailure(session, config, nextRequired, procLog, false);
-            }
-        }
-
-        // 1. Two-stage validation (format + optional backend)
-        ValidationResult validationResult = validateExternally(session, tokenType, tokenValue);
-
-        if (!valid) {
-            return handleFailure(session, config, tokenType, procLog, true);
-        }
-
-        // 2. Map backup token to required token if applicable
-        TokenType resolvedToken = resolveBackupToken(session, config, tokenType);
-        session.getValidatedTokens().add(resolvedToken);
-        session.getAttemptCounts().remove(tokenType);
-
-        // 3. Evaluate progress toward targetLevel
-        AuthenticateResponse evalResp = evaluateProgress(session, config);
-        evalResp.setProcessingLog(procLog);
-        return evalResp;
+        return processTokenInAuthPhase(session, config, tokenType, tokenValue);
     }
 
+    // processTokenInAuthPhase(): build processing log → wrong-type guard →
+    //   externalValidator.validate() → on PASS: slotResolver.resolveBackupToken(),
+    //   add to validatedTokens, clear attempt counts → evaluateProgress().
+    //   On FAIL: handleValidationFailure() (re-prompt, then fallback path, then agent).
+
     public AuthenticateResponse onPartyResolved(IvrSession session, BrandAuthConfig config) {
-        if (config.isIdentificationOnly()) {
-            return finalizeIdentification(session);
+        if (config.isIdentificationOnly() && !hasNoneRule(config)) {
+            return finalizeIdentification(session);          // pure identify-and-stop
         }
-        return evaluateProgress(session, config);
+        if (config.isIdentificationOnly()) {
+            markCollectedTokensSatisfyingNoneRule(session, config);
+        }
+        return evaluateProgress(session, config);            // NONE-rule or standard auth
     }
 }
 ```
@@ -398,148 +406,118 @@ public class AuthEngine {
 
 ```java
 public AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
-    LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
-    int activePathIdx = session.getActivePathIndexByLevel()
-        .getOrDefault(session.getTargetLevel(), 0);
-
-    if (activePathIdx >= rule.getPaths().size()) {
-        session.setStatus(SessionStatus.FAILED);
-        sessionRepo.save(session);
-        return baseResponse(session).status(SessionStatus.FAILED)
-            .prompt("Authentication failed. All retry attempts exhausted.").build();
+    ActivePath active = pathManager.resolveActivePath(session, config);
+    if (active.rule() == null) {
+        throw new IllegalArgumentException("No rule defined for level: " + session.getTargetLevel());
+    }
+    if (active.path() == null) {  // active index points past the last fallback path
+        return failSession(session, "Authentication failed. All retry attempts exhausted.");
     }
 
-    TokenPath activePath = rule.getPaths().get(activePathIdx);
+    LevelRule rule = active.rule();
+    TokenPath activePath = active.path();
 
-    // Check if active path is fully satisfied
-    boolean pathComplete = activePath.getRequiredTokens().stream()
-        .allMatch(t -> session.getValidatedTokens().contains(t));
-
-    if (pathComplete) {
-        session.setCurrentLevel(session.getTargetLevel());
-        session.setStatus(SessionStatus.AUTHENTICATED);
-        sessionRepo.save(session);
-        return baseResponse(session).status(SessionStatus.AUTHENTICATED)
-            .prompt("Authentication successful.").build();
+    // Next missing token on this path (null = path complete)
+    TokenType nextToken = TokenSlotResolver.findNextRequired(session.getValidatedTokens(), activePath);
+    if (nextToken == null) {
+        return completeAuthentication(session, config);   // AUTHENTICATED (or finalizeIdentification)
     }
-
-    // Find next missing token on this path
-    TokenType nextToken = activePath.getRequiredTokens().stream()
-        .filter(t -> !session.getValidatedTokens().contains(t))
-        .findFirst().orElseThrow();
 
     TokenType originalRequired = nextToken;
 
     // Apply customer preference filtering
-    if (isBlocked(session, nextToken)) {
-        nextToken = findAlternativeToken(session, activePath, nextToken);
+    if (PreferenceFilter.isBlocked(session, nextToken)) {
+        nextToken = PreferenceFilter.findAlternativeToken(session, activePath, nextToken);
         if (nextToken == null) {
-            return advanceToNextPathOrFail(session, config, rule, activePathIdx);
+            return pathManager.advanceToNextPathOrFail(session, config, rule, active.index(),
+                this::evaluateProgress);
         }
     }
 
     session.setStatus(SessionStatus.COLLECTING);
     sessionRepo.save(session);
 
-    List<TokenType> acceptedTokens = buildAcceptedTokens(session, activePath, nextToken, originalRequired);
+    List<TokenType> acceptedTokens = slotResolver.buildAcceptedTokens(session, activePath,
+        nextToken, originalRequired, t -> PreferenceFilter.isBlocked(session, t));
     String prompt = promptResolver.resolvePrompt(nextToken, activePath, rule.getMaxRetriesFor(nextToken));
 
-    return baseResponse(session)
-        .status(SessionStatus.COLLECTING)
-        .nextRequiredToken(nextToken)
-        .remainingAttempts(rule.getMaxRetriesFor(nextToken))
-        .acceptedTokens(acceptedTokens)
-        .prompt(prompt)
-        .build();
+    return collecting(session, nextToken, acceptedTokens, rule.getMaxRetriesFor(nextToken), prompt);
 }
 ```
 
-### 4.3 handleFailure — with required-slot tracking
+`completeAuthentication()` sets `currentLevel = targetLevel` and `status = AUTHENTICATED` for standard brands; for an identification-only brand whose `targetLevel` is `NONE` it routes to `finalizeIdentification()` instead.
+
+### 4.3 Failure handling — with required-slot tracking
+
+Failure handling is split by cause. Both paths first call `recordAttemptOrExhaust()`, which charges the failed attempt against the **required slot** (via `TokenSlotResolver.findRequiredTokenForSlot`) and re-prompts while retries remain; it returns `null` once the limit is hit. The two callers then differ in terminal behavior:
+
+- **`handleValidationFailure`** (token format/backend rejected) — on exhaustion, tries `pathManager.switchToFallbackPath()`; if there is no next path, calls `pathManager.handleRedirectToAgent()`.
+- **`handleWrongTypeFailure`** (token type not accepted at this step) — on exhaustion, goes **straight** to `handleRedirectToAgent()`; a wrong type never switches paths.
 
 ```java
-private AuthenticateResponse handleFailure(IvrSession session,
-                                       BrandAuthConfig config,
-                                       TokenType tokenType,
-                                       List<ProcessingEvent> procLog,
-                                       boolean allowPathSwitch) {
-    LevelRule rule = config.getLevelRules().get(session.getTargetLevel());
-    Map<TokenType, Integer> counts = session.getAttemptCounts();
-
+private AuthenticateResponse recordAttemptOrExhaust(IvrSession session, BrandAuthConfig config,
+                                                    TokenType tokenType, List<ProcessingEvent> procLog) {
+    LevelRule rule = ActivePathManager.levelRule(config, session);
     // Track against the required-token slot, not the submitted backup type
-    TokenType requiredToken = findRequiredTokenForSlot(session, config, tokenType);
-    int attempts = counts.getOrDefault(requiredToken, 0) + 1;
-    counts.put(requiredToken, attempts);
-    int maxRetries = rule.getMaxRetriesFor(requiredToken);
-    int remaining = maxRetries - attempts;
-
+    TokenType requiredToken = slotResolver.findRequiredTokenForSlot(session, config, tokenType);
+    int remaining = recordFailedAttempt(session, rule, requiredToken, procLog);
     if (remaining > 0) {
-        // Still has retries — re-prompt
-        sessionRepo.save(session);
-        return baseResponse(session)
-            .status(SessionStatus.COLLECTING)
-            .nextRequiredToken(requiredToken)
-            .remainingAttempts(remaining)
-            .acceptedTokens(buildAcceptedTokens(...))
-            .prompt(promptResolver.resolvePrompt(requiredToken, activePath, remaining))
-            .build();
+        return repromptForSlot(session, rule, requiredToken, remaining, procLog);  // still COLLECTING
     }
+    return null;  // retries exhausted — caller decides terminal behavior
+}
 
-    if (allowPathSwitch) {
-        // Try advancing to next fallback path
-        int nextPathIdx = currentPathIdx + 1;
-        if (nextPathIdx < rule.getPaths().size()) {
-            session.getActivePathIndexByLevel().put(session.getTargetLevel(), nextPathIdx);
-            session.getAttemptCounts().clear();
-            sessionRepo.save(session);
-            return evaluateProgress(session, config);
-        }
-    }
+private AuthenticateResponse handleValidationFailure(IvrSession session, BrandAuthConfig config,
+                                                     TokenType tokenType, List<ProcessingEvent> procLog) {
+    AuthenticateResponse reprompt = recordAttemptOrExhaust(session, config, tokenType, procLog);
+    if (reprompt != null) return reprompt;
 
-    // All paths exhausted — redirect to agent
-    session.setStatus(SessionStatus.REDIRECT_TO_AGENT);
-    session.setLockedUntil(Instant.now().plusSeconds(rule.getLockoutSeconds()));
-    sessionRepo.save(session);
-    return baseResponse(session)
-        .status(SessionStatus.REDIRECT_TO_AGENT)
-        .lockedUntil(session.getLockedUntil())
-        .prompt("Authentication failed. Redirecting to agent.")
-        .build();
+    LevelRule rule = ActivePathManager.levelRule(config, session);
+    AuthenticateResponse switched = pathManager.switchToFallbackPath(session, config, rule, procLog,
+        this::evaluateProgress);
+    if (switched != null) return switched;
+    return pathManager.handleRedirectToAgent(session, rule, procLog);  // no path left → agent
 }
 ```
 
-### 4.4 Two-stage validation pipeline
+`ActivePathManager.handleRedirectToAgent()` sets `status = REDIRECT_TO_AGENT` and `lockedUntil = now + rule.lockoutSeconds`. `switchToFallbackPath()` advances the active path index, clears attempt counts, retains any tokens already validated that the new path also needs, and re-evaluates.
+
+### 4.4 Validation pipeline — `ExternalValidator`
+
+Validation is owned by the standalone `ExternalValidator` `@Component` (constructor deps: `TokenValidatorRegistry`, `LookupServiceRegistry`, `VerificationBindings`, `BrandRulesRegistry`). It runs up to three stages, short-circuiting on the first failure:
+
+1. **Format gate** (always) — cheap, in-process check via `TokenValidatorRegistry.resolve(brandId, type)`.
+2. **Party-field verification** (identification-only brands only) — compares the submitted value against the matched `Party`'s corresponding field using `PartyTokenFields.FIELD_ACCESSORS`. A mismatch fails with `VERIFICATION_FAILED`. If the brand is not identification-only, the party has no such field, or the field is null, this stage is skipped (passes).
+3. **Backend gate** (only if a `VerificationBinding` exists for the token) — calls the bound `TokenLookupService`; on an exception, behavior depends on the binding's `failClosed` flag.
 
 ```java
-private ValidationResult validateExternally(IvrSession session,
-                                            TokenType tokenType,
-                                            String tokenValue) {
-    // Stage 1 — format gate (cheap, no network)
-    TokenValidator validator = validatorRegistry.resolve(session.getBrandId(), tokenType);
-    TokenValidationContext ctx = new TokenValidationContext(
-        tokenType, tokenValue, session.getCallerId(),
-        session.getCollectedTokens(), session.getBrandId());
-    ValidationResult formatResult = validator.validate(ctx);
-    if (!formatResult.isValid()) return formatResult;
+@Component
+public class ExternalValidator {
 
-    // Stage 2 — backend verification (only if bound to a service)
-    VerificationBinding binding = verificationBindings.bindingFor(session.getBrandId(), tokenType);
-    if (binding == null) return ValidationResult.ok();
+    public ValidationResult validate(IvrSession session, TokenType tokenType, String tokenValue) {
+        // Stage 1 — format gate (cheap, no network)
+        TokenValidator validator = validatorRegistry.resolve(session.getBrandId(), tokenType);
+        ValidationResult formatResult = validator.validate(new TokenValidationContext(
+            tokenType, tokenValue, session.getCallerId(),
+            session.getCollectedTokens(), session.getBrandId()));
+        if (!formatResult.isValid()) return formatResult;
 
-    try {
-        TokenLookupService svc = lookupRegistry.get(binding.getServiceId());
-        LookupResult r = svc.verify(new LookupRequest(...));
-        return r.isVerified()
-            ? ValidationResult.ok()
-            : ValidationResult.fail(r.getCode() != null
-                ? r.getCode() : ValidationErrorCode.VERIFICATION_FAILED);
-    } catch (RuntimeException ex) {
-        log.warn("LOOKUP ... UNAVAILABLE failClosed={}", binding.isFailClosed());
-        return binding.isFailClosed()
-            ? ValidationResult.fail(ValidationErrorCode.VERIFICATION_UNAVAILABLE)
-            : ValidationResult.ok();
+        // Stage 1b — party-field verification for identification-only brands
+        BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
+        if (config.isIdentificationOnly()) {
+            ValidationResult partyResult = verifyAgainstParty(session, tokenType, tokenValue);
+            if (!partyResult.isValid()) return partyResult;
+        }
+
+        // Stage 2 — backend verification (only if bound to a service)
+        VerificationBinding binding = verificationBindings.bindingFor(session.getBrandId(), tokenType);
+        if (binding == null) return ValidationResult.ok();
+        return verifyAgainstBackend(session, tokenType, tokenValue, binding);  // failClosed-aware
     }
 }
 ```
+
+`PartyTokenFields` (`com.yourco.ivr.engine`) is the single source of truth mapping a `TokenType` to its `Party` field accessor — `ACCOUNT_NUMBER`, `DATE_OF_BIRTH`, `SSN_LAST4`, `CARD_LAST4`. It is shared by both `ExternalValidator` (party-field stage) and `DisambiguationEngine` (token selection/matching).
 
 ### 4.5 escalate — with identification-only guard
 
@@ -561,16 +539,15 @@ public AuthenticateResponse escalate(String sessionId, AuthLevel newTarget) {
 
 ### 4.6 Identification-only finalization
 
+`finalizeIdentification()` is reached only on the **pure** identify-and-stop path — an identification-only brand with no `NONE` rule, via `onPartyResolved()` (§4.1). Brands that define a `NONE` rule instead flow through normal `evaluateProgress()` / `completeAuthentication()` (§4.2), which also calls `finalizeIdentification()` once the path completes.
+
 ```java
 private AuthenticateResponse finalizeIdentification(IvrSession session) {
     session.setCurrentLevel(AuthLevel.NONE);
     session.setTargetLevel(AuthLevel.NONE);
     session.setStatus(SessionStatus.AUTHENTICATED);
     sessionRepo.save(session);
-    return baseResponse(session)
-        .status(SessionStatus.AUTHENTICATED)
-        .prompt("Caller identified.")
-        .build();
+    return authenticated(session, "Caller identified.");   // ResponseAssembler factory
 }
 ```
 
@@ -611,7 +588,13 @@ public class ValidationResult {
 }
 
 public enum ValidationErrorCode {
-    INVALID, EXPIRED, NOT_FOUND, RATE_LIMITED, EXTERNAL_ERROR
+    INVALID,                  // fails format requirements (length, parse, blank)
+    EXPIRED,                  // e.g. OTP past its validity window
+    NOT_FOUND,                // value not found in backend system of record
+    RATE_LIMITED,             // backend rejected — too many attempts
+    EXTERNAL_ERROR,           // unexpected error calling the backend
+    VERIFICATION_FAILED,      // backend/party-field check ran but value did not match
+    VERIFICATION_UNAVAILABLE  // backend unreachable; behavior depends on failClosed
 }
 ```
 
@@ -869,11 +852,14 @@ public AuthenticateResponse transferSession(IvrSession session,
 | `GET /ivr/authenticate/{id}/status` | Poll current session state | For async IVR flows |
 | `DELETE /ivr/authenticate/{id}` | End session (hangup) | Cleanup only |
 
-**Discrimination logic:**
-- No `sessionId`, no `sourceSystemId` → START
-- No `sessionId`, has `sourceSystemId` → TRANSFER
-- Has `sessionId`, has `tokenType` → TOKEN
-- Has `sessionId`, no `tokenType`, has `targetLevel` → ESCALATE
+**Discrimination logic** is centralized in `RequestActionDiscriminator.classify()`, which returns a `RequestAction` enum (`START`, `TRANSFER`, `SUBMIT_TOKEN`, `ESCALATE`):
+- No `sessionId`, no `sourceSystemId` → `START`
+- No `sessionId`, has `sourceSystemId` → `TRANSFER`
+- Has `sessionId`, has `tokenType` → `SUBMIT_TOKEN`
+- Has `sessionId`, no `tokenType`, has `targetLevel` → `ESCALATE`
+- Has `sessionId`, no `tokenType`, no `targetLevel` → `IllegalArgumentException` (HTTP 400)
+
+`AuthenticateRequestMapper` converts the unified `AuthenticateRequest` into the per-action DTOs (`toStartRequest`, `toTransferRequest`).
 
 ### 7.2 AuthenticateController.java
 
@@ -891,33 +877,21 @@ public class AuthenticateController {
 
     @PostMapping
     public ResponseEntity<AuthenticateResponse> handle(@Valid @RequestBody AuthenticateRequest req) {
-        if (req.getSessionId() == null) {
-            if (req.getSourceSystemId() != null) {
-                CallTransferRequest transfer = new CallTransferRequest();
-                transfer.setSourceSystemId(req.getSourceSystemId());
-                transfer.setBrandId(req.getBrandId());
-                transfer.setCallerId(req.getCallerId());
-                transfer.setCurrentLevel(req.getCurrentLevel());
-                transfer.setTargetLevel(req.getTargetLevel());
-                transfer.setValidatedTokens(req.getValidatedTokens());
-                return ResponseEntity.ok(authenticateService.transfer(transfer));
-            }
-            StartAuthenticateRequest start = new StartAuthenticateRequest();
-            start.setBrandId(req.getBrandId());
-            start.setCallerId(req.getCallerId());
-            start.setTargetLevel(req.getTargetLevel());
-            start.setInitialTokens(req.getInitialTokens());
-            return ResponseEntity.ok(authenticateService.start(start));
+        RequestAction action = RequestActionDiscriminator.classify(req);
+        switch (action) {
+            case TRANSFER:
+                return ResponseEntity.ok(authenticateService.transfer(toTransferRequest(req)));
+            case START:
+                return ResponseEntity.ok(authenticateService.start(toStartRequest(req)));
+            case SUBMIT_TOKEN:
+                return ResponseEntity.ok(authenticateService.submitTokenWithCaller(
+                    req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId()));
+            case ESCALATE:
+                return ResponseEntity.ok(
+                    authenticateService.escalate(req.getSessionId(), req.getTargetLevel()));
+            default:
+                throw new IllegalStateException("Unknown action: " + action);
         }
-        if (req.getTokenType() != null) {
-            return ResponseEntity.ok(
-                authenticateService.submitTokenWithCaller(
-                    req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId())
-            );
-        }
-        return ResponseEntity.ok(
-            authenticateService.escalate(req.getSessionId(), req.getTargetLevel())
-        );
     }
 
     @GetMapping("/{sessionId}/status")
@@ -1013,6 +987,11 @@ public class AuthenticateService {
         session.setCreatedAt(Instant.now());
         session.setLastActivityAt(Instant.now());
 
+        // Identification-only brands always target NONE
+        if (config.isIdentificationOnly()) {
+            session.setTargetLevel(AuthLevel.NONE);
+        }
+
         // Always-on party lookup
         List<Party> parties = partyLookup.lookupByAni(req.getCallerId());
         if (parties.isEmpty()) throw new UnknownCallerException(req.getCallerId());
@@ -1024,10 +1003,10 @@ public class AuthenticateService {
 
         if (parties.size() > 1) {
             AuthenticateResponse disResp = disambiguationEngine.start(session);
-            if (session.getPhase() == SessionPhase.AUTHENTICATING) {
-                return engine.onPartyResolved(session, config);
+            if (session.getPhase() != SessionPhase.AUTHENTICATING) {
+                return disResp;  // still narrowing parties
             }
-            return disResp;
+            return proceedAfterPartyResolved(session, config, req);
         }
 
         // Single party — load preferences
@@ -1037,25 +1016,22 @@ public class AuthenticateService {
         session.setCustomerPreferences(prefs);
         sessionRepo.save(session);
 
-        if (config.isIdentificationOnly()) {
-            return engine.onPartyResolved(session, config);
-        }
+        return proceedAfterPartyResolved(session, config, req);
+    }
 
-        // Process any initial tokens
-        if (req.getInitialTokens() != null && !req.getInitialTokens().isEmpty()) {
-            for (Map.Entry<TokenType, String> entry : req.getInitialTokens().entrySet()) {
-                AuthenticateResponse tokenResponse = engine.submitToken(
-                    session.getSessionId(), entry.getKey(), entry.getValue());
-                if (tokenResponse.getStatus() == SessionStatus.FAILED
-                        || tokenResponse.getStatus() == SessionStatus.REDIRECT_TO_AGENT) {
-                    return tokenResponse;
-                }
-            }
-            IvrSession updatedSession = sessionRepo.getOrThrow(session.getSessionId());
-            return engine.evaluateProgress(updatedSession, config);
-        }
-
-        return engine.onPartyResolved(session, config);
+    /**
+     * Consumes any initialTokens when appropriate, otherwise hands off to the engine.
+     * Standard brands always consume initialTokens; identification-only brands consume
+     * them only when a NONE-level rule is defined.
+     */
+    private AuthenticateResponse proceedAfterPartyResolved(IvrSession session, BrandAuthConfig config,
+                                                           StartAuthenticateRequest req) {
+        boolean consumeInitialTokens = config.isIdentificationOnly()
+            ? hasNoneRule(config) && hasInitialTokens(req)
+            : hasInitialTokens(req);
+        return consumeInitialTokens
+            ? processInitialTokens(session, config, req.getInitialTokens())
+            : engine.onPartyResolved(session, config);
     }
 
     public AuthenticateResponse transfer(CallTransferRequest req) {
@@ -1158,7 +1134,7 @@ Key implementation details:
 - **save()**: Dispatches to `insert()` for new sessions (`version == 0`, sets version to 1) or `update()` for existing sessions (uses `UPDATE ... WHERE session_id = ? AND version = ?`). If the update affects 0 rows, a `SessionConflictException` (HTTP 409) is thrown.
 - **Sensitive data**: `collected_tokens` is always stored as `null` — raw token values (PINs, SSNs) are never persisted, only kept in memory for the duration of a single request.
 - **getOrThrow()**: Single query fetches the full row and checks TTL in Java. If expired, the session is deleted and a `SessionNotFoundException` is thrown.
-- **mapRow()**: Reads all 18 columns including `phase`, `candidate_parties` (JSON deserialized to `List<Party>`), `matched_party`, `customer_preferences`, `disambiguation_attempt`, `version`, `transferred_from`.
+- **mapRow()**: Reads all 20 columns including `phase`, `candidate_parties` (JSON deserialized to `List<Party>`), `matched_party`, `customer_preferences`, `disambiguation_attempt`, `version`, `transferred_from`.
 - **Cleanup**: A `@Scheduled` cleanup job runs at a fixed rate (default 60 seconds) and bulk-deletes sessions older than the configured TTL.
 
 ```java
@@ -1474,12 +1450,16 @@ public class IvrExceptionHandler {
 ```
 com.yourco.ivr
 ├── api
-│   ├── AuthenticateController.java
+│   ├── AuthenticateController.java         # delegates to RequestActionDiscriminator
 │   ├── BrandController.java
 │   ├── IvrExceptionHandler.java
 │   ├── LookupServiceController.java       # GET /api/lookup-services
+│   ├── action/
+│   │   ├── RequestAction.java              # START / TRANSFER / SUBMIT_TOKEN / ESCALATE
+│   │   └── RequestActionDiscriminator.java # classifies a request by present fields
 │   └── dto/
 │       ├── AuthenticateRequest.java
+│       ├── AuthenticateRequestMapper.java  # → StartAuthenticateRequest / CallTransferRequest
 │       ├── AuthenticateResponse.java
 │       ├── CallTransferRequest.java
 │       ├── ErrorResponse.java
@@ -1487,31 +1467,43 @@ com.yourco.ivr
 │       ├── LookupServiceDescriptor.java
 │       ├── ProcessingEvent.java
 │       ├── StartAuthenticateRequest.java
-│       ├── TokenSubmitRequest.java
-│       └── (no "ValidationResult.java" — it lives in validator/)
+│       └── TokenSubmitRequest.java
 ├── domain
 │   ├── AuthLevel.java                      # NONE(0)..ADMIN(4)
-│   ├── TokenType.java                      # 7 types
-│   ├── IvrSession.java                     # 17 fields + constructor defaults
+│   ├── TokenType.java                      # 7 types, each with a displayName
+│   ├── IvrSession.java                     # 20 fields + constructor defaults
 │   ├── SessionStatus.java                  # COLLECTING..FAILED (REDIRECT_TO_AGENT replaces LOCKED)
 │   ├── SessionPhase.java                   # DISAMBIGUATION / AUTHENTICATING
 │   ├── Party.java                          # 8 fields + additionalAttributes
 │   ├── CustomerPreference.java             # blockedTokens + maxAllowedLevel
+│   ├── ValidationResult.java               # generic ok/error result used by config validation
 │   └── config/
 │       ├── BrandAuthConfig.java            # brandId + levelRules + identificationOnly
-│       ├── DisambiguationConfig.java
 │       ├── LevelRule.java                  # paths + maxRetriesPerToken + tokenRetryLimits + lockoutSeconds
 │       ├── TokenPath.java                  # pathIndex + description + requiredTokens + backupTokens
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine
-│   ├── AuthEngine.java                     # 7 constructor deps, two-stage validation
+│   ├── AuthEngine.java                     # orchestrator; 7 collaborator deps
 │   ├── DisambiguationEngine.java           # always-on, 3-round max
 │   ├── DisambiguationRule.java             # interface
+│   ├── EngineConfig.java                   # wires activePathResolver + TokenSlotResolver beans
+│   ├── PartyTokenFields.java               # shared TokenType → Party field accessors
 │   ├── PromptResolver.java                 # human-readable token names
-│   └── impl/
-│       ├── ExcludeInactiveRule.java
-│       └── PrimaryAniRule.java
+│   ├── impl/
+│   │   ├── ExcludeInactiveRule.java
+│   │   └── PrimaryAniRule.java
+│   ├── path/
+│   │   ├── ActivePath.java                 # rule + index + path snapshot
+│   │   └── ActivePathManager.java          # path resolve/switch/exhaust + redirect-to-agent
+│   ├── preference/
+│   │   └── PreferenceFilter.java           # blocked-token skipping
+│   ├── response/
+│   │   └── ResponseAssembler.java          # response factory methods
+│   ├── slot/
+│   │   └── TokenSlotResolver.java          # backup→slot mapping + accepted tokens
+│   └── validation/
+│       └── ExternalValidator.java          # format → party-field → backend pipeline
 ├── lookup                                  # NEW — backend verification layer
 │   ├── TokenLookupService.java             # SPI
 │   ├── LookupRequest.java / LookupResult.java
@@ -1625,11 +1617,18 @@ public class DisambiguationEngine {
     // Disambiguation is always-on and not configurable.
     private static final int MAX_DISAMBIGUATION_TOKENS = 3;
 
-    // Maps TokenType to Party field extractors for matching
-    private final Map<TokenType, Function<Party, String>> tokenFieldMap;   // ACCOUNT_NUMBER, DATE_OF_BIRTH, SSN_LAST4, CARD_LAST4
-
     // Fixed pre-filter rule chain, applied in order
     private final List<DisambiguationRule> rules;   // [ExcludeInactiveRule, PrimaryAniRule]
+
+    private final SessionRepository sessionRepo;
+    private final CustomerPreferenceProvider preferenceProvider;  // loaded on party resolution
+
+    public DisambiguationEngine(SessionRepository sessionRepo,
+                                CustomerPreferenceProvider preferenceProvider) {
+        this.sessionRepo = sessionRepo;
+        this.preferenceProvider = preferenceProvider;
+        this.rules = Arrays.asList(new ExcludeInactiveRule(), new PrimaryAniRule());
+    }
 
     /** Called on session start to initialize disambiguation. */
     AuthenticateResponse start(IvrSession session);
@@ -1644,6 +1643,8 @@ public class DisambiguationEngine {
     List<Party> applyRules(List<Party> parties);
 }
 ```
+
+The token-to-`Party`-field mapping is no longer a private field; it is the shared `PartyTokenFields.FIELD_ACCESSORS` map (`ACCOUNT_NUMBER`, `DATE_OF_BIRTH`, `SSN_LAST4`, `CARD_LAST4`), used by both token selection and value matching. On resolving a single party, `resolveParty()` sets `matchedParty`, transitions the phase to `AUTHENTICATING`, and loads customer preferences via `preferenceProvider`.
 
 ### 13.5 Disambiguation Flow
 
