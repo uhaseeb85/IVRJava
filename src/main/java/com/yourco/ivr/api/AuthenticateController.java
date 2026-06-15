@@ -37,19 +37,14 @@ public class AuthenticateController {
     public ResponseEntity<AuthenticateResponse> handle(@Valid @RequestBody AuthenticateRequest req) {
         RequestAction action = RequestActionDiscriminator.classify(req);
         switch (action) {
-            case TRANSFER:
-                return ResponseEntity.ok(authenticateService.transfer(toTransferRequest(req)));
             case START:
                 return ResponseEntity.ok(authenticateService.start(toStartRequest(req)));
             case SUBMIT_TOKEN:
-                return ResponseEntity.ok(
-                    authenticateService.submitTokenWithCaller(
-                        req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId())
-                );
+                return ResponseEntity.ok(authenticateService.submitTokenWithCaller(req.getSessionId(), req.getTokenType(), req.getTokenValue(), req.getCallerId()));
+            case TRANSFER:
+                return ResponseEntity.ok(authenticateService.transfer(toTransferRequest(req)));
             case ESCALATE:
-                return ResponseEntity.ok(
-                    authenticateService.escalate(req.getSessionId(), req.getTargetLevel())
-                );
+                return ResponseEntity.ok(authenticateService.escalate(req.getSessionId(), req.getTargetLevel()));
             default:
                 throw new IllegalStateException("Unknown action: " + action);
         }
