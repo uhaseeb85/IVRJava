@@ -200,7 +200,7 @@ Read-only; no authentication required.
 
 - **No raw token logging**: `LookupRequest.tokenValue` is never logged. Audit lines carry `serviceId`, `tokenType`, and outcome only.
 - **Secrets**: API keys must not live in binding params. Use environment variables or a secret manager; `params` may carry aliases.
-- **Latency/resilience**: Each real service should enforce its own timeout; the engine treats thrown exceptions via the `failClosed` policy.
+- **Latency/resilience**: Backend calls run through `LookupExecutor`, which enforces a hard per-call timeout (`ivr.lookup.timeout-ms`, default 2000ms) off the servlet thread and a per-service circuit breaker (`ivr.lookup.circuit.failure-threshold`/`ivr.lookup.circuit.open-seconds`). A timeout, thrown exception, or open circuit surfaces as `LookupUnavailableException`, which the engine treats via the `failClosed` policy. Real services should still enforce their own timeout as defence in depth.
 - **Fail policy**: Default `failClosed = true`. A binding may opt into graceful degradation per token.
 
 ---

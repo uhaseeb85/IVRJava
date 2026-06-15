@@ -15,10 +15,11 @@ import java.util.concurrent.ConcurrentHashMap;
  * {@link com.yourco.ivr.service.BrandService#loadFromDirectory()}, and kept in sync by
  * {@link com.yourco.ivr.service.BrandService#save}/{@code delete}/{@code update}.
  *
- * <p><strong>Known issue:</strong> {@link #clear()} followed by a reload in
- * {@link com.yourco.ivr.service.BrandService#refreshRegistry()} creates a brief window where
- * all brands are absent. For production use, implement an atomic swap (replace the map
- * reference rather than mutating it).
+ * <p><strong>Atomic reload:</strong> a full reload is performed via {@link #replaceAll(Map)},
+ * which swaps the backing map reference in a single volatile write. Readers calling {@link #get}
+ * always see either the complete old map or the complete new map — there is never a window where
+ * brands are missing. (The previous {@code clear()}-then-reload approach exposed such a window;
+ * it has been removed.)
  *
  * <p>Only {@link com.yourco.ivr.service.BrandService} should mutate this registry.
  * Calling {@link #register} directly from outside the service bypasses config validation.
@@ -26,7 +27,12 @@ import java.util.concurrent.ConcurrentHashMap;
 @Component
 public class BrandRulesRegistry {
 
-    private final Map<String, BrandAuthConfig> configs = new ConcurrentHashMap<>();
+    /**
+     * Backing store. {@code volatile} so that {@link #replaceAll(Map)} can atomically swap the
+     * whole map reference; the {@link ConcurrentHashMap} value itself handles concurrent
+     * single-key {@link #register}/{@link #remove} mutations.
+     */
+    private volatile Map<String, BrandAuthConfig> configs = new ConcurrentHashMap<>();
 
     /**
      * Adds or replaces the config for {@code config.getBrandId()}.
@@ -61,12 +67,15 @@ public class BrandRulesRegistry {
     }
 
     /**
-     * Removes all loaded brand configs. Used by
-     * {@link com.yourco.ivr.service.BrandService#refreshRegistry()} — see the known-issue
-     * note on the class for the race-condition caveat.
+     * Atomically replaces the entire set of loaded brand configs with {@code newConfigs}.
+     *
+     * <p>A fresh map is built from {@code newConfigs} and swapped in via a single volatile
+     * write, so concurrent {@link #get} calls never observe a partially-loaded registry. Used by
+     * {@link com.yourco.ivr.service.BrandService#refreshRegistry()} to reload from disk without a
+     * gap where brands are absent.
      */
-    public void clear() {
-        configs.clear();
+    public void replaceAll(Map<String, BrandAuthConfig> newConfigs) {
+        this.configs = new ConcurrentHashMap<>(newConfigs);
     }
 
     /** Returns the set of brand IDs currently loaded in the registry. */

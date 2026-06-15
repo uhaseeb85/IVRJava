@@ -373,6 +373,10 @@ To integrate real backends, replace the stub implementations (see [Replacing stu
 | `ivr.session.cleanup.interval` | `60000` | Expired session cleanup interval (ms) |
 | `ivr.brands.config-dir` | `./config/brands` | External brand config directory |
 | `ivr.transfer.config-dir` | `./config/transfers` | External transfer policies directory |
+| `ivr.lookup.timeout-ms` | `2000` | Hard timeout for a single backend verification call |
+| `ivr.lookup.pool-size` | `16` | Worker pool that runs lookup calls off the request thread |
+| `ivr.lookup.circuit.failure-threshold` | `5` | Consecutive failures before a service's circuit opens |
+| `ivr.lookup.circuit.open-seconds` | `30` | How long a circuit stays open before a half-open trial |
 | `spring.jackson.serialization.write-dates-as-timestamps` | `false` | ISO-8601 date formatting |
 | `spring.jackson.time-zone` | `UTC` | Jackson time zone |
 

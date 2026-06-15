@@ -27,9 +27,9 @@ import org.springframework.stereotype.Service;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
+import static com.yourco.ivr.engine.response.ProcessingLog.add;
 import static com.yourco.ivr.engine.response.ResponseAssembler.*;
 
 /**
@@ -47,6 +47,7 @@ public class AuthEngine {
     private final ActivePathManager pathManager;
     private final TokenSlotResolver slotResolver;
     private final ExternalValidator externalValidator;
+    private final AttemptCoordinator attemptCoordinator;
 
     public AuthEngine(BrandRulesRegistry rulesRegistry,
                       SessionRepository sessionRepo,
@@ -54,7 +55,8 @@ public class AuthEngine {
                       DisambiguationEngine disambiguationEngine,
                       ActivePathManager pathManager,
                       TokenSlotResolver slotResolver,
-                      ExternalValidator externalValidator) {
+                      ExternalValidator externalValidator,
+                      AttemptCoordinator attemptCoordinator) {
         this.rulesRegistry = rulesRegistry;
         this.sessionRepo = sessionRepo;
         this.promptResolver = promptResolver;
@@ -62,6 +64,7 @@ public class AuthEngine {
         this.pathManager = pathManager;
         this.slotResolver = slotResolver;
         this.externalValidator = externalValidator;
+        this.attemptCoordinator = attemptCoordinator;
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
@@ -215,13 +218,13 @@ public class AuthEngine {
         logContext(procLog, session, active, nextRequired, acceptedForSlot);
 
         if (nextRequired != null && acceptedForSlot != null && !acceptedForSlot.contains(tokenType)) {
-            return handleWrongTypeFailure(session, config, nextRequired, procLog);
+            return attemptCoordinator.onWrongTypeFailure(session, config, nextRequired, procLog);
         }
 
         ValidationResult validationResult = externalValidator.validate(session, tokenType, tokenValue);
         boolean valid = validationResult.isValid();
 
-        addEntry(procLog, valid ? "PASS" : "FAIL",
+        add(procLog, valid ? "PASS" : "FAIL",
             "External validation: " + tokenType + " → " + describeOutcome(validationResult));
 
         log.info("AUTH [{}] brand={} caller={} token={} result={}",
@@ -229,11 +232,12 @@ public class AuthEngine {
             valid ? "PASS" : "FAIL");
 
         if (!valid) {
-            return handleValidationFailure(session, config, tokenType, procLog);
+            return attemptCoordinator.onValidationFailure(session, config, tokenType, procLog,
+                this::evaluateProgress);
         }
 
         TokenType resolvedToken = slotResolver.resolveBackupToken(session, config, tokenType);
-        addEntry(procLog, "INFO",
+        add(procLog, "INFO",
             resolvedToken != tokenType
                 ? "Backup resolution: " + tokenType + " satisfies required slot " + resolvedToken
                 : tokenType + " is a direct required token (no backup mapping)");
@@ -244,11 +248,11 @@ public class AuthEngine {
             session.getAttemptCounts().remove(resolvedToken);
         }
 
-        addEntry(procLog, "INFO", "Validated tokens now: " + session.getValidatedTokens());
+        add(procLog, "INFO", "Validated tokens now: " + session.getValidatedTokens());
 
         AuthenticateResponse evalResp = evaluateProgress(session, config);
         if (evalResp.getStatus() == SessionStatus.AUTHENTICATED) {
-            addEntry(procLog, "PASS", "Path complete → " + session.getTargetLevel() + " achieved");
+            add(procLog, "PASS", "Path complete → " + session.getTargetLevel() + " achieved");
         } else {
             logNextRequired(procLog, evalResp);
         }
@@ -289,82 +293,6 @@ public class AuthEngine {
         return disResp;
     }
 
-    private AuthenticateResponse handleValidationFailure(IvrSession session,
-                                                          BrandAuthConfig config,
-                                                          TokenType tokenType,
-                                                          List<ProcessingEvent> procLog) {
-        AuthenticateResponse reprompt = recordAttemptOrExhaust(session, config, tokenType, procLog);
-        if (reprompt != null) return reprompt;
-
-        // Retries exhausted: try the next fallback path before giving up to an agent.
-        LevelRule rule = ActivePathManager.levelRule(config, session);
-        AuthenticateResponse switched = pathManager.switchToFallbackPath(session, config, rule, procLog,
-            this::evaluateProgress);
-        if (switched != null) return switched;
-        return pathManager.handleRedirectToAgent(session, rule, procLog);
-    }
-
-    private AuthenticateResponse handleWrongTypeFailure(IvrSession session,
-                                                         BrandAuthConfig config,
-                                                         TokenType tokenType,
-                                                         List<ProcessingEvent> procLog) {
-        AuthenticateResponse reprompt = recordAttemptOrExhaust(session, config, tokenType, procLog);
-        if (reprompt != null) return reprompt;
-
-        // Retries exhausted: a wrong token type never switches paths — go straight to an agent.
-        LevelRule rule = ActivePathManager.levelRule(config, session);
-        addEntry(procLog, "FAIL",
-            "Wrong token type exhausted retries — redirecting to agent (no path switch)");
-        return pathManager.handleRedirectToAgent(session, rule, procLog);
-    }
-
-    /**
-     * Records a failed attempt against the submitted token's required slot. Returns a "still
-     * collecting" reprompt response if attempts remain, or {@code null} once the retry limit is
-     * exhausted (leaving the caller to decide the terminal behavior).
-     */
-    private AuthenticateResponse recordAttemptOrExhaust(IvrSession session, BrandAuthConfig config,
-                                                        TokenType tokenType, List<ProcessingEvent> procLog) {
-        LevelRule rule = ActivePathManager.levelRule(config, session);
-        TokenType requiredToken = slotResolver.findRequiredTokenForSlot(session, config, tokenType);
-        int remaining = recordFailedAttempt(session, rule, requiredToken, procLog);
-        if (remaining > 0) {
-            return repromptForSlot(session, rule, requiredToken, remaining, procLog);
-        }
-        addEntry(procLog, "WARN", "Retry limit exhausted for " + requiredToken + " slot");
-        return null;
-    }
-
-    private static int recordFailedAttempt(IvrSession session, LevelRule rule,
-                                            TokenType requiredToken, List<ProcessingEvent> procLog) {
-        Map<TokenType, Integer> counts = session.getAttemptCounts();
-        int attempts = counts.containsKey(requiredToken) ? counts.get(requiredToken) + 1 : 1;
-        counts.put(requiredToken, attempts);
-        int maxRetries = rule.getMaxRetriesFor(requiredToken);
-
-        addEntry(procLog, "WARN",
-            "Attempt " + attempts + " of " + maxRetries + " for " + requiredToken + " slot");
-        return maxRetries - attempts;
-    }
-
-    private AuthenticateResponse repromptForSlot(IvrSession session, LevelRule rule,
-                                                  TokenType requiredToken, int remaining,
-                                                  List<ProcessingEvent> procLog) {
-        addEntry(procLog, "WARN",
-            remaining + " attempt" + (remaining == 1 ? "" : "s")
-            + " remaining — still collecting " + requiredToken);
-
-        int activePathIdx = session.getActivePathIndexByLevel()
-            .getOrDefault(session.getTargetLevel(), 0);
-        TokenPath activePath = rule.getPaths().get(activePathIdx);
-
-        List<TokenType> acceptedTokens = slotResolver.buildAcceptedTokens(session, activePath,
-            requiredToken, requiredToken, t -> PreferenceFilter.isBlocked(session, t));
-        String prompt = promptResolver.resolvePrompt(requiredToken, activePath, remaining);
-        sessionRepo.save(session);
-        return collecting(session, requiredToken, acceptedTokens, remaining, prompt);
-    }
-
     private AuthenticateResponse completeAuthentication(IvrSession session, BrandAuthConfig config) {
         if (config.isIdentificationOnly() && session.getTargetLevel() == AuthLevel.NONE) {
             return finalizeIdentification(session);
@@ -402,39 +330,35 @@ public class AuthEngine {
     private static void logContext(List<ProcessingEvent> procLog, IvrSession session,
                                     ActivePath active, TokenType nextRequired,
                                     List<TokenType> acceptedForSlot) {
-        addEntry(procLog, "INFO",
+        add(procLog, "INFO",
             "Brand: " + session.getBrandId() + " | Target: " + session.getTargetLevel()
             + " | Phase: AUTHENTICATING");
 
         if (active.path() != null) {
-            addEntry(procLog, "INFO",
+            add(procLog, "INFO",
                 "Active path: path" + active.index() + " → " + active.path().getRequiredTokens());
         }
 
         Set<TokenType> validatedSoFar = session.getValidatedTokens();
-        addEntry(procLog, "INFO",
+        add(procLog, "INFO",
             "Validated tokens: " + (validatedSoFar.isEmpty() ? "[none]" : validatedSoFar));
 
         if (nextRequired != null) {
-            addEntry(procLog, "INFO",
+            add(procLog, "INFO",
                 "Collecting: " + nextRequired + " | Accepted alternatives: " + acceptedForSlot);
         }
     }
 
     private static void logNextRequired(List<ProcessingEvent> procLog, AuthenticateResponse resp) {
         if (resp.getNextRequiredToken() == null) return;
-        addEntry(procLog, "INFO", "Next required: " + resp.getNextRequiredToken());
+        add(procLog, "INFO", "Next required: " + resp.getNextRequiredToken());
         if (resp.getAcceptedTokens() != null && !resp.getAcceptedTokens().isEmpty()) {
-            addEntry(procLog, "INFO", "Accepted for next slot: " + resp.getAcceptedTokens());
+            add(procLog, "INFO", "Accepted for next slot: " + resp.getAcceptedTokens());
         }
     }
 
     private static String describeOutcome(ValidationResult result) {
         if (result.isValid()) return "PASS";
         return result.getErrorCode() != null ? result.getErrorCode().name() : "FAIL";
-    }
-
-    private static void addEntry(List<ProcessingEvent> procLog, String level, String message) {
-        procLog.add(ProcessingEvent.builder().level(level).message(message).build());
     }
 }

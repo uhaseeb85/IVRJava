@@ -5,6 +5,7 @@ import com.yourco.ivr.domain.Party;
 import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.engine.PartyTokenFields;
+import com.yourco.ivr.lookup.LookupExecutor;
 import com.yourco.ivr.lookup.LookupRequest;
 import com.yourco.ivr.lookup.LookupResult;
 import com.yourco.ivr.lookup.LookupServiceRegistry;
@@ -39,15 +40,18 @@ public class ExternalValidator {
     private final LookupServiceRegistry lookupRegistry;
     private final VerificationBindings verificationBindings;
     private final BrandRulesRegistry rulesRegistry;
+    private final LookupExecutor lookupExecutor;
 
     public ExternalValidator(TokenValidatorRegistry validatorRegistry,
                              LookupServiceRegistry lookupRegistry,
                              VerificationBindings verificationBindings,
-                             BrandRulesRegistry rulesRegistry) {
+                             BrandRulesRegistry rulesRegistry,
+                             LookupExecutor lookupExecutor) {
         this.validatorRegistry = validatorRegistry;
         this.lookupRegistry = lookupRegistry;
         this.verificationBindings = verificationBindings;
         this.rulesRegistry = rulesRegistry;
+        this.lookupExecutor = lookupExecutor;
     }
 
     public ValidationResult validate(IvrSession session, TokenType tokenType, String tokenValue) {
@@ -108,7 +112,7 @@ public class ExternalValidator {
                 tokenType, tokenValue, session.getCallerId(),
                 session.getBrandId(), session.getCollectedTokens(), binding.getParams()
             );
-            LookupResult result = service.verify(request);
+            LookupResult result = lookupExecutor.verify(service, request);
             log.info("LOOKUP [{}] brand={} token={} service={} result={}",
                 session.getSessionId(), session.getBrandId(), tokenType,
                 binding.getServiceId(), result.isVerified() ? "VERIFIED" : "REJECTED");

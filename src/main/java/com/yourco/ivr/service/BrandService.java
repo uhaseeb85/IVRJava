@@ -19,6 +19,7 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -33,8 +34,10 @@ import java.util.Map;
  * (required fields, non-empty paths). Never bypass this by calling
  * {@link BrandRulesRegistry#register} directly.
  *
- * <p><strong>Known issue:</strong> {@link #refreshRegistry()} clears the registry before
- * reloading, creating a brief window where all brands are absent. Fix with an atomic swap.
+ * <p>{@link #refreshRegistry()} performs an atomic reload: it reads and validates every config
+ * file into a fresh map, then swaps it into the registry in one operation
+ * ({@link BrandRulesRegistry#replaceAll}), so callers never observe a window where brands are
+ * missing.
  */
 @Service
 public class BrandService {
@@ -182,16 +185,25 @@ public class BrandService {
         return ValidationResult.ok();
     }
 
-    /** Clears and reloads the registry from the config directory. See class-level note on the race window. */
+    /** Atomically reloads the registry from the config directory (no missing-brand window). */
     public void refreshRegistry() {
-        registry.clear();
         loadFromDirectory();
     }
 
-    /** Scans the config directory and registers all valid brand configs found. */
+    /**
+     * Reads and validates every brand config in the config directory and atomically swaps the
+     * full set into the registry via {@link BrandRulesRegistry#replaceAll}. Invalid or unreadable
+     * files are skipped (logged), so a single bad file never aborts the reload.
+     */
     public void loadFromDirectory() {
+        registry.replaceAll(readValidConfigs());
+    }
+
+    /** Reads the config directory and returns a map of brandId → config for every valid file. */
+    private Map<String, BrandAuthConfig> readValidConfigs() {
+        Map<String, BrandAuthConfig> loaded = new HashMap<>();
         File dir = new File(configDir);
-        if (!dir.exists()) return;
+        if (!dir.exists()) return loaded;
         File[] files = dir.listFiles((d, name) -> name.endsWith(JSON_EXT));
         if (files != null) {
             for (File file : files) {
@@ -204,13 +216,14 @@ public class BrandService {
                             config.getBrandId() == null ? "missing brandId" : validation.getMessage());
                         continue;
                     }
-                    registry.register(config);
+                    loaded.put(config.getBrandId(), config);
                     log.info("Loaded brand config: {} from {}", config.getBrandId(), file.getName());
                 } catch (Exception e) {
                     log.warn("Failed to load brand file: {}", file.getName(), e);
                 }
             }
         }
+        return loaded;
     }
 
     private ValidationResult validateLevelRules(Map<AuthLevel, LevelRule> levelRules) {
