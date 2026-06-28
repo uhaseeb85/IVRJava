@@ -264,21 +264,7 @@ export default function Dashboard() {
       {/* Page header */}
       <div className="bg-white dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 px-8 py-4 flex items-center gap-6 shrink-0">
         <div className="flex-1 min-w-0">
-          <h1 className="text-xl font-bold text-slate-900 dark:text-slate-100">Test Console</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">Simulate a caller phoning in and getting verified — step by step</p>
-        </div>
-
-        {/* Stats chips */}
-        <div className="hidden md:flex items-center gap-2">
-          <span className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-full px-2.5 py-1 text-xs font-semibold">
-            {stats.brands.length} brand{stats.brands.length !== 1 ? 's' : ''}
-          </span>
-          <span className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-full px-2.5 py-1 text-xs font-semibold">
-            {stats.today} today
-          </span>
-          <span className="bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-full px-2.5 py-1 text-xs font-semibold">
-            {stats.total} total
-          </span>
+          <p className="text-sm text-slate-500 dark:text-slate-400">Simulate a caller phoning in and getting verified — step by step</p>
         </div>
 
         {/* Active session pill */}
