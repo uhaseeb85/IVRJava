@@ -34,7 +34,7 @@ export default function OnCallCard({
   onReset: () => void
 }) {
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
+    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm p-6 space-y-5">
       {/* Progress ladder (authentication brands only) */}
       {!idOnly && (
         <div className="flex items-center justify-between gap-4">
@@ -44,13 +44,13 @@ export default function OnCallCard({
 
       {/* Spoken prompt bubble */}
       {response?.prompt ? (
-        <div className="flex items-start gap-3 rounded-xl bg-slate-50 border border-slate-100 p-4">
-          <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-            <Volume2 size={15} className="text-indigo-600" />
+        <div className="flex items-start gap-3 rounded-xl bg-slate-50 dark:bg-slate-700/50 border border-slate-100 dark:border-slate-600 p-4">
+          <div className="w-8 h-8 rounded-full bg-indigo-100 dark:bg-indigo-900/50 flex items-center justify-center shrink-0">
+            <Volume2 size={15} className="text-indigo-600 dark:text-indigo-400" />
           </div>
           <div className="flex-1">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-0.5">The system says</p>
-            <p className="text-sm text-slate-800 font-medium leading-relaxed">{String(response.prompt)}</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500 mb-0.5">The system says</p>
+            <p className="text-sm text-slate-800 dark:text-slate-200 font-medium leading-relaxed">{String(response.prompt)}</p>
           </div>
         </div>
       ) : null}
@@ -59,8 +59,8 @@ export default function OnCallCard({
       {sessionActive && (
         <div className="space-y-3">
           <div>
-            <label className="block text-xs font-semibold text-slate-500 mb-1">
-              Enter the caller's <span className="text-slate-800">{tokenLabel(activeToken)}</span>
+            <label className="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1">
+              Enter the caller's <span className="text-slate-800 dark:text-slate-200">{tokenLabel(activeToken)}</span>
             </label>
             <div className="flex gap-2">
               <input
@@ -80,7 +80,7 @@ export default function OnCallCard({
                 Submit
               </button>
             </div>
-            <p className="text-[11px] text-slate-400 mt-1.5">
+            <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1.5">
               Pre-filled with a valid sample value — just press Enter. (Clear it or change it to test a failure.)
             </p>
           </div>
@@ -88,12 +88,12 @@ export default function OnCallCard({
           {/* Backup-token alternatives */}
           {alternatives.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] text-slate-400">Can't provide that? Use instead:</span>
+              <span className="text-[11px] text-slate-400 dark:text-slate-500">Can't provide that? Use instead:</span>
               {alternatives.map(alt => (
                 <button
                   key={alt}
                   onClick={() => setForm(f => ({ ...f, tokenType: alt, tokenValue: TOKEN_DEFAULTS[alt] ?? '' }))}
-                  className="rounded-full border border-slate-200 bg-white px-2.5 py-0.5 text-[11px] font-medium text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition-colors"
+                  className="rounded-full border border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 dark:text-slate-300 hover:border-indigo-300 dark:hover:border-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400 transition-colors"
                 >
                   {tokenLabel(alt)}
                 </button>

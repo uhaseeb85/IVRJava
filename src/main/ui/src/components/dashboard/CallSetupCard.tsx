@@ -25,22 +25,22 @@ export default function CallSetupCard({
   onPlaceCall: () => void
 }) {
   return (
-    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-6">
+    <div className="bg-white dark:bg-slate-800 rounded-2xl border border-slate-200 dark:border-slate-700 shadow-sm p-6 space-y-6">
       <div className="flex items-center gap-3">
-        <div className="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center">
-          <Phone size={18} className="text-indigo-600" />
+        <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-900/50 flex items-center justify-center">
+          <Phone size={18} className="text-indigo-600 dark:text-indigo-400" />
         </div>
         <div>
-          <h2 className="text-base font-bold text-slate-900">Start a call</h2>
-          <p className="text-sm text-slate-500">Pick who's calling and what they want to do.</p>
+          <h2 className="text-base font-bold text-slate-900 dark:text-slate-100">Start a call</h2>
+          <p className="text-sm text-slate-500 dark:text-slate-400">Pick who's calling and what they want to do.</p>
         </div>
       </div>
 
       {/* Brand picker */}
       <div>
-        <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">1 · Which brand are they calling?</p>
+        <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">1 · Which brand are they calling?</p>
         {brands.length === 0 ? (
-          <p className="text-sm text-slate-400 italic">No brands configured yet — add one on the Brands page first.</p>
+          <p className="text-sm text-slate-400 dark:text-slate-500 italic">No brands configured yet — add one on the Brands page first.</p>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
             {brands.map(b => {
@@ -53,19 +53,19 @@ export default function CallSetupCard({
                   className={cn(
                     'text-left rounded-xl border p-3 transition-all',
                     selected
-                      ? 'border-indigo-400 bg-indigo-50/60 ring-1 ring-indigo-200'
-                      : 'border-slate-200 bg-white hover:border-indigo-200 hover:bg-slate-50'
+                      ? 'border-indigo-400 dark:border-indigo-500 bg-indigo-50/60 dark:bg-indigo-900/30 ring-1 ring-indigo-200 dark:ring-indigo-700'
+                      : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 hover:border-indigo-200 dark:hover:border-indigo-600 hover:bg-slate-50 dark:hover:bg-slate-650'
                   )}
                 >
                   <div className="flex items-center gap-1.5">
-                    <ShieldCheck size={14} className={selected ? 'text-indigo-600' : 'text-slate-400'} />
-                    <span className="text-sm font-bold text-slate-800 truncate">{b.brandId}</span>
+                    <ShieldCheck size={14} className={selected ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-400 dark:text-slate-500'} />
+                    <span className="text-sm font-bold text-slate-800 dark:text-slate-200 truncate">{b.brandId}</span>
                   </div>
                   <div className="flex flex-wrap gap-1 mt-2">
                     {b.identificationOnly
-                      ? <span className="bg-sky-100 text-sky-600 rounded px-1.5 py-0.5 text-[10px] font-semibold">ID ONLY</span>
+                      ? <span className="bg-sky-100 dark:bg-sky-900/40 text-sky-600 dark:text-sky-400 rounded px-1.5 py-0.5 text-[10px] font-semibold">ID ONLY</span>
                       : levels.map(l => (
-                          <span key={l} className="bg-slate-100 text-slate-500 rounded px-1.5 py-0.5 text-[10px] font-semibold">{l}</span>
+                          <span key={l} className="bg-slate-100 dark:bg-slate-600 text-slate-500 dark:text-slate-300 rounded px-1.5 py-0.5 text-[10px] font-semibold">{l}</span>
                         ))}
                   </div>
                 </button>
@@ -77,9 +77,9 @@ export default function CallSetupCard({
 
       {/* Identification-only note (replaces the level chooser) */}
       {form.brandId && idOnly && (
-        <div className="rounded-xl border border-sky-200 bg-sky-50/60 p-3">
-          <p className="text-xs font-bold text-sky-700 uppercase tracking-wider mb-1">2 · Identification only</p>
-          <p className="text-sm text-sky-700">
+        <div className="rounded-xl border border-sky-200 dark:border-sky-800 bg-sky-50/60 dark:bg-sky-900/20 p-3">
+          <p className="text-xs font-bold text-sky-700 dark:text-sky-400 uppercase tracking-wider mb-1">2 · Identification only</p>
+          <p className="text-sm text-sky-700 dark:text-sky-300">
             This brand just identifies the caller — no auth level is granted. The call ends once a single party is resolved (access level stays NONE).
           </p>
         </div>
@@ -88,7 +88,7 @@ export default function CallSetupCard({
       {/* Level chooser */}
       {form.brandId && !idOnly && (
         <div>
-          <p className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">2 · What do they need to do?</p>
+          <p className="text-xs font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider mb-2">2 · What do they need to do?</p>
           <div className="space-y-2">
             {brandLevels.map(l => {
               const selected = form.targetLevel === l
