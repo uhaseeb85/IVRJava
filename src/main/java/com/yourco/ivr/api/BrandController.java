@@ -57,4 +57,39 @@ public class BrandController {
     public ResponseEntity<ValidationResult> validate(@RequestBody BrandAuthConfig config) {
         return ResponseEntity.ok(brandService.validate(config));
     }
+
+    @PostMapping("/{brandId}/clone")
+    @Operation(summary = "Clone a brand", description = "Clones an existing brand config under a new brand ID")
+    public ResponseEntity<BrandAuthConfig> clone(@PathVariable String brandId, @RequestBody CloneRequest request) {
+        return ResponseEntity.ok(brandService.clone(brandId, request.getNewBrandId()));
+    }
+
+    @GetMapping("/{brandId}/export")
+    @Operation(summary = "Export a brand as JSON", description = "Returns the brand config as a downloadable JSON string")
+    public ResponseEntity<String> export(@PathVariable String brandId) {
+        return ResponseEntity.ok()
+            .header("Content-Type", "application/json")
+            .header("Content-Disposition", "attachment; filename=\"" + brandId.toLowerCase() + ".json\"")
+            .body(brandService.exportAsJson(brandId));
+    }
+
+    @PostMapping("/import")
+    @Operation(summary = "Import a brand from JSON", description = "Parses and saves a brand config from raw JSON string")
+    public ResponseEntity<BrandAuthConfig> importBrand(@RequestBody ImportRequest request) {
+        return ResponseEntity.ok(brandService.importFromJson(request.getJsonContent()));
+    }
+
+    // ── Inner DTOs ──────────────────────────────────────────────────────────
+
+    static class CloneRequest {
+        private String newBrandId;
+        public String getNewBrandId() { return newBrandId; }
+        public void setNewBrandId(String newBrandId) { this.newBrandId = newBrandId; }
+    }
+
+    static class ImportRequest {
+        private String jsonContent;
+        public String getJsonContent() { return jsonContent; }
+        public void setJsonContent(String jsonContent) { this.jsonContent = jsonContent; }
+    }
 }

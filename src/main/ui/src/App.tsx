@@ -1,18 +1,27 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { cn } from './lib/utils'
-import { LayoutDashboard, Shield, History, ChevronLeft, ChevronRight, Zap } from 'lucide-react'
+import {
+  LayoutDashboard, Shield, History, ChevronLeft, ChevronRight, Zap,
+  PhoneOff, GitBranch, Activity, Moon, Sun, Truck,
+} from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import Brands from './pages/Brands'
 import BrandEditor from './pages/BrandEditor'
 import SessionLog from './pages/SessionLog'
+import TransferPolicies from './pages/TransferPolicies'
+import ActiveSessions from './pages/ActiveSessions'
+import LookupServices from './pages/LookupServices'
 
-type Page = 'dashboard' | 'brands' | 'editor' | 'sessions'
+type Page = 'dashboard' | 'brands' | 'editor' | 'sessions' | 'transfers' | 'active-sessions' | 'lookup-services'
 interface Brand { brandId: string; levelRules?: Record<string, unknown> }
 
 const NAV = [
   { id: 'dashboard' as const, label: 'Dashboard', icon: LayoutDashboard },
   { id: 'brands' as const, label: 'Brands', icon: Shield },
   { id: 'sessions' as const, label: 'Session Log', icon: History },
+  { id: 'active-sessions' as const, label: 'Active Sessions', icon: PhoneOff },
+  { id: 'transfers' as const, label: 'Transfer Policies', icon: Truck },
+  { id: 'lookup-services' as const, label: 'Lookup Services', icon: Activity },
 ] as const
 
 type NavPage = typeof NAV[number]['id']
@@ -21,14 +30,24 @@ export default function App() {
   const [page, setPage] = useState<Page>('dashboard')
   const [editingBrand, setEditingBrand] = useState<Brand | null>(null)
   const [collapsed, setCollapsed] = useState(false)
+  const [dark, setDark] = useState(() => localStorage.getItem('ivr-dark-mode') === 'true')
+
+  useEffect(() => {
+    localStorage.setItem('ivr-dark-mode', String(dark))
+    document.documentElement.classList.toggle('dark', dark)
+  }, [dark])
 
   const go = (p: NavPage) => { setPage(p); setEditingBrand(null) }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex text-slate-900">
+    <div className={cn(
+      'min-h-screen flex',
+      dark ? 'dark bg-slate-900 text-slate-100' : 'bg-slate-50 text-slate-900'
+    )}>
       {/* Sidebar */}
       <aside className={cn(
-        'bg-slate-950 flex flex-col shrink-0 transition-[width] duration-200 overflow-hidden',
+        'flex flex-col shrink-0 transition-[width] duration-200 overflow-hidden',
+        dark ? 'bg-slate-950' : 'bg-slate-950',
         collapsed ? 'w-14' : 'w-56'
       )}>
         {/* Logo */}
@@ -72,7 +91,19 @@ export default function App() {
         </nav>
 
         {/* Footer */}
-        <div className="p-2 border-t border-slate-800 overflow-hidden">
+        <div className="p-2 border-t border-slate-800 space-y-1 overflow-hidden">
+          {/* Dark mode toggle */}
+          <button
+            onClick={() => setDark(d => !d)}
+            title={dark ? 'Light mode' : 'Dark mode'}
+            className={cn(
+              'w-full rounded-lg text-slate-600 hover:text-slate-300 hover:bg-slate-800/60 transition-colors flex items-center gap-2',
+              collapsed ? 'px-2.5 py-2 justify-center' : 'px-3 py-2'
+            )}
+          >
+            {dark ? <Sun size={14} /> : <Moon size={14} />}
+            {!collapsed && <span className="text-xs font-medium">Dark Mode</span>}
+          </button>
           <button
             onClick={() => setCollapsed(c => !c)}
             className={cn(
@@ -86,7 +117,7 @@ export default function App() {
             }
           </button>
           {!collapsed && (
-            <p className="px-3 pt-1.5 pb-0.5 text-[10px] text-slate-700 font-semibold tracking-wider uppercase">
+            <p className="px-3 pt-1 pb-0.5 text-[10px] text-slate-700 font-semibold tracking-wider uppercase">
               v1.0.0
             </p>
           )}
@@ -94,12 +125,18 @@ export default function App() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto min-w-0 flex flex-col">
+      <main className={cn(
+        'flex-1 overflow-auto min-w-0 flex flex-col',
+        dark && 'dark'
+      )}>
         {page === 'dashboard' && <Dashboard />}
         {page === 'brands' && (
           <Brands onEdit={(b) => { setEditingBrand(b); setPage('editor') }} />
         )}
         {page === 'sessions' && <SessionLog />}
+        {page === 'transfers' && <TransferPolicies />}
+        {page === 'active-sessions' && <ActiveSessions />}
+        {page === 'lookup-services' && <LookupServices />}
         {page === 'editor' && editingBrand && (
           <BrandEditor
             brand={editingBrand}

@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import java.io.File;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -79,6 +80,44 @@ public class TransferPoliciesRegistry {
                     log.warn("Failed to load transfer config: {}", file.getName(), e);
                 }
             }
+        }
+    }
+
+    /** Returns all loaded policies as a list. */
+    public List<TransferPolicy> listAll() {
+        return new ArrayList<>(policies.values());
+    }
+
+    /**
+     * Persists all policies to the JSON config file and reloads the in-memory registry.
+     * This is the single mutation entry point — never mutate {@link #policies} directly.
+     *
+     * @param allPolicies the complete set of policies to persist
+     */
+    public void saveAll(List<TransferPolicy> allPolicies) {
+        TransferPoliciesConfig wrapper = new TransferPoliciesConfig();
+        wrapper.setPolicies(allPolicies);
+        try {
+            File dir = new File(configDir);
+            if (!dir.exists()) dir.mkdirs();
+            // Find the first .json file in the config dir, or use a default name
+            File[] files = dir.listFiles((d, name) -> name.endsWith(".json"));
+            File target = (files != null && files.length > 0)
+                ? files[0]
+                : new File(configDir, "transfer-policies.json");
+            mapper.writerWithDefaultPrettyPrinter().writeValue(target, wrapper);
+            // Reload in-memory map
+            policies.clear();
+            if (allPolicies != null) {
+                for (TransferPolicy p : allPolicies) {
+                    if (p.getSourceSystemId() != null) {
+                        policies.put(p.getSourceSystemId(), p);
+                    }
+                }
+            }
+            log.info("Saved {} transfer policy(ies) to {}", allPolicies != null ? allPolicies.size() : 0, target.getName());
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to save transfer policies", e);
         }
     }
 

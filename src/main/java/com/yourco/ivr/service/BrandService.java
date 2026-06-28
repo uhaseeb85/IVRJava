@@ -226,6 +226,57 @@ public class BrandService {
         return loaded;
     }
 
+    /**
+     * Clones a brand config under a new brand ID. Reads the source config, sets the new brand ID,
+     * and saves. Useful for quickly creating a new brand that starts with the same rules as an
+     * existing one.
+     *
+     * @param sourceBrandId the brand to clone from
+     * @param newBrandId    the brand ID for the clone
+     * @return the cloned and saved config
+     * @throws UnknownBrandException   if the source brand doesn't exist
+     * @throws IllegalArgumentException if a brand with newBrandId already exists
+     */
+    public BrandAuthConfig clone(String sourceBrandId, String newBrandId) {
+        if (registry.contains(newBrandId)) {
+            throw new IllegalArgumentException("Brand already exists: " + newBrandId);
+        }
+        BrandAuthConfig source = get(sourceBrandId);
+        BrandAuthConfig clone = mapper.convertValue(
+            mapper.valueToTree(source), BrandAuthConfig.class);
+        clone.setBrandId(newBrandId);
+        return save(clone);
+    }
+
+    /**
+     * Exports a brand config as its raw JSON string. Used for the "Download JSON" UI feature.
+     *
+     * @throws UnknownBrandException if the brand doesn't exist
+     */
+    public String exportAsJson(String brandId) {
+        BrandAuthConfig config = get(brandId);
+        try {
+            return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(config);
+        } catch (IOException e) {
+            throw new BrandConfigException("Failed to serialize brand config: " + brandId, e);
+        }
+    }
+
+    /**
+     * Imports a brand config from a raw JSON string. Parses, validates, and saves it.
+     * Used for the "Upload JSON" UI feature.
+     *
+     * @throws IllegalArgumentException if validation fails or the JSON is malformed
+     */
+    public BrandAuthConfig importFromJson(String jsonContent) {
+        try {
+            BrandAuthConfig config = mapper.readValue(jsonContent, BrandAuthConfig.class);
+            return save(config);
+        } catch (IOException e) {
+            throw new IllegalArgumentException("Failed to parse brand config JSON: " + e.getMessage(), e);
+        }
+    }
+
     private ValidationResult validateLevelRules(Map<AuthLevel, LevelRule> levelRules) {
         for (Map.Entry<AuthLevel, LevelRule> entry : levelRules.entrySet()) {
             LevelRule rule = entry.getValue();

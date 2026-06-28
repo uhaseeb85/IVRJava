@@ -181,6 +181,46 @@ public class SqliteSessionRepository implements SessionRepository {
         jdbc.update("DELETE FROM ivr_session WHERE session_id = ?", sessionId);
     }
 
+    @Override
+    public List<IvrSession> listAll() {
+        String sql = "SELECT * FROM ivr_session WHERE last_activity_at >= ? ORDER BY created_at DESC";
+        Instant cutoff = Instant.now().minus(sessionTtl);
+        try {
+            return jdbc.query(sql, this::mapRow, toIso(cutoff));
+        } catch (Exception e) {
+            log.warn("Failed to list sessions", e);
+            return java.util.Collections.emptyList();
+        }
+    }
+
+    @Override
+    public List<IvrSession> search(String brandId, String status, String callerId) {
+        StringBuilder sql = new StringBuilder("SELECT * FROM ivr_session WHERE last_activity_at >= ?");
+        List<Object> params = new ArrayList<>();
+        params.add(toIso(Instant.now().minus(sessionTtl)));
+
+        if (brandId != null && !brandId.trim().isEmpty()) {
+            sql.append(" AND LOWER(brand_id) LIKE ?");
+            params.add("%" + brandId.trim().toLowerCase() + "%");
+        }
+        if (status != null && !status.trim().isEmpty()) {
+            sql.append(" AND status = ?");
+            params.add(status.trim().toUpperCase());
+        }
+        if (callerId != null && !callerId.trim().isEmpty()) {
+            sql.append(" AND caller_id LIKE ?");
+            params.add("%" + callerId.trim() + "%");
+        }
+        sql.append(" ORDER BY created_at DESC LIMIT 200");
+
+        try {
+            return jdbc.query(sql.toString(), this::mapRow, params.toArray());
+        } catch (Exception e) {
+            log.warn("Failed to search sessions", e);
+            return java.util.Collections.emptyList();
+        }
+    }
+
     /**
      * Bulk-deletes sessions whose {@code last_activity_at} is older than the configured TTL.
      * Runs automatically at a fixed rate (default 60 000 ms, override via

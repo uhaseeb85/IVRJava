@@ -1,6 +1,7 @@
 package com.yourco.ivr.repository;
 
 import com.yourco.ivr.domain.IvrSession;
+import java.util.List;
 
 /**
  * Persistence contract for {@link IvrSession} objects.
@@ -42,4 +43,19 @@ public interface SessionRepository {
      * and by the TTL cleanup scheduler. No-op if the session does not exist.
      */
     void delete(String sessionId);
+
+    /**
+     * Returns all non-expired sessions (subject to TTL filtering).
+     * Used by the admin session viewer UI.
+     */
+    List<IvrSession> listAll();
+
+    /**
+     * Searches sessions by optional filters. All parameters are optional — null means "no filter".
+     *
+     * @param brandId  filter by brand ID (case-insensitive contains match), null to skip
+     * @param status   filter by session status (exact match), null to skip
+     * @param callerId filter by caller ID (case-insensitive contains match), null to skip
+     */
+    List<IvrSession> search(String brandId, String status, String callerId);
 }

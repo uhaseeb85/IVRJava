@@ -3,6 +3,7 @@ package com.yourco.ivr.lookup;
 import com.yourco.ivr.exception.UnknownLookupServiceException;
 import org.springframework.stereotype.Component;
 
+import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -41,6 +42,11 @@ public class LookupServiceRegistry {
             throw new UnknownLookupServiceException(id);
         }
         return svc;
+    }
+
+    /** Returns all registered lookup services. */
+    public Collection<TokenLookupService> all() {
+        return byId.values();
     }
 
     public boolean contains(String id) {
