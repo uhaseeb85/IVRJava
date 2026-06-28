@@ -336,13 +336,14 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
   const addPath = (lvl: string) => {
     setCfg(c => {
       const paths = c.levelRules[lvl].paths
+      const newIdx = paths.length
       return {
         ...c,
         levelRules: {
           ...c.levelRules,
           [lvl]: {
             ...c.levelRules[lvl],
-            paths: [...paths, { pathIndex: paths.length, description: '', requiredTokens: [], backupTokens: null }],
+            paths: [...paths, { pathIndex: newIdx, description: '', requiredTokens: [], backupTokens: null }],
           },
         },
       }
@@ -356,7 +357,9 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
         ...c.levelRules,
         [lvl]: {
           ...c.levelRules[lvl],
-          paths: c.levelRules[lvl].paths.filter((_, i) => i !== pi),
+          paths: c.levelRules[lvl].paths
+            .filter((_, i) => i !== pi)
+            .map((p, i) => ({ ...p, pathIndex: i })),
         },
       },
     }))

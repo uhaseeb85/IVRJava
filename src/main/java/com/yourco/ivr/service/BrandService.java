@@ -98,6 +98,11 @@ public class BrandService {
             if (file.exists()) {
                 try {
                     BrandAuthConfig config = mapper.readValue(file, BrandAuthConfig.class);
+                    ValidationResult validation = validate(config);
+                    if (!validation.isValid()) {
+                        throw new BrandConfigException(
+                            "Invalid brand config " + brandId + ": " + validation.getMessage());
+                    }
                     registry.register(config);
                     return config;
                 } catch (IOException ex) {

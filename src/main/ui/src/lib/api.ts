@@ -34,7 +34,10 @@ export async function getBrands(): Promise<BrandSummary[]> {
 }
 
 export function getBrand<T>(id: string): Promise<T> {
-  return fetch('/api/brands/' + id).then(r => r.json())
+  return fetch('/api/brands/' + encodeURIComponent(id)).then(r => {
+    if (!r.ok) throw new Error(`Failed to load brand (${r.status})`)
+    return r.json()
+  })
 }
 
 // `_existing` is a frontend-only marker controlling POST (create) vs PUT (update);
@@ -49,7 +52,10 @@ export function saveBrand<T extends { brandId: string; _existing?: boolean }>(cf
 }
 
 export function deleteBrand(id: string): Promise<Response> {
-  return fetch('/api/brands/' + id, { method: 'DELETE' })
+  return fetch('/api/brands/' + id, { method: 'DELETE' }).then(r => {
+    if (!r.ok) throw new Error(`Failed to delete brand (${r.status})`)
+    return r
+  })
 }
 
 /** Clone a brand with a new ID. */

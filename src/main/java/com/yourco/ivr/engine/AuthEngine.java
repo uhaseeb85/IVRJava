@@ -10,6 +10,7 @@ import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
+import com.yourco.ivr.exception.BrandConfigException;
 import com.yourco.ivr.exception.SessionLockedException;
 import com.yourco.ivr.exception.SessionNotFoundException;
 import com.yourco.ivr.engine.path.ActivePath;
@@ -115,8 +116,26 @@ public class AuthEngine {
         if (config.isIdentificationOnly()) {
             throw new IllegalArgumentException("Escalation is not supported for identification-only brands");
         }
+
+        // Guard against escalating terminal sessions
+        SessionStatus status = session.getStatus();
+        if (status == SessionStatus.AUTHENTICATED
+            || status == SessionStatus.FAILED
+            || status == SessionStatus.REDIRECT_TO_AGENT) {
+            return AuthenticateResponse.fromSession(session);
+        }
+
         if (!newTarget.isHigherThan(current)) {
             throw new IllegalArgumentException("Target must exceed current level");
+        }
+
+        // Enforce customer's maximum allowed auth level
+        if (session.getCustomerPreferences() != null
+            && session.getCustomerPreferences().getMaxAllowedLevel() != null
+            && newTarget.isHigherThan(session.getCustomerPreferences().getMaxAllowedLevel())) {
+            throw new IllegalArgumentException(
+                "Escalation to " + newTarget + " exceeds customer's maximum allowed level ("
+                + session.getCustomerPreferences().getMaxAllowedLevel() + ")");
         }
 
         log.info("AUTH [{}] brand={} caller={} escalate {} -> {}",
@@ -132,7 +151,7 @@ public class AuthEngine {
             return finalizeIdentification(session);
         }
         if (config.isIdentificationOnly()) {
-            markCollectedTokensSatisfyingNoneRule(session, config);
+            markCollectedTokensSatisfyingNoneRule(session, config, externalValidator);
         }
         return evaluateProgress(session, config);
     }
@@ -141,11 +160,16 @@ public class AuthEngine {
      * For identification-only brands with NONE-level rules: any already-collected token that a
      * NONE path requires is promoted to a validated token, so progress evaluation can confirm it.
      */
-    private static void markCollectedTokensSatisfyingNoneRule(IvrSession session, BrandAuthConfig config) {
+    private static void markCollectedTokensSatisfyingNoneRule(IvrSession session, BrandAuthConfig config,
+                                                             ExternalValidator externalValidator) {
         LevelRule noneRule = config.getLevelRules().get(AuthLevel.NONE);
         for (TokenType collected : session.getCollectedTokens().keySet()) {
             if (isRequiredByAnyPath(noneRule, collected)) {
-                session.getValidatedTokens().add(collected);
+                ValidationResult vr = externalValidator.validate(session, collected,
+                    session.getCollectedTokens().get(collected));
+                if (vr.isValid()) {
+                    session.getValidatedTokens().add(collected);
+                }
             }
         }
     }
@@ -162,7 +186,8 @@ public class AuthEngine {
     public AuthenticateResponse evaluateProgress(IvrSession session, BrandAuthConfig config) {
         ActivePath active = pathManager.resolveActivePath(session, config);
         if (active.rule() == null) {
-            throw new IllegalArgumentException("No rule defined for level: " + session.getTargetLevel());
+            throw new BrandConfigException("No rule defined for level: " + session.getTargetLevel()
+                + " in brand " + session.getBrandId());
         }
         if (active.path() == null) {
             return failSession(session, "Authentication failed. All retry attempts exhausted.");
@@ -209,15 +234,21 @@ public class AuthEngine {
         List<ProcessingEvent> procLog = new ArrayList<>();
 
         ActivePath active = pathManager.resolveActivePath(session, config);
-        TokenType nextRequired = active.path() != null
-            ? TokenSlotResolver.findNextRequired(session.getValidatedTokens(), active.path()) : null;
-        List<TokenType> acceptedForSlot = nextRequired != null
-            ? slotResolver.buildAcceptedTokens(session, active.path(), nextRequired, nextRequired,
-                t -> PreferenceFilter.isBlocked(session, t)) : null;
+
+        // Early guard: if all fallback paths are exhausted, fail immediately
+        // without running validation or mutating state
+        if (active.path() == null) {
+            add(procLog, "WARN", "All authentication paths exhausted for level " + session.getTargetLevel());
+            return failSession(session, "Authentication failed. All retry attempts exhausted.");
+        }
+
+        TokenType nextRequired = TokenSlotResolver.findNextRequired(session.getValidatedTokens(), active.path());
+        List<TokenType> acceptedForSlot = slotResolver.buildAcceptedTokens(session, active.path(),
+            nextRequired, nextRequired, t -> PreferenceFilter.isBlocked(session, t));
 
         logContext(procLog, session, active, nextRequired, acceptedForSlot);
 
-        if (nextRequired != null && acceptedForSlot != null && !acceptedForSlot.contains(tokenType)) {
+        if (!acceptedForSlot.contains(tokenType)) {
             return attemptCoordinator.onWrongTypeFailure(session, config, nextRequired, procLog);
         }
 

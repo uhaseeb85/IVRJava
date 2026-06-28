@@ -118,12 +118,14 @@ function SessionRow({ session, onRefresh }: { session: SessionSummary; onRefresh
 export default function ActiveSessions() {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
   const [filterBrand, setFilterBrand] = useState('')
   const [filterStatus, setFilterStatus] = useState('')
   const [filterCaller, setFilterCaller] = useState('')
 
   const load = async (brand?: string, status?: string, caller?: string) => {
     setLoading(true)
+    setError('')
     try {
       const hasFilters = brand || status || caller
       const data = hasFilters
@@ -132,6 +134,7 @@ export default function ActiveSessions() {
       setSessions(data)
     } catch {
       setSessions([])
+      setError('Failed to load sessions — is the backend running?')
     } finally {
       setLoading(false)
     }
@@ -211,6 +214,10 @@ export default function ActiveSessions() {
               </button>
             )}
           </form>
+
+          {error && (
+            <div className="rounded-xl border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 p-4 text-sm text-red-600 dark:text-red-400">{error}</div>
+          )}
 
           {loading ? (
             <div className="space-y-3">

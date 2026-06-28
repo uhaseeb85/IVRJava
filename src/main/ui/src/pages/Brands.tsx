@@ -149,8 +149,12 @@ export default function Brands({ onEdit }: { onEdit: (b: Brand) => void }) {
 
   const deleteBrand = async (id: string) => {
     if (!confirm(`Delete brand "${id}"? This cannot be undone.`)) return
-    await apiDeleteBrand(id)
-    setBrands(prev => prev.filter(b => b.brandId !== id))
+    try {
+      await apiDeleteBrand(id)
+      setBrands(prev => prev.filter(b => b.brandId !== id))
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : 'Delete failed', false)
+    }
   }
 
   const handleClone = async () => {

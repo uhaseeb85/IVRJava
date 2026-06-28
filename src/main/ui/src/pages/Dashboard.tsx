@@ -194,6 +194,7 @@ export default function Dashboard() {
     setErrorBody('')
     setLastRequest(null)
     setLastTiming(null)
+    setShowAdvanced(false)
     setForm(f => ({ brandId: f.brandId, targetLevel: f.targetLevel, callerId: f.callerId || SAMPLE_CALLERS[0].ani }))
   }
 

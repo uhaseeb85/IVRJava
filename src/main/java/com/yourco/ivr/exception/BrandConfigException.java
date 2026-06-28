@@ -7,6 +7,10 @@ package com.yourco.ivr.exception;
  * Mapped to HTTP 500 by {@link com.yourco.ivr.api.IvrExceptionHandler}.
  */
 public class BrandConfigException extends RuntimeException {
+    public BrandConfigException(String message) {
+        super(message);
+    }
+
     public BrandConfigException(String message, Throwable cause) {
         super(message, cause);
     }

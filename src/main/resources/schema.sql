@@ -21,16 +21,20 @@ CREATE TABLE IF NOT EXISTS ivr_session (
     last_activity_at        TEXT NOT NULL
 );
 
+-- Legacy migrations for databases created before these columns existed.
+-- SQLite's ALTER TABLE ADD COLUMN silently fails when the column already
+-- exists in some versions, but throws "duplicate column name" in others.
+-- Safe-run each migration with a try/catch or run these only once manually.
 -- Migration: add locked_until if upgrading from older schema
-ALTER TABLE ivr_session ADD COLUMN locked_until TEXT;
+-- ALTER TABLE ivr_session ADD COLUMN locked_until TEXT;
 
 -- Migration: add transferred_from for call transfer support
-ALTER TABLE ivr_session ADD COLUMN transferred_from TEXT;
+-- ALTER TABLE ivr_session ADD COLUMN transferred_from TEXT;
 
 -- Migration: add phase, candidate_parties, matched_party, customer_preferences for disambiguation + preferences
-ALTER TABLE ivr_session ADD COLUMN phase TEXT;
-ALTER TABLE ivr_session ADD COLUMN candidate_parties TEXT;
-ALTER TABLE ivr_session ADD COLUMN matched_party TEXT;
-ALTER TABLE ivr_session ADD COLUMN customer_preferences TEXT;
-ALTER TABLE ivr_session ADD COLUMN disambiguation_attempt INTEGER DEFAULT 0;
-ALTER TABLE ivr_session ADD COLUMN version INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE ivr_session ADD COLUMN phase TEXT;
+-- ALTER TABLE ivr_session ADD COLUMN candidate_parties TEXT;
+-- ALTER TABLE ivr_session ADD COLUMN matched_party TEXT;
+-- ALTER TABLE ivr_session ADD COLUMN customer_preferences TEXT;
+-- ALTER TABLE ivr_session ADD COLUMN disambiguation_attempt INTEGER DEFAULT 0;
+-- ALTER TABLE ivr_session ADD COLUMN version INTEGER NOT NULL DEFAULT 0;

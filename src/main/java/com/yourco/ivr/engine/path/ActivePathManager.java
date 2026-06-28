@@ -56,6 +56,9 @@ public class ActivePathManager {
                                                       LevelRule rule,
                                                       List<ProcessingEvent> procLog,
                                                       BiFunction<IvrSession, BrandAuthConfig, AuthenticateResponse> evaluator) {
+        if (rule == null || rule.getPaths() == null) {
+            return null;
+        }
         Map<AuthLevel, Integer> pathIndexMap = session.getActivePathIndexByLevel();
         int nextPathIdx = pathIndexMap.getOrDefault(session.getTargetLevel(), 0) + 1;
         if (nextPathIdx >= rule.getPaths().size()) {
