@@ -54,8 +54,6 @@ Package `com.yourco.ivr.lookup`:
 ```java
 public interface TokenLookupService {
     String id();                         // stable registry key, e.g. "experian-ssn"
-    String displayName();                // UI label
-    String description();                // UI helptext
     Set<TokenType> supportedTokens();    // which token types this service can verify
     LookupResult verify(LookupRequest req);
 }
@@ -174,12 +172,13 @@ A `LookupServiceController` exposes the registry for administrative use:
 GET /api/lookup-services
 → 200 [
     { "id": "stub-verify",
-      "displayName": "Stub Verifier (always pass)",
-      "description": "...",
-      "supportedTokens": ["ACCOUNT_NUMBER","PIN","OTP","SSN_LAST4","CARD_LAST4","DATE_OF_BIRTH","VOICE_PRINT"]
+      "supportedTokens": ["ACCOUNT_NUMBER","PIN","OTP","SSN_LAST4","CARD_LAST4","DATE_OF_BIRTH","VOICE_PRINT"],
+      "status": "REGISTERED"
     }
 ]
 ```
+
+`GET /api/lookup-services/bindings` returns the active token→service bindings (`{ "bindings": {...}, "totalBound": n }`).
 
 Read-only; no authentication required.
 
@@ -219,14 +218,14 @@ Read-only; no authentication required.
 | `lookup/VerificationBinding.java` | Binding config value object |
 | `lookup/impl/StubLookupService.java` | Dev stub `@Component` |
 | `exception/UnknownLookupServiceException.java` | Thrown by registry |
-| `api/LookupServiceController.java` + `api/dto/LookupServiceDescriptor.java` | Discovery API |
+| `api/LookupServiceController.java` (inner `LookupServiceStatus` DTO) | Discovery API |
 | `api/dto/ProcessingEvent.java` | Audit log entries in responses |
 
 **Modified files:**
 
 | File | Change |
 |---|---|
-| `engine/AuthEngine.java` | Two-stage `validateExternally`, 7 deps, `ProcessingEvent` audit log, wrong-type guard |
+| `engine/AuthEngine.java` | Two-stage pipeline via `ExternalValidator`, 8 deps, `ProcessingEvent` audit log, wrong-type guard |
 | `validator/ValidationErrorCode.java` | Added `VERIFICATION_FAILED`, `VERIFICATION_UNAVAILABLE` |
 | `api/IvrExceptionHandler.java` | Map `UnknownLookupServiceException` → 400 |
 | `service/AuthenticateService.java` | 7 deps, disambiguation wiring, initial tokens support |

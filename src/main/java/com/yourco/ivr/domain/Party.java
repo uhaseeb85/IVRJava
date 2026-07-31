@@ -36,12 +36,12 @@ public class Party {
     /** Postal/ZIP code; not currently used by the engine but available for custom rules. */
     private String zipCode;
 
-    /** Whether this account is currently active; inactive parties are filtered by {@code EXCLUDE_INACTIVE} rule. */
+    /** Whether this account is currently active; inactive parties are filtered out during disambiguation. */
     private boolean active;
 
     /**
      * Whether this party's phone number is registered as the primary ANI on the account.
-     * The {@code PREFER_PRIMARY_ANI} disambiguation rule narrows to primary-ANI parties first.
+     * Disambiguation narrows to primary-ANI parties first.
      */
     private boolean primaryAni;
 

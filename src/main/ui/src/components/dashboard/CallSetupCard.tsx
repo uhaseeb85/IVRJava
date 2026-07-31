@@ -54,7 +54,7 @@ export default function CallSetupCard({
                     'text-left rounded-xl border p-3 transition-all',
                     selected
                       ? 'border-indigo-400 dark:border-indigo-500 bg-indigo-50/60 dark:bg-indigo-900/30 ring-1 ring-indigo-200 dark:ring-indigo-700'
-                      : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 hover:border-indigo-200 dark:hover:border-indigo-600 hover:bg-slate-50 dark:hover:bg-slate-650'
+                      : 'border-slate-200 dark:border-slate-600 bg-white dark:bg-slate-700 hover:border-indigo-200 dark:hover:border-indigo-600 hover:bg-slate-50 dark:hover:bg-slate-600'
                   )}
                 >
                   <div className="flex items-center gap-1.5">

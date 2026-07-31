@@ -76,7 +76,7 @@ export default function DevDetailsPanel({
     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
       <button
         onClick={() => setShowDev(v => !v)}
-        className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors"
+        className="w-full px-5 py-3 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
       >
         <div className="flex items-center gap-2 text-sm font-bold text-slate-700 dark:text-slate-300">
           <Wrench size={13} className="text-slate-400 dark:text-slate-500" />
@@ -140,7 +140,7 @@ export default function DevDetailsPanel({
             <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
               <button
                 onClick={() => setShowRequest(r => !r)}
-                className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors"
+                className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
               >
                 <div className="flex items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-300">
                   <Eye size={12} />

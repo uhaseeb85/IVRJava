@@ -1,7 +1,6 @@
 package com.yourco.ivr.api;
 
 import com.yourco.ivr.domain.IvrSession;
-import com.yourco.ivr.engine.AuthEngine;
 import com.yourco.ivr.repository.SessionRepository;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -16,11 +15,9 @@ import java.util.List;
 public class SessionAdminController {
 
     private final SessionRepository sessionRepo;
-    private final AuthEngine authEngine;
 
-    public SessionAdminController(SessionRepository sessionRepo, AuthEngine authEngine) {
+    public SessionAdminController(SessionRepository sessionRepo) {
         this.sessionRepo = sessionRepo;
-        this.authEngine = authEngine;
     }
 
     @GetMapping

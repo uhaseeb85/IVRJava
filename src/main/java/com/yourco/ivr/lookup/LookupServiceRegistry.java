@@ -48,8 +48,4 @@ public class LookupServiceRegistry {
     public Collection<TokenLookupService> all() {
         return byId.values();
     }
-
-    public boolean contains(String id) {
-        return byId.containsKey(id);
-    }
 }

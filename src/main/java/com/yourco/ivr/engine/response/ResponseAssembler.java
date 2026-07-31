@@ -12,7 +12,7 @@ import java.util.List;
 /**
  * Builds pre-configured {@link AuthenticateResponse} objects from a session.
  *
- * <p>Centralises the repeated {@code baseResponse(session).status(...)...build()}
+ * <p>Centralises the repeated {@code base(session).status(...)...build()}
  * pattern that appears across {@link com.yourco.ivr.engine.AuthEngine} methods.
  */
 public final class ResponseAssembler {

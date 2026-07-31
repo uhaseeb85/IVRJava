@@ -16,7 +16,7 @@ import java.util.Map;
  *
  * <p>To enable backend verification for a token, add an entry in {@link #bindings()}, e.g.:
  * <pre>{@code
- * m.put(TokenType.SSN, new VerificationBinding("experian-ssn", null, true));
+ * m.put(TokenType.SSN_LAST4, new VerificationBinding("experian-ssn", null, true));
  * }</pre>
  */
 @Component

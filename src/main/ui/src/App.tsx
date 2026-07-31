@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { cn } from './lib/utils'
 import {
   LayoutDashboard, Shield, History, ChevronLeft, ChevronRight, Zap,
-  PhoneOff, GitBranch, Activity, Moon, Sun, Truck,
+  PhoneOff, Activity, Moon, Sun, Truck,
 } from 'lucide-react'
 import Dashboard from './pages/Dashboard'
 import Brands from './pages/Brands'

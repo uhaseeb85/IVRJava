@@ -14,8 +14,8 @@ import java.util.Set;
  *       blocked, the engine tries backup alternatives; if all are blocked it advances to the
  *       next fallback path.</li>
  *   <li>{@code maxAllowedLevel} caps the authentication level the session can reach, regardless
- *       of the brand config or caller request. (Currently stored but not enforced by the
- *       engine — intended for future use.)</li>
+ *       of the brand config or caller request. Enforced on escalation:
+ *       {@link com.yourco.ivr.engine.AuthEngine#escalate} rejects targets above the cap.</li>
  * </ul>
  *
  * <p>Loaded by {@link com.yourco.ivr.preference.CustomerPreferenceProvider}. The stub

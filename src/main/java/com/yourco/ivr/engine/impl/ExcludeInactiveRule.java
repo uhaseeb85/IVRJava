@@ -9,9 +9,9 @@ import java.util.stream.Collectors;
 /**
  * Disambiguation pre-filter that removes parties marked as inactive.
  *
- * <p>Enable by adding {@code {"type": "EXCLUDE_INACTIVE"}} to a brand's
- * {@code disambiguation.rules} list. Applied before token-based narrowing begins.
- * If all parties are inactive the candidate list becomes empty and disambiguation fails.
+ * <p>Always applied by {@link com.yourco.ivr.engine.DisambiguationEngine} before token-based
+ * narrowing begins (not configurable per brand). If all parties are inactive the candidate
+ * list becomes empty and disambiguation fails.
  */
 public class ExcludeInactiveRule implements DisambiguationRule {
 

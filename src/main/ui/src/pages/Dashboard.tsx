@@ -30,16 +30,14 @@ export default function Dashboard() {
   const [lastTiming, setLastTiming] = useState<number | null>(null)
   // Ref so steps always capture their own timing (useState update is async/stale in closures)
   const timingRef = useRef<number>(0)
-  const [stats, setStats] = useState({ today: 0, total: 0, brands: [] as BrandSummary[] })
+  const [stats, setStats] = useState({ brands: [] as BrandSummary[] })
   const [recentSessions, setRecentSessions] = useState<SessionRecord[]>([])
   const [showRecent, setShowRecent] = useState(false)
   const [showProcLog, setShowProcLog] = useState(true)
 
   useEffect(() => {
     const all = loadSessions()
-    const today = all.filter(s => new Date(s.startedAt).toDateString() === new Date().toDateString()).length
     setRecentSessions(all.slice(0, 5))
-    setStats(s => ({ ...s, today, total: all.length }))
     getBrands()
       .then(brands => setStats(s => ({ ...s, brands })))
       .catch(() => {})
@@ -111,7 +109,6 @@ export default function Dashboard() {
     setSession(rec)
     upsertSession(rec)
     setRecentSessions(loadSessions().slice(0, 5))
-    setStats(s => ({ ...s, today: s.today + 1, total: s.total + 1 }))
   }
 
   const appendStep = (step: SessionStep, data: Record<string, unknown>) => {

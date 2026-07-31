@@ -69,7 +69,7 @@ http://localhost:8081/v3/api-docs
 ### How to Test Drive the APIs
 
 1. **Start the service** → `mvn spring-boot:run`
-2. **Open Swagger UI** → navigate to `http://localhost:8080/swagger-ui.html`
+2. **Open Swagger UI** → navigate to `http://localhost:8081/swagger-ui.html`
 3. **Expand the "IVR Authentication" section** to see all endpoints
 4. **Try a full auth flow**:
 
@@ -124,37 +124,53 @@ http://localhost:8081/v3/api-docs
 src/
 ├── main/
 │   ├── java/com/yourco/ivr/
-│   │   ├── api/               # REST controllers + DTOs
+│   │   ├── api/               # REST controllers + DTOs + exception handler
 │   │   │   ├── AuthenticateController.java
+│   │   │   ├── BrandController.java
 │   │   │   ├── IvrExceptionHandler.java
+│   │   │   ├── LookupServiceController.java
+│   │   │   ├── SessionAdminController.java
+│   │   │   ├── TransferPoliciesController.java
+│   │   │   ├── action/        # RequestAction + RequestActionDiscriminator
 │   │   │   └── dto/
 │   │   ├── domain/            # Core domain model
 │   │   │   ├── AuthLevel.java, TokenType.java, IvrSession.java, ...
 │   │   │   └── config/        # Brand config model
 │   │   ├── engine/            # Auth state machine
 │   │   │   ├── AuthEngine.java
+│   │   │   ├── AttemptCoordinator.java
+│   │   │   ├── DisambiguationEngine.java
 │   │   │   ├── PromptResolver.java
-│   │   │   └── DisambiguationEngine.java
+│   │   │   └── path/, preference/, response/, slot/, validation/
 │   │   ├── service/           # AuthenticateService orchestrator
 │   │   ├── validator/         # Token validation layer
 │   │   │   ├── TokenValidator.java (interface)
 │   │   │   ├── TokenValidatorRegistry.java
-│   │   │   └── impl/          # 7 stub validators
+│   │   │   ├── ValidationResult.java
+│   │   │   └── impl/          # AbstractTokenValidator + 7 validators
+│   │   ├── lookup/            # Backend verification (SPI + registry + executor)
+│   │   ├── partylookup/       # ANI → Party resolution
+│   │   ├── preference/        # Customer preference provider
 │   │   ├── registry/          # Brand config loader
 │   │   ├── repository/        # SQLite session storage
 │   │   └── exception/         # Custom exceptions
-    │   └── resources/
-    │       ├── application.properties
-    │       └── schema.sql
-    │
-    ├── config/brands/              # External brand JSON files
-    │   ├── brand_a.json
-    │   ├── brand_b.json
-    │   ├── id_only_brand.json
-    │   └── test_brand.json
-    │
-    └── config/transfers/           # External transfer policy files
-        └── transfer-policies.json
+│   ├── resources/
+│   │   ├── application.properties
+│   │   ├── schema.sql
+│   │   └── static/            # Admin Console SPA (built from src/main/ui/)
+│   └── ui/                    # React admin console source (builds into resources/static/)
+└── test/
+    └── java/com/yourco/ivr/   # Integration + unit tests
+
+config/brands/              # External brand JSON files (repo root)
+├── brand_a.json
+├── brand_b.json
+├── id_only_brand.json
+├── id_only_no_rules.json
+└── test_brand.json
+
+config/transfers/           # External transfer policy files (repo root)
+└── transfer-policies.json
 ```
 
 ---
@@ -233,7 +249,7 @@ The project uses **Spring Boot Starter Test** (JUnit 4/5, Mockito).
 mvn test
 
 # Run a specific test class
-mvn test -Dtest=AuthEngineTest
+mvn test -Dtest=IvrAuthIntegrationTest
 ```
 
 ---

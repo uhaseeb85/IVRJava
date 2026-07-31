@@ -7,7 +7,7 @@ import com.yourco.ivr.domain.TokenType;
  *
  * <p>This replaces the former per-brand {@code verificationSources} config block: backend
  * verification is now wired in code rather than from brand JSON or the UI. The engine consults
- * this after the format gate passes — see {@code AuthEngine.validateExternally}.
+ * this after the format gate passes — see {@link com.yourco.ivr.engine.validation.ExternalValidator}.
  *
  * @see DefaultVerificationBindings
  */

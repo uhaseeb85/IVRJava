@@ -6,7 +6,7 @@ This file is read by Claude Code at the start of every session. Keep it up to da
 
 ## Project Overview
 
-Multi-brand IVR authentication engine. A Spring Boot 2.7.x backend exposes a unified REST endpoint that drives a state machine through party disambiguation → token collection → progressive auth levels. A React/Vite admin UI manages brand configuration files.
+Multi-brand IVR authentication engine. A Spring Boot 2.7.x backend exposes a unified REST endpoint that drives a state machine through party disambiguation → token collection → progressive auth levels. A React/Vite admin console provides a test console, brand editor, session monitoring, and transfer-policy management.
 
 ---
 
@@ -58,7 +58,7 @@ npm run build          # compiles → src/main/resources/static/ (checked in)
 
 | URL | Purpose |
 |---|---|
-| `http://localhost:8081/` | Brand Config Editor (production build) |
+| `http://localhost:8081/` | Admin Console (production build) |
 | `http://localhost:8081/swagger-ui.html` | Interactive API docs |
 | `http://localhost:8081/v3/api-docs` | Raw OpenAPI JSON |
 | `http://localhost:5173/` | Frontend dev server (hot reload) |
@@ -82,13 +82,13 @@ src/main/java/com/yourco/ivr/
 ├── preference/             # CustomerPreferenceProvider interface + stub
 └── exception/              # Custom RuntimeException subclasses
 
-src/main/ui/src/            # React frontend
-├── App.tsx                 # Layout, routing (page state), collapsible sidebar
-├── pages/Dashboard.tsx     # Test console (session start/token submit/escalate)
-├── pages/Brands.tsx        # Brand card grid + search
-├── pages/BrandEditor.tsx   # Rules/Disambiguation/Flow/JSON tabs
-├── pages/SessionLog.tsx    # localStorage-backed session history
-└── lib/sessions.ts         # Session history persistence (localStorage, 200-entry cap)
+src/main/ui/src/            # React admin console
+├── App.tsx                 # Layout, navigation (7 pages), collapsible sidebar
+├── pages/                  # Dashboard (test console), Brands, BrandEditor,
+│                           # ActiveSessions, SessionLog, LookupServices, TransferPolicies
+├── components/             # Shared + dashboard components (EmptyState, StatusBadge, ...)
+└── lib/                    # api.ts (REST client), ivrMeta.ts (enum metadata),
+                            # sessions.ts (localStorage history), styles.ts, utils.ts
 
 config/brands/              # External brand JSON files (loaded at startup, managed via UI)
 config/transfers/           # Transfer policy JSON files
@@ -113,7 +113,7 @@ AuthenticateController → AuthenticateService
         │       1. validateExternally() via TokenValidatorRegistry
         │       2. resolveBackupToken() — map alt token → required token
         │       3. add to validatedTokens, clear attemptCount
-        │       4. evaluateProgress() → COLLECTING / AUTHENTICATED / LOCKED
+        │       4. evaluateProgress() → COLLECTING / AUTHENTICATED / REDIRECT_TO_AGENT
         │
         └── [escalate] AuthEngine.escalate()
                 → set new targetLevel → evaluateProgress()
@@ -148,7 +148,7 @@ AuthenticateController → AuthenticateService
 
 ## Testing
 
-Tests are integration tests using `@SpringBootTest(webEnvironment = RANDOM_PORT)` with `TestRestTemplate`. The SQLite DB is created fresh per test run (in-memory via `spring.datasource.url=jdbc:sqlite::memory:` injected by test config, or the file DB if not overridden).
+Tests are integration tests using `@SpringBootTest(webEnvironment = RANDOM_PORT)` with `TestRestTemplate`. The SQLite DB is created fresh per test run (`spring.datasource.url=jdbc:sqlite:target/test-ivr-auth.db` in `src/test/resources/application.properties`).
 
 ```bash
 mvn test                          # run everything
@@ -168,7 +168,7 @@ Files loaded at startup from these directories (created automatically if missing
 | `./config/brands/` | `{brandId}.json` — one file per brand |
 | `./config/transfers/` | `transfer-policies.json` — all transfer policies in one file |
 
-Changes to brand files can be picked up at runtime via `PUT /api/brands/{id}` (which calls `BrandService.save()` and refreshes the registry). Transfer policies require a restart to reload.
+Changes to brand files can be picked up at runtime via `PUT /api/brands/{id}` (which calls `BrandService.save()` and refreshes the registry). Transfer policies are hot-reloadable too — `PUT /api/transfers` replaces the file and refreshes the in-memory registry immediately.
 
 ---
 
@@ -176,5 +176,5 @@ Changes to brand files can be picked up at runtime via `PUT /api/brands/{id}` (w
 
 - **No new npm packages** unless clearly necessary — the UI intentionally has minimal dependencies (React, Tailwind, lucide-react, tailwind-merge, clsx).
 - **Session history** is stored in `localStorage` under key `ivr_sessions_v1`, capped at 200 entries. It's written by `Dashboard.tsx` and read by `SessionLog.tsx` via `src/lib/sessions.ts`.
-- **The `_existing` flag** on `BrandConfig` in `BrandEditor.tsx` is a frontend-only marker (stripped before saving) that controls whether `POST` or `PUT` is used. It is never sent to the backend.
+- **The `_existing` flag** on `BrandConfig` in `BrandEditor.tsx` is a frontend-only marker that controls whether `POST` or `PUT` is used. It is sent with `saveBrand()` payloads (the backend tolerates the unknown field) and is only stripped in the JSON preview tab.
 - **Build output** goes to `src/main/resources/static/` via `vite.config.ts`. This directory is committed and served by Spring Boot's static resource handler.

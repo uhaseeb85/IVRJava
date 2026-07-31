@@ -1,6 +1,6 @@
 package com.yourco.ivr.api;
 
-import com.yourco.ivr.domain.ValidationResult;
+import com.yourco.ivr.validator.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.service.BrandService;
 import io.swagger.v3.oas.annotations.Operation;

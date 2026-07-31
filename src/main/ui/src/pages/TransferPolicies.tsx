@@ -3,9 +3,7 @@ import { Truck, Plus, Save, Trash2, AlertCircle } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { getTransferPolicies, saveTransferPolicies, type TransferPolicy } from '../lib/api'
 import EmptyState from '../components/EmptyState'
-
-const LEVELS = ['NONE', 'BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
-const TOKENS = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
+import { LEVEL_ORDER as LEVELS, TOKENS } from '../lib/ivrMeta'
 
 function emptyPolicy(): TransferPolicy {
   return { sourceSystemId: '', honoredTokens: ['ACCOUNT_NUMBER'], maxHonoredLevel: 'BASIC', enabled: true }

@@ -4,8 +4,9 @@ import { cn } from '../lib/utils'
 import { getActiveSessions, searchSessions, deleteSession, type SessionSummary } from '../lib/api'
 import EmptyState from '../components/EmptyState'
 import StatusBadge from '../components/StatusBadge'
+import { STATUSES } from '../lib/ivrMeta'
 
-const STATUSES = ['', 'COLLECTING', 'AUTHENTICATED', 'FAILED', 'REDIRECT_TO_AGENT', 'EXPIRED'] as const
+const FILTER_STATUSES = ['', ...STATUSES] as const
 
 function SessionRow({ session, onRefresh }: { session: SessionSummary; onRefresh: () => void }) {
   const [expanded, setExpanded] = useState(false)
@@ -24,7 +25,7 @@ function SessionRow({ session, onRefresh }: { session: SessionSummary; onRefresh
   return (
     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
       <div
-        className="px-5 py-4 flex items-center gap-4 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors"
+        className="px-5 py-4 flex items-center gap-4 cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
         onClick={() => setExpanded(e => !e)}
       >
         <div className="w-9 h-9 rounded-lg bg-indigo-100 dark:bg-indigo-900/50 flex items-center justify-center shrink-0">
@@ -184,7 +185,7 @@ export default function ActiveSessions() {
                 value={filterStatus}
                 onChange={e => setFilterStatus(e.target.value)}
               >
-                {STATUSES.map(s => (
+                {FILTER_STATUSES.map(s => (
                   <option key={s} value={s}>{s || 'Any status'}</option>
                 ))}
               </select>

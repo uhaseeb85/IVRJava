@@ -1,4 +1,4 @@
-// Presentation metadata for the guided Test Console ("call simulation").
+// Shared IVR metadata for the admin console and guided Test Console.
 // Pure constants — no logic. Mirrors the small, stable backend enums plus
 // human-friendly labels so a first-time user never needs to know the raw values.
 
@@ -10,6 +10,9 @@ export const LEVEL_ORDER = ['NONE', 'BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as
 export const TOKENS = [
   'ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4',
 ] as const
+
+// Session statuses shown in the Active Sessions admin page (mirrors the SessionStatus enum).
+export const STATUSES = ['COLLECTING', 'AUTHENTICATED', 'FAILED', 'REDIRECT_TO_AGENT', 'EXPIRED'] as const
 
 // Sample values that all pass the (lenient stub) validators, so the user can
 // complete a flow without knowing what a "valid" token looks like.
@@ -33,7 +36,7 @@ export const LEVEL_BLURB: Record<string, string> = {
 }
 
 // Human-readable name for each token, used in spoken-style prompts and labels.
-export const TOKEN_LABEL: Record<string, string> = {
+const TOKEN_LABEL: Record<string, string> = {
   ACCOUNT_NUMBER: 'account number',
   PIN: 'PIN',
   OTP: 'one-time passcode',

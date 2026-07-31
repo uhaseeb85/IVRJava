@@ -20,7 +20,7 @@ export default function ProcessingLog({ log, open, onToggle }: {
     <div className="rounded-lg border border-slate-200 dark:border-slate-700 overflow-hidden">
       <button
         onClick={onToggle}
-        className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-750 transition-colors"
+        className="w-full px-4 py-2.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
       >
         <div className="flex items-center gap-2 text-xs font-bold text-slate-700 dark:text-slate-300">
           <Activity size={12} className="text-indigo-500" />

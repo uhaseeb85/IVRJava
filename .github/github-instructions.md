@@ -232,7 +232,7 @@ The project uses **Spring Boot Starter Test** (JUnit 4/5, Mockito).
 mvn test
 
 # Run a specific test class
-mvn test -Dtest=AuthEngineTest
+mvn test -Dtest=IvrAuthIntegrationTest
 ```
 
 ---

@@ -3,10 +3,9 @@ import { cn } from '../lib/utils'
 import { ArrowLeft, Save, Settings2, Terminal, GitBranch, Lock, Plus, Trash2 } from 'lucide-react'
 import { getBrand, saveBrand } from '../lib/api'
 import { editorInputCls as inputCls } from '../lib/styles'
+import { LEVELS, TOKENS } from '../lib/ivrMeta'
 
-const LEVELS = ['BASIC', 'STANDARD', 'ELEVATED', 'ADMIN'] as const
-const TYPES  = ['ACCOUNT_NUMBER', 'PIN', 'OTP', 'SSN_LAST4', 'VOICE_PRINT', 'DATE_OF_BIRTH', 'CARD_LAST4'] as const
-type TokenType = typeof TYPES[number]
+type TokenType = (typeof TOKENS)[number]
 
 interface AuthPath {
   pathIndex: number
@@ -238,7 +237,7 @@ function LevelRuleCard({
                   <div>
                     <label className="block text-xs font-semibold text-slate-500 mb-2">Required Tokens</label>
                     <div className="flex flex-wrap gap-1.5">
-                      {TYPES.map(t => (
+                      {TOKENS.map(t => (
                         <span
                           key={t}
                           className={tokenChip(p.requiredTokens.includes(t))}
@@ -256,7 +255,7 @@ function LevelRuleCard({
                         Backup tokens for <span className="text-slate-700">{req}</span>
                       </label>
                       <div className="flex flex-wrap gap-x-4 gap-y-2">
-                        {TYPES.filter(t => t !== req).map(t => {
+                        {TOKENS.filter(t => t !== req).map(t => {
                           const checked = !!(p.backupTokens?.[req]?.includes(t))
                           return (
                             <label key={t} className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer hover:text-slate-800 select-none">

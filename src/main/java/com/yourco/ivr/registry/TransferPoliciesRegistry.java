@@ -14,7 +14,6 @@ import javax.annotation.PostConstruct;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -150,13 +149,4 @@ public class TransferPoliciesRegistry {
         return policy.getMaxHonoredLevel() != null ? policy.getMaxHonoredLevel() : AuthLevel.NONE;
     }
 
-    /**
-     * Returns the list of token types honored from {@code sourceSystemId}; returns an empty
-     * list if the policy is absent, disabled, or has no honored tokens defined.
-     */
-    public List<TokenType> getHonoredTokens(String sourceSystemId) {
-        TransferPolicy policy = get(sourceSystemId);
-        if (policy == null || !policy.isEnabled()) return Collections.emptyList();
-        return policy.getHonoredTokens() != null ? policy.getHonoredTokens() : Collections.emptyList();
-    }
 }

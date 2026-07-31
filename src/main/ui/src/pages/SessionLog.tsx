@@ -19,7 +19,7 @@ function SessionCard({ rec }: { rec: SessionRecord }) {
   return (
     <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 shadow-sm overflow-hidden">
       <div
-        className="px-5 py-4 flex items-center gap-4 cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-750 transition-colors"
+        className="px-5 py-4 flex items-center gap-4 cursor-pointer hover:bg-slate-50/80 dark:hover:bg-slate-700 transition-colors"
         onClick={() => setExpanded(e => !e)}
       >
         <div className="flex-1 min-w-0">

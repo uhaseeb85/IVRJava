@@ -40,7 +40,7 @@ This single document covers everything: what the engine does, how to run it, the
 - **Structured audit logging** — Auth events (token pass/fail, escalation, lockout) logged by session with caller and brand context
 - **Initial tokens at session start** — Clients can submit pre-collected tokens when creating a session
 - **Declarative JSON config** — All brand rules live in `./config/brands/*.json`; no code changes needed to add or modify brands
-- **Brand Config Editor UI** — Web-based editor at `http://localhost:8081/` to create, view, update, and delete brand configs
+- **Admin Console UI** — React app at `http://localhost:8081/` with a Test Console, brand editor, session history, active-sessions monitor, transfer policies, and lookup-services pages
 - **Stateless engine** — `AuthEngine` holds no state, enabling horizontal scaling
 - **Interactive API docs** — Swagger UI built in via Springdoc OpenAPI
 
@@ -60,7 +60,7 @@ This single document covers everything: what the engine does, how to run it, the
 | Disambiguation Engine | Plain Java | Applies rules, selects differentiating tokens, resolves to a single party |
 | Customer Preference Provider | Pluggable interface | Loads customer preferences (blocked tokens, max level); stub returns empty |
 | Brand Config API | Spring MVC + File I/O | CRUD endpoints for managing brand JSON files |
-| Brand Editor UI | React + Vite + Tailwind CSS (shadcn-style) | Visual editor for brand configurations |
+| Admin Console UI | React + Vite + Tailwind CSS | Test console, brand editor, session monitoring, transfer policies |
 | API Docs | Springdoc OpenAPI 1.7 | Auto-generates Swagger UI |
 
 ### How the auth flow works
@@ -80,7 +80,7 @@ AuthenticateController → AuthenticateService
         │       1. validate format → optional backend verification
         │       2. map a backup token back to the required slot
         │       3. record success, clear that slot's attempt count
-        │       4. evaluateProgress() → COLLECTING / AUTHENTICATED / LOCKED
+        │       4. evaluateProgress() → COLLECTING / AUTHENTICATED / REDIRECT_TO_AGENT
         │
         └── [escalate] AuthEngine.escalate()
                 → set new targetLevel → evaluateProgress()
@@ -125,7 +125,7 @@ To build the static files served by Spring Boot: `npm run build` (output goes to
 
 | URL | Purpose |
 |---|---|
-| `http://localhost:8081/` | Brand Config Editor (production build) |
+| `http://localhost:8081/` | Admin Console (production build) |
 | `http://localhost:5173/` | Frontend dev server (hot reload) |
 | `http://localhost:8081/swagger-ui.html` | Interactive API docs |
 | `http://localhost:8081/v3/api-docs` | Raw OpenAPI JSON |
@@ -152,6 +152,33 @@ To build the static files served by Spring Boot: `npm run build` (output goes to
 | `PUT` | `/api/brands/{id}` | Update an existing brand config |
 | `DELETE` | `/api/brands/{id}` | Delete a brand config |
 | `POST` | `/api/brands/validate` | Dry-run validate a config without saving |
+| `POST` | `/api/brands/{id}/clone` | Clone a brand config under a new brand ID |
+| `GET` | `/api/brands/{id}/export` | Export a brand config as a downloadable JSON file |
+| `POST` | `/api/brands/import` | Import and save a brand config from raw JSON |
+
+### Lookup service endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/lookup-services` | List registered backend lookup services |
+| `GET` | `/api/lookup-services/bindings` | Show which tokens are bound to which lookup service |
+
+### Session admin endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/admin/sessions` | List all active sessions |
+| `GET` | `/api/admin/sessions/search` | Search sessions by brand, status, or caller ID |
+| `GET` | `/api/admin/sessions/{id}` | Get a session's full state |
+| `DELETE` | `/api/admin/sessions/{id}` | Force-end / delete a session |
+
+### Transfer policy endpoints
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/transfers` | List all transfer policies |
+| `GET` | `/api/transfers/{sourceSystemId}` | Get a single transfer policy |
+| `PUT` | `/api/transfers` | Replace all transfer policies (hot-reloads the registry) |
 
 ### Full auth flow example
 
@@ -224,7 +251,7 @@ Tokens are filtered per the source system's transfer policy (see [`config/transf
 
 ### Brand configs (JSON)
 
-Brand configs are stored in `./config/brands/*.json` (external to the JAR). They persist across restarts and can be managed via the Brand Editor UI at `http://localhost:8081/`. The shape mirrors the Java model in [`src/main/java/com/yourco/ivr/domain/config/`](src/main/java/com/yourco/ivr/domain/config/):
+Brand configs are stored in `./config/brands/*.json` (external to the JAR). They persist across restarts and can be managed via the Brands page in the Admin Console at `http://localhost:8081/`. The shape mirrors the Java model in [`src/main/java/com/yourco/ivr/domain/config/`](src/main/java/com/yourco/ivr/domain/config/):
 
 ```
 BrandAuthConfig
@@ -410,7 +437,7 @@ Per-source transfer policies control which external systems can transfer calls i
 | `maxHonoredLevel` | The caller's claimed auth level is capped at this value, regardless of what the source reports |
 | `enabled` | Set to `false` to disable a source without removing its config |
 
-> **Transfer policies require a restart to reload.** Unlike brand configs, they are not hot-reloadable.
+> **Transfer policies are hot-reloadable** — `PUT /api/transfers` (or the Transfer Policies page in the Admin Console) replaces the file and refreshes the in-memory registry immediately, without a restart.
 
 ---
 
@@ -587,8 +614,20 @@ Four code changes; no other files are affected.
 
 ```java
 public enum TokenType {
-    ACCOUNT_NUMBER, PIN, OTP, SSN_LAST4, VOICE_PRINT, DATE_OF_BIRTH, CARD_LAST4,
-    SECURITY_QUESTION   // ← add here
+    ACCOUNT_NUMBER("account number"), PIN("PIN"), OTP("one-time passcode"),
+    SSN_LAST4("last 4 digits of your SSN"), VOICE_PRINT("voice verification"),
+    DATE_OF_BIRTH("date of birth"), CARD_LAST4("last 4 digits of your card"),
+    SECURITY_QUESTION("security question answer");   // ← add here (displayName drives prompts)
+
+    private final String displayName;
+
+    TokenType(String displayName) {
+        this.displayName = displayName;
+    }
+
+    public String getDisplayName() {
+        return displayName;
+    }
 }
 ```
 
@@ -598,14 +637,10 @@ public enum TokenType {
 package com.yourco.ivr.validator.impl;
 
 import com.yourco.ivr.domain.TokenType;
-import com.yourco.ivr.validator.TokenValidationContext;
-import com.yourco.ivr.validator.TokenValidator;
-import com.yourco.ivr.validator.ValidationErrorCode;
-import com.yourco.ivr.validator.ValidationResult;
 import org.springframework.stereotype.Component;
 
 @Component
-public class SecurityQuestionValidator implements TokenValidator {
+public class SecurityQuestionValidator extends AbstractTokenValidator {
 
     @Override
     public TokenType supportedType() {
@@ -613,33 +648,21 @@ public class SecurityQuestionValidator implements TokenValidator {
     }
 
     @Override
-    public ValidationResult validate(TokenValidationContext ctx) {
-        // TODO: replace stub logic with a real call to your answer-verification service
-        String answer = ctx.getTokenValue();
-        if (answer != null && !answer.isBlank()) {
-            return ValidationResult.ok();
-        }
-        return ValidationResult.fail(ValidationErrorCode.INVALID);
+    protected boolean matches(String tokenValue) {
+        // Stub: accept any non-blank answer; replace with a real verification call
+        return !tokenValue.trim().isEmpty();
     }
 }
 ```
 
-`@Component` is all that's needed — `TokenValidatorRegistry` auto-discovers all `TokenValidator` beans on startup.
+`@Component` is all that's needed — `TokenValidatorRegistry` auto-discovers all `TokenValidator` beans on startup (the shared `AbstractTokenValidator` base handles null-checks and the `ValidationResult.fail(INVALID)` plumbing).
 
-**Step 3 — Add a human-readable prompt name** in `engine/PromptResolver.java` (`tokenName()`):
+**Step 3 — (Optional) custom prompt text** — prompts are generated from the enum's `displayName` automatically (`PromptResolver.tokenName()` returns `tokenType.getDisplayName()`), so no code change is needed here.
 
-```java
-case SECURITY_QUESTION: return "security question answer";
-```
-
-**Step 4 — (Only if the token can identify a party)** add it to `DisambiguationEngine`:
+**Step 4 — (Only if the token can identify a party)** add a `Party` field accessor in `engine/PartyTokenFields.java` (`FIELD_ACCESSORS`):
 
 ```java
-// in defaultTokenFieldMap():
 map.put(TokenType.SECURITY_QUESTION, Party::getSecurityAnswer);
-
-// and in formatTokenName():
-case SECURITY_QUESTION: return "security question answer";
 ```
 
 If the token is only used for auth (not disambiguation), skip Step 4. Then reference it in brand configs: `"requiredTokens": ["ACCOUNT_NUMBER", "SECURITY_QUESTION"]`. A restart is required for the enum + validator code changes.
@@ -796,10 +819,13 @@ public class DbCustomerPreferenceProvider implements CustomerPreferenceProvider 
 ```
 src/main/java/com/yourco/ivr/
 ├── api/                    # REST layer
-│   ├── AuthenticateController.java  # Unified session endpoints (3 total)
-│   ├── BrandController.java         # Brand CRUD endpoints
+│   ├── AuthenticateController.java  # Unified session endpoints (start/token/escalate/transfer)
+│   ├── BrandController.java         # Brand CRUD + clone/export/import/validate
 │   ├── IvrExceptionHandler.java     # Global error handler
 │   ├── LookupServiceController.java # Lookup service discovery API
+│   ├── SessionAdminController.java  # Session inspection / force-end admin API
+│   ├── TransferPoliciesController.java # Transfer policy CRUD (hot-reload)
+│   ├── action/                      # RequestAction + discriminator for the unified endpoint
 │   └── dto/                         # Request/Response DTOs
 ├── domain/                 # Core domain model
 │   ├── AuthLevel.java              # Auth level enum with rank
@@ -809,7 +835,6 @@ src/main/java/com/yourco/ivr/
 │   ├── SessionStatus.java          # Session lifecycle states
 │   ├── Party.java                  # Customer party record
 │   ├── CustomerPreference.java     # Blocked tokens, max level caps
-│   ├── ValidationResult.java       # Generic validation result
 │   └── config/                     # Brand config model + transfer policy
 │       ├── BrandAuthConfig.java
 │       ├── LevelRule.java
@@ -817,13 +842,18 @@ src/main/java/com/yourco/ivr/
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine/                 # Auth state machine
-│   ├── AuthEngine.java             # Core engine (disambig routing + pref filtering + two-stage validation)
+│   ├── AuthEngine.java             # Core engine (pref filtering + two-stage validation)
+│   ├── AttemptCoordinator.java     # Retry/lockout coordination
 │   ├── DisambiguationEngine.java   # Party resolution + token matching
 │   ├── DisambiguationRule.java     # Rule interface
-│   ├── PromptResolver.java
-│   └── impl/
-│       ├── ExcludeInactiveRule.java
-│       └── PrimaryAniRule.java
+│   ├── EngineConfig.java / PartyTokenFields.java
+│   ├── PromptResolver.java         # Prompt text (from TokenType displayName)
+│   ├── impl/                       # ExcludeInactiveRule, PrimaryAniRule (always-on)
+│   ├── path/                       # ActivePath + ActivePathManager (fallback progression)
+│   ├── preference/                 # PreferenceFilter (blocked-token skipping)
+│   ├── response/                   # ResponseAssembler + ProcessingLog
+│   ├── slot/                       # TokenSlotResolver (backup/alternative mapping)
+│   └── validation/                 # ExternalValidator (format + backend pipeline)
 ├── lookup/                 # Backend token verification
 │   ├── TokenLookupService.java     # SPI — pluggable backend verifier
 │   ├── LookupServiceRegistry.java  # Auto-built registry of all services
@@ -831,6 +861,8 @@ src/main/java/com/yourco/ivr/
 │   ├── DefaultVerificationBindings.java  # Default impl
 │   ├── VerificationBinding.java    # Binding config (serviceId, params, failClosed)
 │   ├── LookupRequest.java / LookupResult.java
+│   ├── LookupExecutor.java         # Timeout + circuit breaker around backend calls
+│   ├── LookupUnavailableException.java
 │   └── impl/StubLookupService.java # Configurable dev stub
 ├── partylookup/            # ANI → Party resolution
 │   ├── PartyLookupProvider.java
@@ -844,7 +876,8 @@ src/main/java/com/yourco/ivr/
 ├── validator/
 │   ├── TokenValidator.java         # Interface (format checks)
 │   ├── TokenValidatorRegistry.java
-│   └── impl/                       # 7 stub validators
+│   ├── ValidationResult.java       # Shared validation outcome (ok / fail / error)
+│   └── impl/                       # AbstractTokenValidator + 7 stub validators
 ├── registry/
 │   ├── BrandRulesRegistry.java
 │   ├── BrandRulesLoader.java       # Loads brand configs at startup
@@ -860,12 +893,23 @@ src/main/java/com/yourco/ivr/
 src/main/resources/
 ├── application.properties
 ├── schema.sql
-└── static/index.html        # Brand Config Editor SPA (built from src/main/ui/)
+└── static/                  # Admin Console SPA (built from src/main/ui/, checked in)
+
+src/main/ui/                 # React admin console source (builds into resources/static/)
+├── src/
+│   ├── App.tsx              # Layout + navigation (7 pages)
+│   ├── pages/               # Dashboard, Brands, BrandEditor, ActiveSessions,
+│   │                        # SessionLog, LookupServices, TransferPolicies
+│   ├── components/          # Shared + dashboard components
+│   └── lib/                 # api.ts, ivrMeta.ts, sessions.ts, styles.ts, utils.ts
+├── package.json
+└── vite.config.ts           # outDir → ../resources/static
 
 config/brands/               # External brand config directory (loaded at startup)
 ├── brand_a.json              # BRAND_A — full example with 3 levels, backup tokens
 ├── brand_b.json              # BRAND_B — simpler config with 2 levels
 ├── id_only_brand.json        # ID_ONLY_BRAND — identification-only mode
+├── id_only_no_rules.json     # ID_ONLY_NO_RULES — identification-only, no level rules
 └── test_brand.json           # TEST_BRAND — test brand with 2 levels
 
 config/transfers/             # External transfer policy directory
@@ -875,7 +919,10 @@ src/test/java/com/yourco/ivr/
 ├── IvrAuthIntegrationTest.java                 # Auth, transfer, backup, fallback
 ├── DisambiguationAndPreferenceTest.java        # Disambiguation + preferences (uses MockBean)
 ├── BackendVerificationIntegrationTest.java     # Backend verification pipeline
-└── IdentificationOnlyIntegrationTest.java      # Identification-only brand mode
+├── IdentificationOnlyIntegrationTest.java      # Identification-only brand mode
+├── lookup/LookupExecutorTest.java              # Timeout + circuit breaker
+├── registry/BrandRulesRegistryTest.java        # Registry reload behavior
+└── validator/TokenValidatorRegistryTest.java   # Validator discovery
 ```
 
 ---
@@ -933,7 +980,7 @@ mvn test -Dtest=IvrAuthIntegrationTest    # run a specific class
 - **[Lookup Service Design](LOOKUP_SERVICE_DESIGN.md)** — Backend token verification architecture
 - **[GitHub Guide](.github/github-instructions.md)** — Contribution workflow, branching strategy, and PR checklist
 - **[Swagger UI](http://localhost:8081/swagger-ui.html)** — Interactive API documentation (run the service first)
-- **[Brand Config Editor](http://localhost:8081/)** — Web UI for managing brand configurations
+- **[Admin Console](http://localhost:8081/)** — Web UI for the test console, brand editor, session monitoring, and transfer policies
 
 > Per project rule, update `README.md` and the Technical Spec whenever endpoints, brand config structure, or engine behavior changes.
 

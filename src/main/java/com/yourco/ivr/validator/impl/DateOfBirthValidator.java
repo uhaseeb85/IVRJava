@@ -1,10 +1,6 @@
 package com.yourco.ivr.validator.impl;
 
 import com.yourco.ivr.domain.TokenType;
-import com.yourco.ivr.validator.TokenValidationContext;
-import com.yourco.ivr.validator.TokenValidator;
-import com.yourco.ivr.validator.ValidationErrorCode;
-import com.yourco.ivr.validator.ValidationResult;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
@@ -16,21 +12,18 @@ import java.time.format.DateTimeParseException;
  * Accepts values parseable by {@link java.time.format.DateTimeFormatter#ISO_LOCAL_DATE} (YYYY-MM-DD).
  */
 @Component
-public class DateOfBirthValidator implements TokenValidator {
+public class DateOfBirthValidator extends AbstractTokenValidator {
 
     @Override
     public TokenType supportedType() { return TokenType.DATE_OF_BIRTH; }
 
     @Override
-    public ValidationResult validate(TokenValidationContext ctx) {
-        if (ctx.getTokenValue() == null) {
-            return ValidationResult.fail(ValidationErrorCode.INVALID);
-        }
+    protected boolean matches(String tokenValue) {
         try {
-            LocalDate.parse(ctx.getTokenValue(), DateTimeFormatter.ISO_LOCAL_DATE);
-            return ValidationResult.ok();
+            LocalDate.parse(tokenValue, DateTimeFormatter.ISO_LOCAL_DATE);
+            return true;
         } catch (DateTimeParseException e) {
-            return ValidationResult.fail(ValidationErrorCode.INVALID);
+            return false;
         }
     }
 }

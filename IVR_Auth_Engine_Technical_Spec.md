@@ -320,7 +320,7 @@ As of v2.1 the engine has been decomposed: `AuthEngine` orchestrates the token l
 
 Key design points in the actual implementation:
 
-- **7 constructor dependencies**: `BrandRulesRegistry`, `SessionRepository`, `PromptResolver`, `DisambiguationEngine`, `ActivePathManager`, `TokenSlotResolver`, `ExternalValidator`
+- **8 constructor dependencies**: `BrandRulesRegistry`, `SessionRepository`, `PromptResolver`, `DisambiguationEngine`, `ActivePathManager`, `TokenSlotResolver`, `ExternalValidator`, `AttemptCoordinator`
 - **Delegated collaborators**:
   - `ActivePathManager` — resolves the active `ActivePath` (rule + index + path), switches to fallback paths, advances/fails on exhaustion, and handles redirect-to-agent
   - `TokenSlotResolver` — maps a submitted backup token to its required slot (`resolveBackupToken` / `findRequiredTokenForSlot`), computes `findNextRequired`, and builds the `acceptedTokens` list
@@ -600,30 +600,18 @@ public enum ValidationErrorCode {
 
 ### 5.2 Sample Validator — OTP
 
+The shipped validators are format-only stubs sharing the `AbstractTokenValidator` base (null-check + `ValidationResult.fail(INVALID)` plumbing). Backend verification is a separate stage handled by `ExternalValidator` + `LookupExecutor` (see §5.5):
+
 ```java
 @Component
-public class OtpTokenValidator implements TokenValidator {
-
-    private final OtpServiceClient otpClient;
+public class OtpTokenValidator extends AbstractTokenValidator {
 
     @Override
     public TokenType supportedType() { return TokenType.OTP; }
 
     @Override
-    public ValidationResult validate(TokenValidationContext ctx) {
-        try {
-            OtpVerifyResponse resp = otpClient.verify(
-                ctx.getCallerId(),
-                ctx.getTokenValue(),
-                ctx.getBrandId()
-            );
-            return resp.isValid()
-                ? ValidationResult.ok()
-                : ValidationResult.fail(resp.isExpired() ? EXPIRED : INVALID);
-        } catch (ExternalApiException e) {
-            log.error("OTP validation error", e);
-            return ValidationResult.fail(EXTERNAL_ERROR);  // fail closed
-        }
+    protected boolean matches(String tokenValue) {
+        return tokenValue.length() == 6;
     }
 }
 ```
@@ -851,6 +839,24 @@ public AuthenticateResponse transferSession(IvrSession session,
 | `POST /ivr/authenticate` | Unified endpoint — start, transfer, submit token, or escalate | Discriminated by payload fields |
 | `GET /ivr/authenticate/{id}/status` | Poll current session state | For async IVR flows |
 | `DELETE /ivr/authenticate/{id}` | End session (hangup) | Cleanup only |
+| `GET /api/brands` | List brand configs | |
+| `GET /api/brands/{id}` | Get a brand config | |
+| `POST /api/brands` | Create a brand config | Validates, writes file, registers live |
+| `PUT /api/brands/{id}` | Update a brand config | |
+| `DELETE /api/brands/{id}` | Delete a brand config | |
+| `POST /api/brands/validate` | Dry-run validate a config | |
+| `POST /api/brands/{id}/clone` | Clone a brand config | |
+| `GET /api/brands/{id}/export` | Export a brand config as JSON | |
+| `POST /api/brands/import` | Import a brand config from JSON | |
+| `GET /api/lookup-services` | List registered lookup services | |
+| `GET /api/lookup-services/bindings` | Show token→service bindings | |
+| `GET /api/admin/sessions` | List active sessions | |
+| `GET /api/admin/sessions/search` | Search sessions | brand / status / callerId |
+| `GET /api/admin/sessions/{id}` | Get session detail | |
+| `DELETE /api/admin/sessions/{id}` | Force-end a session | |
+| `GET /api/transfers` | List transfer policies | |
+| `GET /api/transfers/{sourceSystemId}` | Get a transfer policy | |
+| `PUT /api/transfers` | Replace transfer policies | Hot-reloads the registry |
 
 **Discrimination logic** is centralized in `RequestActionDiscriminator.classify()`, which returns a `RequestAction` enum (`START`, `TRANSFER`, `SUBMIT_TOKEN`, `ESCALATE`):
 - No `sessionId`, no `sourceSystemId` → `START`
@@ -1393,7 +1399,7 @@ public class IvrExceptionHandler {
     @ExceptionHandler(SessionLockedException.class)
     public ResponseEntity<ErrorResponse> handleLocked(SessionLockedException e) {
         return ResponseEntity.status(423)
-            .body(new ErrorResponse("SESSION_LOCKED", e.getMessage()));
+            .body(new ErrorResponse("SESSION_REDIRECT_TO_AGENT", e.getMessage()));
     }
 
     @ExceptionHandler(SessionConflictException.class)
@@ -1418,6 +1424,30 @@ public class IvrExceptionHandler {
     public ResponseEntity<ErrorResponse> handleUnknownCaller(UnknownCallerException e) {
         return ResponseEntity.status(400)
             .body(new ErrorResponse("UNKNOWN_CALLER", e.getMessage()));
+    }
+
+    @ExceptionHandler(UnsupportedTokenTypeException.class)
+    public ResponseEntity<ErrorResponse> handleToken(UnsupportedTokenTypeException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("UNSUPPORTED_TOKEN", e.getMessage()));
+    }
+
+    @ExceptionHandler(UnknownLookupServiceException.class)
+    public ResponseEntity<ErrorResponse> handleLookupService(UnknownLookupServiceException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("UNKNOWN_LOOKUP_SERVICE", e.getMessage()));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<ErrorResponse> handleIllegal(IllegalArgumentException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("INVALID_REQUEST", e.getMessage()));
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    public ResponseEntity<ErrorResponse> handleValidation(MethodArgumentNotValidException e) {
+        return ResponseEntity.status(400)
+            .body(new ErrorResponse("VALIDATION_ERROR", e.getMessage()));
     }
 
     @ExceptionHandler(SessionSerializationException.class)
@@ -1453,7 +1483,9 @@ com.yourco.ivr
 │   ├── AuthenticateController.java         # delegates to RequestActionDiscriminator
 │   ├── BrandController.java
 │   ├── IvrExceptionHandler.java
-│   ├── LookupServiceController.java       # GET /api/lookup-services
+│   ├── LookupServiceController.java       # GET /api/lookup-services (+ /bindings)
+│   ├── SessionAdminController.java        # GET/DELETE /api/admin/sessions
+│   ├── TransferPoliciesController.java    # GET/PUT /api/transfers (hot-reload)
 │   ├── action/
 │   │   ├── RequestAction.java              # START / TRANSFER / SUBMIT_TOKEN / ESCALATE
 │   │   └── RequestActionDiscriminator.java # classifies a request by present fields
@@ -1463,11 +1495,8 @@ com.yourco.ivr
 │       ├── AuthenticateResponse.java
 │       ├── CallTransferRequest.java
 │       ├── ErrorResponse.java
-│       ├── EscalateRequest.java
-│       ├── LookupServiceDescriptor.java
 │       ├── ProcessingEvent.java
-│       ├── StartAuthenticateRequest.java
-│       └── TokenSubmitRequest.java
+│       └── StartAuthenticateRequest.java
 ├── domain
 │   ├── AuthLevel.java                      # NONE(0)..ADMIN(4)
 │   ├── TokenType.java                      # 7 types, each with a displayName
@@ -1476,7 +1505,6 @@ com.yourco.ivr
 │   ├── SessionPhase.java                   # DISAMBIGUATION / AUTHENTICATING
 │   ├── Party.java                          # 8 fields + additionalAttributes
 │   ├── CustomerPreference.java             # blockedTokens + maxAllowedLevel
-│   ├── ValidationResult.java               # generic ok/error result used by config validation
 │   └── config/
 │       ├── BrandAuthConfig.java            # brandId + levelRules + identificationOnly
 │       ├── LevelRule.java                  # paths + maxRetriesPerToken + tokenRetryLimits + lockoutSeconds
@@ -1484,7 +1512,8 @@ com.yourco.ivr
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine
-│   ├── AuthEngine.java                     # orchestrator; 7 collaborator deps
+│   ├── AuthEngine.java                     # orchestrator; 8 collaborator deps
+│   ├── AttemptCoordinator.java             # retry/lockout coordination
 │   ├── DisambiguationEngine.java           # always-on, 3-round max
 │   ├── DisambiguationRule.java             # interface
 │   ├── EngineConfig.java                   # wires activePathResolver + TokenSlotResolver beans
@@ -1499,7 +1528,8 @@ com.yourco.ivr
 │   ├── preference/
 │   │   └── PreferenceFilter.java           # blocked-token skipping
 │   ├── response/
-│   │   └── ResponseAssembler.java          # response factory methods
+│   │   ├── ResponseAssembler.java          # response factory methods
+│   │   └── ProcessingLog.java              # processingLog builder
 │   ├── slot/
 │   │   └── TokenSlotResolver.java          # backup→slot mapping + accepted tokens
 │   └── validation/
@@ -1511,6 +1541,8 @@ com.yourco.ivr
 │   ├── VerificationBindings.java           # interface
 │   ├── VerificationBinding.java            # serviceId + params + failClosed
 │   ├── DefaultVerificationBindings.java    # in-code bindings (empty by default)
+│   ├── LookupExecutor.java                 # timeout + circuit breaker
+│   ├── LookupUnavailableException.java
 │   └── impl/
 │       └── StubLookupService.java          # always-pass dev stub
 ├── partylookup/
@@ -1589,7 +1621,7 @@ public interface PartyLookupProvider {
 }
 ```
 
-A stub implementation (`StubPartyLookupProvider`) returns an empty list by default. Replace with a real implementation that queries your CRM/account system.
+A stub implementation (`StubPartyLookupProvider`) returns a single active party per caller (`partyId = "STUB-<callerId>"`, `accountNumber = callerId`, `active = true`, `primaryAni = true`). Replace with a real implementation that queries your CRM/account system.
 
 ### 13.3 DisambiguationRule (Interface)
 

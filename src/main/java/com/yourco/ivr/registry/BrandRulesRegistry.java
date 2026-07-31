@@ -71,7 +71,7 @@ public class BrandRulesRegistry {
      *
      * <p>A fresh map is built from {@code newConfigs} and swapped in via a single volatile
      * write, so concurrent {@link #get} calls never observe a partially-loaded registry. Used by
-     * {@link com.yourco.ivr.service.BrandService#refreshRegistry()} to reload from disk without a
+     * {@link com.yourco.ivr.service.BrandService#loadFromDirectory()} to reload from disk without a
      * gap where brands are absent.
      */
     public void replaceAll(Map<String, BrandAuthConfig> newConfigs) {

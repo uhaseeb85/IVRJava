@@ -1,26 +1,17 @@
 package com.yourco.ivr.validator.impl;
 
 import com.yourco.ivr.domain.TokenType;
-import com.yourco.ivr.validator.TokenValidationContext;
-import com.yourco.ivr.validator.TokenValidator;
-import com.yourco.ivr.validator.ValidationResult;
 import org.springframework.stereotype.Component;
 
 /** Format validator for {@link com.yourco.ivr.domain.TokenType#ACCOUNT_NUMBER}: accepts any non-blank value. */
 @Component
-public class AccountNumberValidator implements TokenValidator {
+public class AccountNumberValidator extends AbstractTokenValidator {
 
     @Override
-    public TokenType supportedType() {
-        return TokenType.ACCOUNT_NUMBER;
-    }
+    public TokenType supportedType() { return TokenType.ACCOUNT_NUMBER; }
 
     @Override
-    public ValidationResult validate(TokenValidationContext ctx) {
-        // Stub: accept any non-blank token value
-        if (ctx.getTokenValue() != null && !ctx.getTokenValue().trim().isEmpty()) {
-            return ValidationResult.ok();
-        }
-        return ValidationResult.fail(com.yourco.ivr.validator.ValidationErrorCode.INVALID);
+    protected boolean matches(String tokenValue) {
+        return !tokenValue.trim().isEmpty();
     }
 }

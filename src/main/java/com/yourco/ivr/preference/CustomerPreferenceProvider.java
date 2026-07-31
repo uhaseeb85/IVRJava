@@ -12,8 +12,8 @@ import com.yourco.ivr.domain.CustomerPreference;
  * <ul>
  *   <li>{@link com.yourco.ivr.domain.CustomerPreference#getBlockedTokens()} — the engine
  *       skips blocked tokens and tries backup alternatives or advances to the next path.</li>
- *   <li>{@link com.yourco.ivr.domain.CustomerPreference#getMaxAllowedLevel()} — intended to
- *       cap the reachable auth level (enforcement not yet implemented).</li>
+ *   <li>{@link com.yourco.ivr.domain.CustomerPreference#getMaxAllowedLevel()} — caps the
+ *       reachable auth level; escalation beyond it is rejected by the engine.</li>
  * </ul>
  *
  * <p>Replace {@link StubCustomerPreferenceProvider} with a real implementation that reads

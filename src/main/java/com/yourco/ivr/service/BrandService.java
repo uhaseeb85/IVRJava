@@ -2,7 +2,7 @@ package com.yourco.ivr.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
-import com.yourco.ivr.domain.ValidationResult;
+import com.yourco.ivr.validator.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.LevelRule;
 import com.yourco.ivr.domain.config.TokenPath;
@@ -34,9 +34,9 @@ import java.util.Map;
  * (required fields, non-empty paths). Never bypass this by calling
  * {@link BrandRulesRegistry#register} directly.
  *
- * <p>{@link #refreshRegistry()} performs an atomic reload: it reads and validates every config
- * file into a fresh map, then swaps it into the registry in one operation
- * ({@link BrandRulesRegistry#replaceAll}), so callers never observe a window where brands are
+ * <p>Config files are loaded at startup and on demand via {@link #loadFromDirectory()}, which
+ * reads and validates every file and atomically swaps the result into the registry
+ * ({@link BrandRulesRegistry#replaceAll}) — callers never observe a window where brands are
  * missing.
  */
 @Service
@@ -191,15 +191,6 @@ public class BrandService {
     }
 
     /** Atomically reloads the registry from the config directory (no missing-brand window). */
-    public void refreshRegistry() {
-        loadFromDirectory();
-    }
-
-    /**
-     * Reads and validates every brand config in the config directory and atomically swaps the
-     * full set into the registry via {@link BrandRulesRegistry#replaceAll}. Invalid or unreadable
-     * files are skipped (logged), so a single bad file never aborts the reload.
-     */
     public void loadFromDirectory() {
         registry.replaceAll(readValidConfigs());
     }
