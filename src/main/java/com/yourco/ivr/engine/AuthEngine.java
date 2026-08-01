@@ -108,8 +108,9 @@ public class AuthEngine {
         return onPartyResolved(session, config);
     }
 
-    public AuthenticateResponse escalate(String sessionId, AuthLevel newTarget) {
+    public AuthenticateResponse escalate(String sessionId, AuthLevel newTarget, String callerId) {
         IvrSession session = sessionRepo.getOrThrow(sessionId);
+        verifyCallerOwnership(session, callerId);
         AuthLevel current = session.getCurrentLevel();
 
         BrandAuthConfig config = rulesRegistry.get(session.getBrandId());
@@ -117,10 +118,11 @@ public class AuthEngine {
             throw new IllegalArgumentException("Escalation is not supported for identification-only brands");
         }
 
-        // Guard against escalating terminal sessions
+        // Escalation is only meaningful from a live session. FAILED and REDIRECT_TO_AGENT
+        // sessions are terminal; an AUTHENTICATED session may still escalate to a higher
+        // level (e.g. STANDARD -> ELEVATED prompts for the missing OTP — see spec §10.3).
         SessionStatus status = session.getStatus();
-        if (status == SessionStatus.AUTHENTICATED
-            || status == SessionStatus.FAILED
+        if (status == SessionStatus.FAILED
             || status == SessionStatus.REDIRECT_TO_AGENT) {
             return AuthenticateResponse.fromSession(session);
         }

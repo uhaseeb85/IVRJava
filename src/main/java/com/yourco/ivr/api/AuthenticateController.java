@@ -44,7 +44,7 @@ public class AuthenticateController {
             case TRANSFER:
                 return ResponseEntity.ok(authenticateService.transfer(toTransferRequest(req)));
             case ESCALATE:
-                return ResponseEntity.ok(authenticateService.escalate(req.getSessionId(), req.getTargetLevel()));
+                return ResponseEntity.ok(authenticateService.escalate(req.getSessionId(), req.getTargetLevel(), req.getCallerId()));
             default:
                 throw new IllegalStateException("Unknown action: " + action);
         }

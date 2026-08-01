@@ -79,20 +79,21 @@ export default function Dashboard() {
     const payload: Record<string, unknown> = {
       brandId: form.brandId,
       callerId: form.callerId || SAMPLE_CALLERS[0].ani,
-      targetLevel: form.targetLevel,
     }
     if (form.transfer === 'yes') {
       payload.sourceSystemId = 'LEGACY_IVR'
       payload.currentLevel = 'NONE'
       payload.validatedTokens = ['ACCOUNT_NUMBER']
+      payload.targetLevel = form.transferLevel || brandLevels[0] || 'STANDARD'
     }
     const data = await post(payload)
     if (!data) return
     setResponse(data)
+    const derived = data.targetLevel ? ` → system requires ${String(data.targetLevel)}` : ''
     const step: SessionStep = {
       at: new Date().toISOString(),
       type: 'start',
-      label: `Call placed → aiming for ${payload.targetLevel}${form.transfer === 'yes' ? ' (transfer)' : ''}`,
+      label: `Call placed${derived}${form.transfer === 'yes' ? ' (transfer)' : ''}`,
       response: data,
       status: String(data.status ?? 'COLLECTING'),
       timing: timingRef.current || undefined,
@@ -101,7 +102,7 @@ export default function Dashboard() {
       id: String(data.sessionId ?? `local-${Date.now()}`),
       brandId: String(payload.brandId),
       callerId: String(payload.callerId),
-      targetLevel: String(payload.targetLevel),
+      targetLevel: String(data.targetLevel ?? 'NONE'),
       startedAt: new Date().toISOString(),
       finalStatus: String(data.status ?? 'COLLECTING'),
       steps: [step],
@@ -192,7 +193,7 @@ export default function Dashboard() {
     setLastRequest(null)
     setLastTiming(null)
     setShowAdvanced(false)
-    setForm(f => ({ brandId: f.brandId, targetLevel: f.targetLevel, callerId: f.callerId || SAMPLE_CALLERS[0].ani }))
+    setForm(f => ({ brandId: f.brandId, callerId: f.callerId || SAMPLE_CALLERS[0].ani }))
   }
 
   const restoreSession = (rec: SessionRecord) => {
@@ -244,7 +245,7 @@ export default function Dashboard() {
   const selectedBrand = stats.brands.find(b => b.brandId === form.brandId)
   const brandLevels = levelsForBrand(selectedBrand)
   const idOnly = !!selectedBrand?.identificationOnly
-  const canPlaceCall = !!form.brandId && !!form.targetLevel && !loading
+  const canPlaceCall = !!form.brandId && !loading
 
   const acceptedTokens = (response?.acceptedTokens as string[] | undefined) ?? []
   const activeToken = form.tokenType || nextRequired || 'PIN'

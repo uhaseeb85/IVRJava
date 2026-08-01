@@ -81,7 +81,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5551111111", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5551111111", AuthLevel.STANDARD));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(body(resp).getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
@@ -97,7 +97,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5552222222", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5552222222", AuthLevel.STANDARD));
 
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(body(startResp).getPhase()).isEqualTo(SessionPhase.DISAMBIGUATION);
@@ -124,7 +124,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5553333333", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5553333333", AuthLevel.STANDARD));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(body(resp).getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
@@ -135,7 +135,7 @@ class DisambiguationAndPreferenceTest {
     void testDisambiguationZeroParties() {
         when(partyLookup.lookupByAni("5550000000")).thenReturn(Collections.emptyList());
 
-        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5550000000", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("TEST_BRAND", "5550000000", AuthLevel.STANDARD));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
@@ -149,7 +149,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5554444444", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5554444444", AuthLevel.STANDARD));
 
         assertThat(startResp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(body(startResp).getPhase()).isEqualTo(SessionPhase.DISAMBIGUATION);
@@ -170,7 +170,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> resp = post(startReq("BRAND_A", "5555555555", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> resp = post(startReq("BRAND_A", "5555555555", AuthLevel.STANDARD));
 
         assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(body(resp).getPhase()).isEqualTo(SessionPhase.AUTHENTICATING);
@@ -186,7 +186,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5556666666", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5556666666", AuthLevel.STANDARD));
 
         assertThat(body(startResp).getPhase()).isEqualTo(SessionPhase.DISAMBIGUATION);
         String sessionId = body(startResp).getSessionId();
@@ -207,7 +207,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5557777777", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5557777777", AuthLevel.STANDARD));
 
         String sessionId = body(startResp).getSessionId();
         TokenType disambigToken = body(startResp).getNextRequiredToken();
@@ -269,7 +269,7 @@ class DisambiguationAndPreferenceTest {
         when(preferenceProvider.getPreferences(anyString(), anyString()))
             .thenReturn(new CustomerPreference());
 
-        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5551212121", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5551212121", AuthLevel.STANDARD));
 
         String sessionId = body(startResp).getSessionId();
 
@@ -290,7 +290,7 @@ class DisambiguationAndPreferenceTest {
         prefs.setBlockedTokens(EnumSet.of(TokenType.PIN));
         when(preferenceProvider.getPreferences(anyString(), anyString())).thenReturn(prefs);
 
-        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5551313131", AuthLevel.BASIC));
+        ResponseEntity<AuthenticateResponse> startResp = post(startReq("TEST_BRAND", "5551313131", AuthLevel.STANDARD));
 
         String sessionId = body(startResp).getSessionId();
 

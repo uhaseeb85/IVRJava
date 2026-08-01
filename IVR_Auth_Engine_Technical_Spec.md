@@ -95,9 +95,33 @@ public class BrandAuthConfig {
     private String brandId;                           // e.g. "BRAND_A"
     private Map<AuthLevel, LevelRule> levelRules;     // one rule per level (not required when identificationOnly)
     private boolean identificationOnly;               // when true: identify-and-stop, access level stays NONE
+    private LevelDeterminationConfig levelDetermination; // optional: derive target level from call conditions
 }
 // Disambiguation is always-on and not configurable — see DisambiguationEngine (fixed 3-round
 // limit + EXCLUDE_INACTIVE / PREFER_PRIMARY_ANI rule chain). No per-brand config.
+
+// LevelDeterminationConfig.java — optional declarative level selection
+@Data
+public class LevelDeterminationConfig {
+    private List<LevelSelectionRule> rules;   // evaluated in order; first match wins
+    private AuthLevel defaultLevel;           // used when no rule matches
+}
+
+// LevelSelectionRule.java
+@Data
+public class LevelSelectionRule {
+    private String description;               // human label, surfaced in the processing log
+    private AuthLevel level;                  // level selected when all conditions pass
+    private List<LevelCondition> conditions;  // all must pass; empty = always match
+}
+
+// LevelCondition.java + LevelConditionType.java
+@Data
+public class LevelCondition {
+    private LevelConditionType type;          // ANI_MATCHED | PARTY_ACTIVE | PRIMARY_ANI | PARTY_ATTRIBUTE
+    private String key;                       // required when type = PARTY_ATTRIBUTE (attribute map key)
+    private String value;                     // expected attribute value (PARTY_ATTRIBUTE)
+}
 
 // LevelRule.java
 @Data
@@ -243,9 +267,20 @@ Each brand's rule set lives in its own JSON file in the external directory (`./c
       "maxRetriesPerToken": 2,
       "lockoutSeconds": 600
     }
+  },
+  "levelDetermination": {
+    "rules": [
+      { "description": "Premium segment customers", "level": "ELEVATED",
+        "conditions": [ { "type": "PARTY_ATTRIBUTE", "key": "segment", "value": "PREMIUM" } ] },
+      { "description": "Active account holders", "level": "STANDARD",
+        "conditions": [ { "type": "PARTY_ACTIVE" } ] }
+    ],
+    "defaultLevel": "STANDARD"
   }
 }
 ```
+
+> BRAND_A's shipped config includes this `levelDetermination` block, so clients (including the admin console) can start BRAND_A calls without a caller-supplied `targetLevel` — the level is derived (see §3.4). Brands without the block keep the legacy requirement: `targetLevel` on start, used verbatim (the shipped sample brands all define `levelDetermination`; the legacy path is covered by tests via an in-memory brand).
 
 ### 3.2 Brand B — Simpler Config
 
@@ -307,6 +342,52 @@ An identification-only brand may carry a single `NONE`-level rule whose tokens a
 ```
 
 A pure identify-and-stop brand simply omits `levelRules` entirely (set `identificationOnly: true` with no rules); the caller is identified on party resolution with no token collection.
+
+### 3.4 Declarative Level Determination
+
+Real IVR flows don't let the caller pick their auth level — the system leads the customer to the level the requested action requires. Brands can encode that decision declaratively via `levelDetermination`; the engine evaluates it once the caller's party is resolved (after ANI lookup / disambiguation) and **overrides any caller-supplied `targetLevel`**. The chosen level and matched rule are reported in the start response's `processingLog` (e.g. `Level determined: ELEVATED — rule "Premium segment customers"`).
+
+```json
+{
+  "brandId": "DEMO_BRAND",
+  "levelRules": { "BASIC": { "paths": [...] }, "STANDARD": { "paths": [...] }, "ELEVATED": { "paths": [...] } },
+  "levelDetermination": {
+    "rules": [
+      {
+        "description": "Premium segment customers",
+        "level": "ELEVATED",
+        "conditions": [ { "type": "PARTY_ATTRIBUTE", "key": "segment", "value": "PREMIUM" } ]
+      },
+      {
+        "description": "Active account holders",
+        "level": "STANDARD",
+        "conditions": [ { "type": "PARTY_ACTIVE" } ]
+      }
+    ],
+    "defaultLevel": "BASIC"
+  }
+}
+```
+
+**Condition types** (evaluated against the resolved `Party`):
+
+| Type | Passes when |
+|---|---|
+| `ANI_MATCHED` | The caller's ANI resolved to a party (always true at evaluation time — an empty lookup is rejected earlier). |
+| `PARTY_ACTIVE` | `party.isActive()`. |
+| `PRIMARY_ANI` | `party.isPrimaryAni()`. |
+| `PARTY_ATTRIBUTE` | `party.additionalAttributes[key]` equals `value` (e.g. `segment=PREMIUM`). |
+
+**Semantics.**
+
+- Rules are evaluated top to bottom; the **first** rule whose conditions **all** pass selects the level. A rule with an empty `conditions` list always matches (catch-all).
+- If no rule matches, `defaultLevel` is used.
+- The derived level is clamped to the customer's `maxAllowedLevel` preference (same guard as `escalate()`).
+- Identification-only brands always stay at `NONE` — `levelDetermination` is skipped.
+- Brands **without** `levelDetermination` keep the legacy behavior: the caller-supplied `targetLevel` is used verbatim and is **required** on start. For brands **with** it, `targetLevel` is optional and ignored.
+- `BrandService.validate()` rejects: a section with no rules and no `defaultLevel`, a rule/default level not present in `levelRules`, a condition without a `type`, and `PARTY_ATTRIBUTE` conditions without a `key`.
+
+Evaluation lives in `LevelDeterminationEngine.determine(config, party)` → `DeterminationResult(level, reason)`; the reason string only contains brand-config constants (never party-supplied values), so no sensitive data enters the log. The result is applied in `AuthenticateService.proceedAfterPartyResolved()` via `applyLevelDetermination()` before any progress evaluation. A ready-to-run example ships as `config/brands/determination_demo.json` (`DEMO_BRAND`).
 
 ---
 
@@ -945,9 +1026,12 @@ public class AuthenticateResponse {
     private List<TokenType> acceptedTokens;     // tokens the client may submit at this step (required + unblocked backups)
     private SessionPhase    phase;              // DISAMBIGUATION or AUTHENTICATING
     private String          matchedPartyId;     // set once party disambiguation resolves
-    private List<ProcessingEvent> processingLog; // per-token audit events (token submissions only)
+    private List<ProcessingEvent> processingLog; // audit events: token submissions, and the start
+                                                // response when levelDetermination derived the level
 }
 ```
+
+> **`targetLevel` on start is optional.** `StartAuthenticateRequest.targetLevel` has no `@NotNull`. For brands with a `levelDetermination` section the level is derived from call conditions and any caller-supplied value is ignored; for brands without one, omitting it is rejected (HTTP 400) because there is nothing to derive from.
 
 ---
 
@@ -964,13 +1048,15 @@ public class AuthenticateService {
     private final PartyLookupProvider partyLookup;
     private final CustomerPreferenceProvider preferenceProvider;
     private final DisambiguationEngine disambiguationEngine;
+    private final LevelDeterminationEngine levelDeterminationEngine;  // derives target level from rules
 
     public AuthenticateService(AuthEngine engine, SessionRepository sessionRepo,
                                 BrandRulesRegistry rulesRegistry,
                                 TransferPoliciesRegistry transferRegistry,
                                 PartyLookupProvider partyLookup,
                                 CustomerPreferenceProvider preferenceProvider,
-                                DisambiguationEngine disambiguationEngine) {
+                                DisambiguationEngine disambiguationEngine,
+                                LevelDeterminationEngine levelDeterminationEngine) {
         this.engine = engine;
         this.sessionRepo = sessionRepo;
         this.rulesRegistry = rulesRegistry;
@@ -978,17 +1064,25 @@ public class AuthenticateService {
         this.partyLookup = partyLookup;
         this.preferenceProvider = preferenceProvider;
         this.disambiguationEngine = disambiguationEngine;
+        this.levelDeterminationEngine = levelDeterminationEngine;
     }
 
     public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
+
+        // Brands without levelDetermination still need a caller-supplied target level.
+        if (config.getLevelDetermination() == null && req.getTargetLevel() == null) {
+            throw new IllegalArgumentException(
+                "targetLevel is required for brand " + req.getBrandId()
+                + " because it does not define levelDetermination rules");
+        }
 
         IvrSession session = new IvrSession();
         session.setSessionId(UUID.randomUUID().toString());
         session.setBrandId(req.getBrandId());
         session.setCallerId(req.getCallerId());
         session.setCurrentLevel(AuthLevel.NONE);
-        session.setTargetLevel(req.getTargetLevel());
+        session.setTargetLevel(req.getTargetLevel() != null ? req.getTargetLevel() : AuthLevel.NONE);
         session.setStatus(SessionStatus.COLLECTING);
         session.setCreatedAt(Instant.now());
         session.setLastActivityAt(Instant.now());
@@ -1026,18 +1120,53 @@ public class AuthenticateService {
     }
 
     /**
-     * Consumes any initialTokens when appropriate, otherwise hands off to the engine.
-     * Standard brands always consume initialTokens; identification-only brands consume
-     * them only when a NONE-level rule is defined.
+     * Applies the brand's levelDetermination rules (if any) — deriving the session target
+     * level from call conditions, clamped to the customer's maxAllowedLevel preference and
+     * recorded as a processingLog entry — then consumes any initialTokens when appropriate,
+     * otherwise hands off to the engine.
      */
     private AuthenticateResponse proceedAfterPartyResolved(IvrSession session, BrandAuthConfig config,
                                                            StartAuthenticateRequest req) {
+        List<ProcessingEvent> procLog = new ArrayList<>();
+        applyLevelDetermination(session, config, procLog);
+
         boolean consumeInitialTokens = config.isIdentificationOnly()
             ? hasNoneRule(config) && hasInitialTokens(req)
             : hasInitialTokens(req);
-        return consumeInitialTokens
+        AuthenticateResponse response = consumeInitialTokens
             ? processInitialTokens(session, config, req.getInitialTokens())
             : engine.onPartyResolved(session, config);
+
+        if (!procLog.isEmpty()) {
+            response.setProcessingLog(procLog);   // "Level determined: X — reason"
+        }
+        return response;
+    }
+
+    /**
+     * Evaluates levelDetermination rules for the resolved party, overrides the session's
+     * target level, clamps to the preference cap, persists, and logs the reason.
+     * No-op for identification-only brands and brands without a levelDetermination section.
+     */
+    private void applyLevelDetermination(IvrSession session, BrandAuthConfig config,
+                                         List<ProcessingEvent> procLog) {
+        if (config.isIdentificationOnly() || config.getLevelDetermination() == null) return;
+
+        DeterminationResult determination =
+            levelDeterminationEngine.determine(config, session.getMatchedParty());
+        if (determination == null) return;
+
+        AuthLevel derived = determination.getLevel();
+        String note = "";
+        CustomerPreference prefs = session.getCustomerPreferences();
+        if (prefs != null && prefs.getMaxAllowedLevel() != null
+                && derived.isHigherThan(prefs.getMaxAllowedLevel())) {
+            derived = prefs.getMaxAllowedLevel();
+            note = " (capped by customer preference max " + prefs.getMaxAllowedLevel() + ")";
+        }
+        session.setTargetLevel(derived);
+        sessionRepo.save(session);
+        add(procLog, "INFO", "Level determined: " + derived + " — " + determination.getReason() + note);
     }
 
     public AuthenticateResponse transfer(CallTransferRequest req) {
@@ -1506,13 +1635,18 @@ com.yourco.ivr
 │   ├── Party.java                          # 8 fields + additionalAttributes
 │   ├── CustomerPreference.java             # blockedTokens + maxAllowedLevel
 │   └── config/
-│       ├── BrandAuthConfig.java            # brandId + levelRules + identificationOnly
+│       ├── BrandAuthConfig.java            # brandId + levelRules + identificationOnly + levelDetermination
 │       ├── LevelRule.java                  # paths + maxRetriesPerToken + tokenRetryLimits + lockoutSeconds
 │       ├── TokenPath.java                  # pathIndex + description + requiredTokens + backupTokens
+│       ├── LevelDeterminationConfig.java   # rules + defaultLevel (declarative level selection)
+│       ├── LevelSelectionRule.java         # description + level + conditions
+│       ├── LevelCondition.java             # type + key + value
+│       ├── LevelConditionType.java         # ANI_MATCHED | PARTY_ACTIVE | PRIMARY_ANI | PARTY_ATTRIBUTE
 │       ├── TransferPolicy.java
 │       └── TransferPoliciesConfig.java
 ├── engine
 │   ├── AuthEngine.java                     # orchestrator; 8 collaborator deps
+│   ├── LevelDeterminationEngine.java       # evaluates levelDetermination rules → DeterminationResult(level, reason)
 │   ├── AttemptCoordinator.java             # retry/lockout coordination
 │   ├── DisambiguationEngine.java           # always-on, 3-round max
 │   ├── DisambiguationRule.java             # interface

@@ -292,6 +292,24 @@ class IdentificationOnlyIntegrationTest {
     }
 
     @Test
+    void identificationOnlyStartWithoutTargetLevelIsAccepted() {
+        // The admin console never sends a target level — identification-only brands must
+        // not require one (their target is always NONE).
+        when(partyLookup.lookupByAni("8880008888"))
+            .thenReturn(Collections.singletonList(party("P-800", "888000")));
+
+        AuthenticateRequest start = new AuthenticateRequest();
+        start.setBrandId("ID_ONLY_BRAND");
+        start.setCallerId("8880008888");
+        // no targetLevel
+
+        ResponseEntity<AuthenticateResponse> resp = post(start);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(body(resp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(resp).getNextRequiredToken()).isEqualTo(TokenType.ACCOUNT_NUMBER);
+    }
+
+    @Test
     void validationAcceptsIdentificationOnlyBrandWithoutLevelRules() {
         BrandAuthConfig config = new BrandAuthConfig();
         config.setBrandId("ID_ONLY_VALIDATION");

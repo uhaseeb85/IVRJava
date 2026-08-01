@@ -6,7 +6,6 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Data;
 
 import javax.validation.constraints.NotBlank;
-import javax.validation.constraints.NotNull;
 import java.util.Map;
 
 @Data
@@ -20,8 +19,7 @@ public class StartAuthenticateRequest {
     @NotBlank
     private String callerId;
 
-    @Schema(description = "Target authentication level to reach", example = "STANDARD")
-    @NotNull
+    @Schema(description = "Optional target authentication level. Ignored when the brand defines a levelDetermination section (the level is derived from call conditions); used as-is otherwise (legacy behavior).", example = "STANDARD")
     private AuthLevel targetLevel;
 
     @Schema(description = "Optional pre-collected token values submitted at session start (e.g. caller already entered account number before session began)")

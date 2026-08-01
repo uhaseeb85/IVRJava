@@ -26,5 +26,8 @@
       } ],
       "maxRetriesPerToken" : 3
     }
+  },
+  "levelDetermination" : {
+    "defaultLevel" : "STANDARD"
   }
 }

@@ -2,12 +2,15 @@ package com.yourco.ivr.service;
 
 import com.yourco.ivr.api.dto.AuthenticateResponse;
 import com.yourco.ivr.api.dto.CallTransferRequest;
+import com.yourco.ivr.api.dto.ProcessingEvent;
 import com.yourco.ivr.api.dto.StartAuthenticateRequest;
 import com.yourco.ivr.domain.*;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
 import com.yourco.ivr.domain.config.TransferPolicy;
 import com.yourco.ivr.engine.AuthEngine;
 import com.yourco.ivr.engine.DisambiguationEngine;
+import com.yourco.ivr.engine.LevelDeterminationEngine;
+import com.yourco.ivr.engine.LevelDeterminationEngine.DeterminationResult;
 import com.yourco.ivr.exception.TransferNotAllowedException;
 import com.yourco.ivr.exception.UnknownCallerException;
 import com.yourco.ivr.partylookup.PartyLookupProvider;
@@ -22,6 +25,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
+import static com.yourco.ivr.engine.response.ProcessingLog.add;
 
 /**
  * Application-layer orchestrator for the IVR authentication lifecycle.
@@ -52,12 +57,14 @@ public class AuthenticateService {
     private final PartyLookupProvider partyLookup;
     private final CustomerPreferenceProvider preferenceProvider;
     private final DisambiguationEngine disambiguationEngine;
+    private final LevelDeterminationEngine levelDeterminationEngine;
     public AuthenticateService(AuthEngine engine, SessionRepository sessionRepo,
                                BrandRulesRegistry rulesRegistry,
                                TransferPoliciesRegistry transferRegistry,
                                PartyLookupProvider partyLookup,
                                CustomerPreferenceProvider preferenceProvider,
-                               DisambiguationEngine disambiguationEngine) {
+                               DisambiguationEngine disambiguationEngine,
+                               LevelDeterminationEngine levelDeterminationEngine) {
         this.engine = engine;
         this.sessionRepo = sessionRepo;
         this.rulesRegistry = rulesRegistry;
@@ -65,6 +72,7 @@ public class AuthenticateService {
         this.partyLookup = partyLookup;
         this.preferenceProvider = preferenceProvider;
         this.disambiguationEngine = disambiguationEngine;
+        this.levelDeterminationEngine = levelDeterminationEngine;
     }
 
     /**
@@ -86,13 +94,22 @@ public class AuthenticateService {
     public AuthenticateResponse start(StartAuthenticateRequest req) {
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
 
+        // Brands without levelDetermination still need a caller-supplied target level.
+        // Identification-only brands are exempt: their target is always NONE and clients
+        // (e.g. the admin console) never send a target level for them.
+        if (!config.isIdentificationOnly()
+                && config.getLevelDetermination() == null && req.getTargetLevel() == null) {
+            throw new IllegalArgumentException("targetLevel is required for brand "
+                + req.getBrandId() + " because it does not define levelDetermination rules");
+        }
+
         // ── Session creation ─────────────────────────────────────────────────
         IvrSession session = new IvrSession();
         session.setSessionId(UUID.randomUUID().toString());
         session.setBrandId(req.getBrandId());
         session.setCallerId(req.getCallerId());
         session.setCurrentLevel(AuthLevel.NONE);
-        session.setTargetLevel(req.getTargetLevel());
+        session.setTargetLevel(req.getTargetLevel() != null ? req.getTargetLevel() : AuthLevel.NONE);
         session.setStatus(SessionStatus.COLLECTING);
         session.setCreatedAt(Instant.now());
         session.setLastActivityAt(Instant.now());
@@ -139,13 +156,58 @@ public class AuthenticateService {
      */
     private AuthenticateResponse proceedAfterPartyResolved(IvrSession session, BrandAuthConfig config,
                                                            StartAuthenticateRequest req) {
+        List<ProcessingEvent> procLog = new ArrayList<>();
+        applyLevelDetermination(session, config, procLog);
+
         boolean consumeInitialTokens = config.isIdentificationOnly()
             ? hasNoneRule(config) && hasInitialTokens(req)
             : hasInitialTokens(req);
 
-        return consumeInitialTokens
+        AuthenticateResponse response = consumeInitialTokens
             ? processInitialTokens(session, config, req.getInitialTokens())
             : engine.onPartyResolved(session, config);
+
+        if (!procLog.isEmpty()) {
+            response.setProcessingLog(procLog);
+        }
+        return response;
+    }
+
+    /**
+     * Applies the brand's declarative level-determination rules once the caller's party is
+     * resolved. Overrides the session's target level (and any caller-supplied one) with the
+     * derived level, clamped to the customer's {@code maxAllowedLevel} preference, and records
+     * a human-readable reason in the processing log. No-op for identification-only brands
+     * (always NONE) and for brands without a {@code levelDetermination} section (legacy
+     * caller-supplied target level is kept).
+     */
+    private void applyLevelDetermination(IvrSession session, BrandAuthConfig config,
+                                         List<ProcessingEvent> procLog) {
+        if (config.isIdentificationOnly() || config.getLevelDetermination() == null) {
+            return;
+        }
+
+        DeterminationResult determination =
+            levelDeterminationEngine.determine(config, session.getMatchedParty());
+        if (determination == null) {
+            return;
+        }
+
+        AuthLevel derived = determination.getLevel();
+        String note = "";
+        CustomerPreference prefs = session.getCustomerPreferences();
+        if (prefs != null && prefs.getMaxAllowedLevel() != null
+                && derived.isHigherThan(prefs.getMaxAllowedLevel())) {
+            derived = prefs.getMaxAllowedLevel();
+            // Deliberately no level value here — the customer's preference cap is
+            // caller-visible via the processing log and should not reveal it.
+            note = " (capped by customer preference)";
+        }
+
+        session.setTargetLevel(derived);
+        sessionRepo.save(session);
+        add(procLog, "INFO",
+            "Level determined: " + derived + " — " + determination.getReason() + note);
     }
 
     /** True if the brand defines NONE-level rules (identification-token collection). */
@@ -206,6 +268,9 @@ public class AuthenticateService {
             throw new TransferNotAllowedException(
                 "Source system is disabled: " + req.getSourceSystemId());
         }
+        if (req.getTargetLevel() == null) {
+            throw new IllegalArgumentException("targetLevel is required for a call transfer");
+        }
 
         // 2. Get target brand config
         BrandAuthConfig config = rulesRegistry.get(req.getBrandId());
@@ -263,8 +328,8 @@ public class AuthenticateService {
      *
      * @throws IllegalArgumentException if {@code targetLevel} is not higher than the current level
      */
-    public AuthenticateResponse escalate(String sessionId, AuthLevel targetLevel) {
-        return engine.escalate(sessionId, targetLevel);
+    public AuthenticateResponse escalate(String sessionId, AuthLevel targetLevel, String callerId) {
+        return engine.escalate(sessionId, targetLevel, callerId);
     }
 
     /**

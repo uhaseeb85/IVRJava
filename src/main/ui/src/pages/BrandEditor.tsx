@@ -300,6 +300,9 @@ export default function BrandEditor({ brand, onBack }: { brand: { brandId: strin
     getBrand<BrandConfig>(brand.brandId)
       .then(c => {
         c._existing = true
+        // Brands may legitimately omit levelRules (e.g. identification-only brands
+        // with no NONE rule) — the editor always works with a map.
+        c.levelRules = c.levelRules ?? {}
         setCfg(c)
       })
       .catch(() => setToast({ msg: 'Failed to load brand config', ok: false }))

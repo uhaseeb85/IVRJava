@@ -67,6 +67,89 @@ class IvrAuthIntegrationTest {
         assertThat(body(tokenResp).getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
     }
 
+    /**
+     * Regression: escalating an AUTHENTICATED session must collect the missing tokens for
+     * the higher level, not short-circuit (the old guard treated AUTHENTICATED as terminal).
+     * STANDARD (account + PIN) → escalate ELEVATED → must prompt for OTP → completes at ELEVATED.
+     */
+    @Test
+    void testEscalationAfterAuthenticationPromptsForMissingTokens() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5551234567");
+        start.setTargetLevel(AuthLevel.STANDARD);
+
+        String sessionId = body(post(start)).getSessionId();
+
+        AuthenticateRequest token = req();
+        token.setSessionId(sessionId);
+        token.setTokenType(TokenType.ACCOUNT_NUMBER);
+        token.setTokenValue("123456789");
+        post(token);
+
+        token.setTokenType(TokenType.PIN);
+        token.setTokenValue("1234");
+        ResponseEntity<AuthenticateResponse> authResp = post(token);
+        assertThat(body(authResp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(authResp).getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
+
+        // Escalate to ELEVATED — ELEVATED path0 = [ACCOUNT_NUMBER, PIN, OTP]; OTP is missing.
+        AuthenticateRequest escalate = req();
+        escalate.setSessionId(sessionId);
+        escalate.setTargetLevel(AuthLevel.ELEVATED);
+
+        ResponseEntity<AuthenticateResponse> escalateResp = post(escalate);
+        assertThat(escalateResp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(body(escalateResp).getStatus()).isEqualTo(SessionStatus.COLLECTING);
+        assertThat(body(escalateResp).getNextRequiredToken()).isEqualTo(TokenType.OTP);
+        assertThat(body(escalateResp).getCurrentLevel()).isEqualTo(AuthLevel.STANDARD);
+
+        // Provide OTP → AUTHENTICATED at ELEVATED.
+        token.setTokenType(TokenType.OTP);
+        token.setTokenValue("123456");
+        ResponseEntity<AuthenticateResponse> finalResp = post(token);
+        assertThat(finalResp.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(body(finalResp).getStatus()).isEqualTo(SessionStatus.AUTHENTICATED);
+        assertThat(body(finalResp).getCurrentLevel()).isEqualTo(AuthLevel.ELEVATED);
+    }
+
+    /**
+     * Escalation must verify caller ownership like token submission does — a request with a
+     * mismatched callerId must be rejected (404) instead of re-opening the victim's session.
+     */
+    @Test
+    void testEscalationWithWrongCallerIsRejected() {
+        AuthenticateRequest start = req();
+        start.setBrandId("BRAND_A");
+        start.setCallerId("5551234567");
+        start.setTargetLevel(AuthLevel.STANDARD);
+        String sessionId = body(post(start)).getSessionId();
+
+        AuthenticateRequest escalate = req();
+        escalate.setSessionId(sessionId);
+        escalate.setTargetLevel(AuthLevel.ELEVATED);
+        escalate.setCallerId("9990000000"); // not the session's caller
+
+        ResponseEntity<AuthenticateResponse> resp = post(escalate);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+    }
+
+    /** A transfer without a targetLevel is a client error (400), not a 500. */
+    @Test
+    void testTransferWithoutTargetLevelIsRejected() {
+        AuthenticateRequest req = req();
+        req.setSourceSystemId("LEGACY_IVR");
+        req.setBrandId("BRAND_A");
+        req.setCallerId("5551234567");
+        req.setCurrentLevel(AuthLevel.BASIC);
+        req.setValidatedTokens(Arrays.asList(TokenType.ACCOUNT_NUMBER));
+        // no targetLevel
+
+        ResponseEntity<String> resp = rest.postForEntity(
+            "/ivr/authenticate", req, String.class);
+        assertThat(resp.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+    }
+
     @Test
     void testBackupTokenFlow() {
         AuthenticateRequest start = req();

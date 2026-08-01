@@ -2,9 +2,14 @@ package com.yourco.ivr.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.yourco.ivr.domain.AuthLevel;
+import com.yourco.ivr.domain.TokenType;
 import com.yourco.ivr.validator.ValidationResult;
 import com.yourco.ivr.domain.config.BrandAuthConfig;
+import com.yourco.ivr.domain.config.LevelCondition;
+import com.yourco.ivr.domain.config.LevelConditionType;
+import com.yourco.ivr.domain.config.LevelDeterminationConfig;
 import com.yourco.ivr.domain.config.LevelRule;
+import com.yourco.ivr.domain.config.LevelSelectionRule;
 import com.yourco.ivr.domain.config.TokenPath;
 import com.yourco.ivr.exception.BrandConfigException;
 import com.yourco.ivr.exception.UnknownBrandException;
@@ -19,9 +24,12 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Service for managing brand configuration files and the in-memory {@link BrandRulesRegistry}.
@@ -187,6 +195,12 @@ public class BrandService {
                 return levelCheck;
             }
         }
+        if (config.getLevelDetermination() != null) {
+            ValidationResult detCheck = validateLevelDetermination(config);
+            if (!detCheck.isValid()) {
+                return detCheck;
+            }
+        }
         return ValidationResult.ok();
     }
 
@@ -287,6 +301,89 @@ public class BrandService {
                         "Path " + i + " in level " + entry.getKey() + " must have required tokens");
                 }
             }
+        }
+
+        // Monotonicity: each level above NONE must require at least one token that is not
+        // required by any lower level. Otherwise a caller could reach a higher level with
+        // zero new factors (e.g. escalate to a level whose token set is a subset of the
+        // current level's) — a free privilege promotion.
+        Set<TokenType> requiredByLower = new HashSet<>();
+        List<AuthLevel> ordered = new ArrayList<>(levelRules.keySet());
+        ordered.sort(Comparator.comparingInt(AuthLevel::getRank));
+        for (AuthLevel level : ordered) {
+            Set<TokenType> levelTokens = new HashSet<>();
+            for (TokenPath path : levelRules.get(level).getPaths()) {
+                levelTokens.addAll(path.getRequiredTokens());
+            }
+            if (level.getRank() > 0
+                    && levelTokens.stream().noneMatch(t -> !requiredByLower.contains(t))) {
+                return ValidationResult.error("Level " + level
+                    + " must require at least one token not already required by a lower level");
+            }
+            requiredByLower.addAll(levelTokens);
+        }
+        return ValidationResult.ok();
+    }
+
+    /**
+     * Validates the {@code levelDetermination} section: it must define a default level; every
+     * selected level (rule levels and default) must exist in the brand's {@code levelRules} so
+     * the engine can resolve token paths for it; every condition must declare a supported type,
+     * and {@code PARTY_ATTRIBUTE} conditions must declare both a key and a value (a missing
+     * value would silently match every party lacking the attribute). Null entries are rejected
+     * so a malformed rule list fails at config time instead of NPEing the engine.
+     */
+    private ValidationResult validateLevelDetermination(BrandAuthConfig config) {
+        LevelDeterminationConfig det = config.getLevelDetermination();
+        Map<AuthLevel, LevelRule> levelRules = config.getLevelRules();
+
+        if (det.getDefaultLevel() == null) {
+            return ValidationResult.error(
+                "levelDetermination must define a defaultLevel (used when no rule matches)");
+        }
+
+        if (det.getRules() != null) {
+            for (int i = 0; i < det.getRules().size(); i++) {
+                LevelSelectionRule rule = det.getRules().get(i);
+                if (rule == null) {
+                    return ValidationResult.error(
+                        "levelDetermination rule " + i + " must not be null");
+                }
+                if (rule.getLevel() == null) {
+                    return ValidationResult.error(
+                        "levelDetermination rule " + i + " must define a level");
+                }
+                if (levelRules == null || !levelRules.containsKey(rule.getLevel())) {
+                    return ValidationResult.error("levelDetermination rule " + i
+                        + " selects level " + rule.getLevel()
+                        + " which is not defined in levelRules");
+                }
+                if (rule.getConditions() != null) {
+                    for (int j = 0; j < rule.getConditions().size(); j++) {
+                        LevelCondition cond = rule.getConditions().get(j);
+                        if (cond == null) {
+                            return ValidationResult.error("levelDetermination rule " + i
+                                + " condition " + j + " must not be null");
+                        }
+                        if (cond.getType() == null) {
+                            return ValidationResult.error("levelDetermination rule " + i
+                                + " condition " + j + " must define a type");
+                        }
+                        if (cond.getType() == LevelConditionType.PARTY_ATTRIBUTE
+                                && (cond.getKey() == null || cond.getKey().trim().isEmpty()
+                                    || cond.getValue() == null || cond.getValue().trim().isEmpty())) {
+                            return ValidationResult.error("levelDetermination rule " + i
+                                + " condition " + j
+                                + " (PARTY_ATTRIBUTE) must define both a key and a value");
+                        }
+                    }
+                }
+            }
+        }
+
+        if (levelRules == null || !levelRules.containsKey(det.getDefaultLevel())) {
+            return ValidationResult.error("levelDetermination defaultLevel "
+                + det.getDefaultLevel() + " is not defined in levelRules");
         }
         return ValidationResult.ok();
     }

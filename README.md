@@ -209,6 +209,15 @@ curl -X POST http://localhost:8081/ivr/authenticate \
   -d '{"sessionId":"<id>","targetLevel":"ELEVATED"}'
 ```
 
+> **`targetLevel` is optional on start.** Brands that define a [`levelDetermination`](#declarative-level-determination) section derive the level from call conditions and ignore any caller-supplied value. For such a brand you can start without it:
+>
+> ```bash
+> curl -X POST http://localhost:8081/ivr/authenticate \
+>   -H "Content-Type: application/json" \
+>   -d '{"brandId":"DEMO_BRAND","callerId":"5550000123"}'
+> # → targetLevel: "ELEVATED", processingLog: "Level determined: ELEVATED — rule \"Premium segment customers\""
+> ```
+
 ### Initial tokens at session start
 
 Clients can submit pre-collected tokens when creating a session:
@@ -267,6 +276,15 @@ BrandAuthConfig
 │       ├── maxRetriesPerToken       # failed attempts per slot before fallback
 │       ├── tokenRetryLimits         # optional per-token retry overrides
 │       └── lockoutSeconds           # lockout duration after exhausting all paths
+├── levelDetermination              # optional: derive the target level from call conditions
+│   ├── rules: List<LevelSelectionRule>   # evaluated in order; first match wins
+│   │   ├── level                   # AuthLevel selected when the rule matches
+│   │   ├── description             # human label shown in the processing log
+│   │   └── conditions: List<LevelCondition>  # all must pass; empty = always match
+│   │       ├── type                # ANI_MATCHED | PARTY_ACTIVE | PRIMARY_ANI | PARTY_ATTRIBUTE
+│   │       ├── key                 # required for PARTY_ATTRIBUTE (party attribute map key)
+│   │       └── value               # expected value (PARTY_ATTRIBUTE)
+│   └── defaultLevel                # used when no rule matches
 └── (disambiguation is always-on and not configurable — fixed 3-round limit +
      EXCLUDE_INACTIVE / PREFER_PRIMARY_ANI rule chain, applied to every brand)
 ```
@@ -281,6 +299,7 @@ BrandAuthConfig
 | `maxRetriesPerToken` | Default failures allowed per required-token slot before switching to the next path (or locking if all paths are exhausted). |
 | `tokenRetryLimits` | *(optional)* Per-token retry overrides keyed by `TokenType`; take precedence over `maxRetriesPerToken` for that token. |
 | `lockoutSeconds` | How long the session stays locked (status `REDIRECT_TO_AGENT`) after all paths at that level fail. |
+| `levelDetermination` | *(optional)* Declarative rules that derive the session's target level from call conditions instead of a caller-supplied `targetLevel`. See [Declarative level determination](#declarative-level-determination) below. |
 
 #### Brand A (full example)
 
@@ -315,9 +334,65 @@ BrandAuthConfig
       ],
       "maxRetriesPerToken": 2
     }
+  },
+  "levelDetermination": {
+    "rules": [
+      { "description": "Premium segment customers", "level": "ELEVATED",
+        "conditions": [ { "type": "PARTY_ATTRIBUTE", "key": "segment", "value": "PREMIUM" } ] },
+      { "description": "Active account holders", "level": "STANDARD",
+        "conditions": [ { "type": "PARTY_ACTIVE" } ] }
+    ],
+    "defaultLevel": "STANDARD"
   }
 }
 ```
+
+> BRAND_A's shipped config (`config/brands/brand_a.json`) includes this `levelDetermination` block, so the admin console can start BRAND_A calls without sending `targetLevel`. Brands that omit the block keep the legacy behavior — `targetLevel` is required on start and used verbatim (the shipped sample brands all define `levelDetermination`; the legacy path is covered by tests via an in-memory brand).
+
+### Declarative level determination
+
+In a real IVR the system — not the caller — decides which auth level the customer must reach, based on call conditions. Brands can encode that decision with a `levelDetermination` section; the engine then evaluates it once the caller's party is resolved (after ANI lookup / disambiguation) and **overrides any caller-supplied `targetLevel`**. The chosen level and the matched rule are reported in the start response's `processingLog` (e.g. `Level determined: ELEVATED — rule "Premium segment customers"`).
+
+```json
+{
+  "brandId": "DEMO_BRAND",
+  "levelRules": { "BASIC": { "paths": [...] }, "STANDARD": { "paths": [...] }, "ELEVATED": { "paths": [...] } },
+  "levelDetermination": {
+    "rules": [
+      {
+        "description": "Premium segment customers",
+        "level": "ELEVATED",
+        "conditions": [ { "type": "PARTY_ATTRIBUTE", "key": "segment", "value": "PREMIUM" } ]
+      },
+      {
+        "description": "Active account holders",
+        "level": "STANDARD",
+        "conditions": [ { "type": "PARTY_ACTIVE" } ]
+      }
+    ],
+    "defaultLevel": "BASIC"
+  }
+}
+```
+
+| Condition type | Passes when |
+|---|---|
+| `ANI_MATCHED` | The caller's ANI resolved to at least one party (always true once party lookup succeeded). |
+| `PARTY_ACTIVE` | The matched party's account is active. |
+| `PRIMARY_ANI` | The caller's number is the party's primary ANI. |
+| `PARTY_ATTRIBUTE` | The party's `additionalAttributes` map contains `key` with the exact `value` (e.g. `segment=PREMIUM`). |
+
+Semantics:
+
+- **Order matters** — rules are evaluated top to bottom; the first rule whose conditions **all** pass selects the level.
+- **Catch-all rule** — a rule with an empty `conditions` list always matches.
+- **Fallback** — if no rule matches, `defaultLevel` is used.
+- **Preference cap** — the derived level is clamped to the customer's `maxAllowedLevel` preference (same guard as escalation).
+- **Identification-only brands** always stay at `NONE`; `levelDetermination` is ignored there.
+- **Backward compatible** — brands *without* `levelDetermination` keep using the caller-supplied `targetLevel` exactly as before. For those brands `targetLevel` is still required in the start request; for brands with `levelDetermination` it is optional and ignored.
+- Validation rejects rules whose `level` (or `defaultLevel`) is not defined in `levelRules`, unknown condition types, and `PARTY_ATTRIBUTE` conditions without a `key`.
+
+A ready-to-run example lives in [`config/brands/determination_demo.json`](config/brands/determination_demo.json) (`DEMO_BRAND`). In the Admin Console Test Console, the level chooser is gone: pick a brand and a caller, and the sim shows the system-derived level (try caller `5550000123` "Premium caller" → `ELEVATED`, or `5550000999` "Inactive caller" → `BASIC`).
 
 ### Built-in token types
 

@@ -47,4 +47,15 @@ public class BrandAuthConfig {
      * Defaults to {@code false}.
      */
     private boolean identificationOnly;
+
+    /**
+     * Optional declarative rules that derive the session's target auth level from call
+     * conditions (ANI match, party attributes, ...) instead of accepting a caller-supplied
+     * {@code targetLevel}. Evaluated once the caller's party is resolved; the derived level
+     * replaces the request's target level. Brands that omit this section keep the legacy
+     * behavior (caller-supplied target level used as-is).
+     *
+     * @see LevelDeterminationConfig
+     */
+    private LevelDeterminationConfig levelDetermination;
 }

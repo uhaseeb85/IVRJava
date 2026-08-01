@@ -26,15 +26,6 @@ export const TOKEN_DEFAULTS: Record<string, string> = {
   VOICE_PRINT: 'voiceprint-sample',
 }
 
-// Plain-language description of what each access level lets a caller do.
-export const LEVEL_BLURB: Record<string, string> = {
-  NONE: 'Not yet verified',
-  BASIC: 'Check balance & basic account info',
-  STANDARD: 'Make payments & routine account changes',
-  ELEVATED: 'Transfers & sensitive changes',
-  ADMIN: 'Full account control',
-}
-
 // Human-readable name for each token, used in spoken-style prompts and labels.
 const TOKEN_LABEL: Record<string, string> = {
   ACCOUNT_NUMBER: 'account number',
@@ -47,11 +38,14 @@ const TOKEN_LABEL: Record<string, string> = {
 }
 
 // A few sample caller numbers. The stub party lookup accepts ANY number, so
-// these are just convenient starting points.
+// these are just convenient starting points. The last two resolve to special
+// stub parties (PREMIUM / inactive) that exercise levelDetermination rules.
 export const SAMPLE_CALLERS: { ani: string; label: string }[] = [
   { ani: '5551234567', label: 'Standard caller' },
   { ani: '5557654321', label: 'Backup-token caller' },
   { ani: '5551112222', label: 'Fallback-path caller' },
+  { ani: '5550000123', label: 'Premium caller' },
+  { ani: '5550000999', label: 'Inactive caller' },
 ]
 
 export function tokenLabel(t?: string | null): string {

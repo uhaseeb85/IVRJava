@@ -42,5 +42,23 @@
       } ],
       "maxRetriesPerToken" : 2
     }
+  },
+  "levelDetermination" : {
+    "rules" : [ {
+      "description" : "Premium segment customers",
+      "level" : "ELEVATED",
+      "conditions" : [ {
+        "type" : "PARTY_ATTRIBUTE",
+        "key" : "segment",
+        "value" : "PREMIUM"
+      } ]
+    }, {
+      "description" : "Active account holders",
+      "level" : "STANDARD",
+      "conditions" : [ {
+        "type" : "PARTY_ACTIVE"
+      } ]
+    } ],
+    "defaultLevel" : "STANDARD"
   }
 }
